@@ -92,6 +92,61 @@ pub struct InProcessNli {
     entail_index: usize,
 }
 
+/// Resolve the ONNX model file inside `model_dir`:
+///  - if `model.onnx` exists → use it (canonical, back-compat, today's default build);
+///  - else if EXACTLY ONE `*.onnx` file exists → use it (e.g. a lone `model.fp16.onnx`, the
+///    recommended fp16 download — no rename, no `--dtype` flag needed);
+///  - else → `Err` (none found, or 2+ non-canonical candidates — the error names them so the user
+///    knows to rename the one they want to `model.onnx`).
+///
+/// Pure and side-effect-free apart from the directory read, so it's unit-testable against temp
+/// dirs with no model/session involved. Extension match is case-insensitive; only regular files
+/// are considered (a directory named e.g. `model.onnx/` is not a candidate).
+fn resolve_model_file(model_dir: &Path) -> anyhow::Result<PathBuf> {
+    let canonical = model_dir.join("model.onnx");
+    if canonical.is_file() {
+        return Ok(canonical);
+    }
+
+    let mut candidates = Vec::new();
+    let entries = std::fs::read_dir(model_dir)
+        .map_err(|e| anyhow::anyhow!("reading model dir ({}): {e}", model_dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            anyhow::anyhow!("reading model dir entry ({}): {e}", model_dir.display())
+        })?;
+        let path = entry.path();
+        let is_onnx = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("onnx"));
+        if is_onnx && path.is_file() {
+            candidates.push(path);
+        }
+    }
+
+    match candidates.len() {
+        0 => anyhow::bail!("no .onnx file in {}", model_dir.display()),
+        1 => Ok(candidates.remove(0)),
+        _ => {
+            candidates.sort();
+            let names: Vec<String> = candidates
+                .iter()
+                .map(|p| {
+                    p.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| p.display().to_string())
+                })
+                .collect();
+            anyhow::bail!(
+                "multiple .onnx candidates, none named model.onnx: {} — rename the one you want \
+                 to model.onnx",
+                names.join(", ")
+            )
+        }
+    }
+}
+
 impl InProcessNli {
     /// Load the model + tokenizer from `model_dir`. `entail_index` is the softmax index of the
     /// entailment class. `providers` is the ordered list of runtime execution-provider names
@@ -150,7 +205,7 @@ impl InProcessNli {
             .map_err(|e| anyhow::anyhow!("tokenizer truncation config: {e}"))?;
         tokenizer.with_padding(None);
 
-        let model_path = model_dir.join("model.onnx");
+        let model_path = resolve_model_file(model_dir)?;
         let eps = execution_provider_dispatch(providers);
         // ort's `SessionBuilder`-typed error (`ort::Error<SessionBuilder>`) carries a
         // `NonNull<OrtSessionOptions>` and is therefore NOT `Send + Sync`, so `?` cannot convert it
@@ -612,6 +667,67 @@ mod tests {
                 "entail score outside [0,1]: {scores:?}"
             );
         }
+    }
+
+    // ---- resolve_model_file: pure, temp dirs, no model --------------------------------------
+
+    #[test]
+    fn resolve_model_file_only_canonical_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let onnx = dir.path().join("model.onnx");
+        std::fs::write(&onnx, b"").expect("write model.onnx");
+
+        let resolved = resolve_model_file(dir.path()).expect("should resolve model.onnx");
+        assert_eq!(resolved, onnx);
+    }
+
+    #[test]
+    fn resolve_model_file_only_lone_noncanonical_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fp16 = dir.path().join("model.fp16.onnx");
+        std::fs::write(&fp16, b"").expect("write model.fp16.onnx");
+
+        let resolved = resolve_model_file(dir.path()).expect("should resolve the lone .onnx");
+        assert_eq!(resolved, fp16);
+    }
+
+    #[test]
+    fn resolve_model_file_canonical_wins_when_both_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dir.path().join("model.onnx");
+        let fp16 = dir.path().join("model.fp16.onnx");
+        std::fs::write(&canonical, b"").expect("write model.onnx");
+        std::fs::write(&fp16, b"").expect("write model.fp16.onnx");
+
+        let resolved = resolve_model_file(dir.path()).expect("should resolve to model.onnx");
+        assert_eq!(resolved, canonical);
+    }
+
+    #[test]
+    fn resolve_model_file_none_present_errs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("tokenizer.json"), b"").expect("write tokenizer.json");
+
+        let err = resolve_model_file(dir.path()).expect_err("no .onnx should error");
+        assert!(
+            err.to_string().contains("no .onnx"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_model_file_two_noncanonical_candidates_errs_naming_both() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("model.fp16.onnx"), b"").expect("write model.fp16.onnx");
+        std::fs::write(dir.path().join("model.int8.onnx"), b"").expect("write model.int8.onnx");
+
+        let err =
+            resolve_model_file(dir.path()).expect_err("ambiguous non-canonical set should error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("model.fp16.onnx") && msg.contains("model.int8.onnx"),
+            "error should name both candidates: {msg}"
+        );
     }
 
     // ---- plan_batches: pure, no model -------------------------------------------------------
