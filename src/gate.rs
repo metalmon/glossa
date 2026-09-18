@@ -3,7 +3,7 @@ pub mod config;
 pub mod df;
 pub mod df_cache;
 pub mod nli;
-#[cfg(feature = "nli")]
+#[cfg(any(feature = "nli", feature = "nli-dynamic"))]
 pub mod nli_engine;
 pub mod score;
 pub mod token;
@@ -53,9 +53,10 @@ pub fn verify_outcome(
 /// `scorer = "in_process"` + feature `nli` compiled in + `model_dir` set => a real `InProcessNli`;
 /// any load error (bad path, corrupt export, missing ort runtime) is logged and downgraded to
 /// `None` rather than propagated, so a broken model directory never takes the gate down — it just
-/// falls back to AC-only. With the `nli` feature off this is the stub below, so `verify_outcome`'s
-/// behaviour is byte-for-byte unchanged from before this scorer existed.
-#[cfg(feature = "nli")]
+/// falls back to AC-only. With neither the `nli` nor `nli-dynamic` feature on this is the stub
+/// below, so `verify_outcome`'s behaviour is byte-for-byte unchanged from before this scorer
+/// existed.
+#[cfg(any(feature = "nli", feature = "nli-dynamic"))]
 pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
     if cfg.scorer.as_deref() != Some("in_process") {
         return None;
@@ -70,8 +71,9 @@ pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
     }
 }
 
-/// `nli` feature off => no in-process scorer is even compiled; always `None` (AC-only).
-#[cfg(not(feature = "nli"))]
+/// Neither `nli` nor `nli-dynamic` feature on => no in-process scorer is even compiled; always
+/// `None` (AC-only).
+#[cfg(not(any(feature = "nli", feature = "nli-dynamic")))]
 pub fn resolve_scorer(_cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
     None
 }
@@ -238,10 +240,10 @@ mod resolve_scorer_tests {
         assert!(resolve_scorer(&cfg).is_none());
     }
 
-    // With the `nli` feature ON, `scorer = "in_process"` but no `model_dir` must still fail open
-    // rather than panic on the `?` — this is the "configured wrong" fail-open path (vs. simply
-    // unconfigured above).
-    #[cfg(feature = "nli")]
+    // With the `nli`/`nli-dynamic` feature ON, `scorer = "in_process"` but no `model_dir` must
+    // still fail open rather than panic on the `?` — this is the "configured wrong" fail-open path
+    // (vs. simply unconfigured above).
+    #[cfg(any(feature = "nli", feature = "nli-dynamic"))]
     #[test]
     fn in_process_without_model_dir_yields_no_runtime_scorer() {
         let mut cfg = base_cfg();

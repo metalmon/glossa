@@ -48,13 +48,25 @@ nli = ["glossa/nli"]
 # cannot CLI-enable a transitive dependency's feature (`cargo build -p kb-eval --features
 # glossa/nli-cuda` is not valid), so kb-eval carries a DIRECT optional `glossa-nli` dep (below)
 # purely so these features have something local to name. Cargo's feature unification then gives
-# the ONE shared `glossa-nli` instance (the one `glossa` itself depends on) `nli-ort + nli-cuda`,
-# so `glossa`'s `InProcessNli` compiles with CUDA support — without `glossa`'s own Cargo.toml ever
-# carrying a GPU feature (that's what keeps `cargo test -p glossa --all-features` CPU-only). Build
-# with e.g. `cargo build -p kb-eval --features nli-cuda`.
-nli-cuda = ["nli", "dep:glossa-nli", "glossa-nli/nli-cuda"]
+# the ONE shared `glossa-nli` instance (the one `glossa` itself depends on) the union of what's
+# enabled here and via `glossa`'s own feature(s), so `glossa`'s `InProcessNli` compiles against
+# the right linking strategy — without `glossa`'s own Cargo.toml ever carrying a GPU feature
+# (that's what keeps `cargo test -p glossa --all-features` on the self-contained CPU path).
+#
+# `nli-directml`/`nli-coreml` stay on the bundled (self-contained) linking strategy: they pull in
+# `nli` (=> `glossa/nli` => glossa-nli's `nli-ort-bundled`) plus the EP feature.
 nli-directml = ["nli", "dep:glossa-nli", "glossa-nli/nli-directml"]
 nli-coreml = ["nli", "dep:glossa-nli", "glossa-nli/nli-coreml"]
+# `nli-cuda`/`nli-rocm` need the runtime `load-dynamic` linking strategy instead (ort's
+# `download-binaries` archive doesn't ship these providers — validated locally: a
+# `download-binaries` CUDA build silently ran on CPU). They pull in `glossa/nli-dynamic` (glossa's
+# CODE-ONLY path, no linking) rather than `nli`/`glossa/nli`, so the shared glossa-nli instance
+# resolves to `nli-ort + nli-cuda` = `nli-ort-dynamic` (load-dynamic) ONLY — no bundled
+# `download-binaries` pulled in alongside it. Build with e.g.
+# `cargo build -p kb-eval --features nli-cuda` (bring an `onnxruntime-gpu` dll via
+# `ORT_DYLIB_PATH` at runtime).
+nli-cuda = ["glossa/nli-dynamic", "dep:glossa-nli", "glossa-nli/nli-cuda"]
+nli-rocm = ["glossa/nli-dynamic", "dep:glossa-nli", "glossa-nli/nli-rocm"]
 
 [dependencies]
 glossa = { path = ".." }
@@ -64,7 +76,7 @@ glossa-constraint = { path = "../constraint", optional = true }
 # directly (it only ever goes through `glossa::gate`/`resolve_scorer`); Cargo's feature
 # unification is what makes this reach the shared instance glossa itself depends on. See the
 # `nli-cuda` feature comment above for the full mechanism.
-glossa-nli = { path = "../glossa-nli", optional = true }
+glossa-nli = { path = "../glossa-nli", optional = true, default-features = false }
 anyhow = "1"
 regex = "1"
 toml = "1.1"

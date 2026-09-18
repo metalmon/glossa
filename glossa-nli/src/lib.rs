@@ -11,6 +11,22 @@
 #[cfg(all(feature = "nli-ort", feature = "nli-burn-wgpu"))]
 compile_error!("enable exactly ONE of `nli-ort` / `nli-burn-wgpu`, not both");
 
+// Exactly one ORT linking strategy per build (bundled `download-binaries` vs. runtime
+// `load-dynamic`) — see the `[features]` comment in Cargo.toml for the full rationale.
+#[cfg(all(feature = "nli-ort-bundled", feature = "nli-ort-dynamic"))]
+compile_error!("enable exactly one ORT linking strategy: nli-ort-bundled OR nli-ort-dynamic");
+
+// The `nli-ort` engine code needs SOME linking strategy to actually link against ONNX Runtime;
+// building it with neither would surface as a confusing ort-sys link error, so fail fast here
+// with a clear message instead.
+#[cfg(all(
+    feature = "nli-ort",
+    not(any(feature = "nli-ort-bundled", feature = "nli-ort-dynamic"))
+))]
+compile_error!(
+    "feature `nli-ort` needs a linking strategy: enable `nli-ort-bundled` (self-contained CPU/DirectML/CoreML) or `nli-ort-dynamic` (CUDA/ROCm runtime dll)"
+);
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
