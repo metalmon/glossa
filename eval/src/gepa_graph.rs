@@ -402,6 +402,12 @@ fn rollout_one(
     let (score, judge_reason, is_fp) = if errored {
         (0.0, None, false)
     } else {
+        // Same-thread as the rollout above: `run_units_parallel` runs a whole case on one worker,
+        // so the reader<->user_sim turns the loop pushed into the thread-local are drained here and
+        // fed to the judge — it grades the reader's substantive answer, not a closing pleasantry.
+        // Empty when no user_sim gate deflected. Drained unconditionally so the exact-match path
+        // below can't leak a stale buffer onto the next case scheduled on this worker.
+        let reader_dialogue = crate::backend::openai::take_reader_dialogue();
         match &cfg.judge {
             Some(jc) => match crate::judge::judge(
                 &jc.ep,
@@ -413,12 +419,7 @@ fn rollout_one(
                 q.answerable,
                 cfg.credit_abstention,
                 Some(idx),
-                // TODO: training does not feed reader<->user_sim dialogue to the judge — GEPA's
-                // rollout here doesn't run through `run_agent_loop_capturing`'s eval call-site
-                // pairing the way `kbx.rs` does, so there's no same-thread guarantee this could
-                // safely drain. Wire this to `openai::take_reader_dialogue()` if/when a training
-                // rollout on this path can guarantee running on the same thread as this judge call.
-                &[],
+                &reader_dialogue,
             ) {
                 // Keep the judge's reason alongside the score — the reflector surfaces it to the
                 // teacher as WHY this case was wrong (signal B). Dropping it here is what left the
