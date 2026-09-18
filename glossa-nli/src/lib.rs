@@ -69,13 +69,20 @@ struct Inner {
     batch_budget_tokens: usize,
 }
 
+/// `MODEL_CACHE`'s key: `(canonicalized model_dir, providers)`. Factored out of the `static`'s
+/// type (below) to satisfy `clippy::type_complexity`.
+type ModelCacheKey = (PathBuf, Vec<String>);
+
+/// `MODEL_CACHE`'s value type. Factored out alongside `ModelCacheKey` for the same reason.
+type ModelCache = OnceLock<Mutex<HashMap<ModelCacheKey, Arc<Inner>>>>;
+
 /// Process-global load-once cache, keyed by `(canonicalized model_dir, providers)`. Constructing
 /// two `InProcessNli` for the same directory AND the same ordered execution-provider list reuses
 /// one `Inner` (one tokenizer, one ONNX session) instead of building a second one. `providers` is
 /// part of the key (not just `model_dir`) because a different EP set is a different ONNX session
 /// (spec §2.1a) — without this, a second `load` with different EPs would wrongly reuse the first
 /// session's provider set.
-static MODEL_CACHE: OnceLock<Mutex<HashMap<(PathBuf, Vec<String>), Arc<Inner>>>> = OnceLock::new();
+static MODEL_CACHE: ModelCache = OnceLock::new();
 
 /// An in-process NLI scorer. Constructed from a local `model_dir` (`model.onnx` +
 /// `tokenizer.json`) and the entailment class index (from the model's `id2label`, config-pinned
