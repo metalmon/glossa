@@ -517,11 +517,11 @@ fn execution_provider_dispatch(providers: &[String]) -> Vec<ExecutionProviderDis
 }
 
 /// Returns the subset of `providers` that WOULD be registered as GPU execution providers given
-/// the `nli-cuda` / `nli-directml` / `nli-coreml` Cargo features compiled into this build, in the
-/// same relative order as the input; `"cpu"` and unknown names are always dropped (they fall to
-/// ORT's implicit CPU execution provider either way). Pure name-level logic, no `ort`/session
-/// access — both [`execution_provider_dispatch`] (production) and the unit tests below call this
-/// same function, so there is exactly one place the EP-name filter lives.
+/// the `nli-cuda` / `nli-directml` / `nli-coreml` / `nli-rocm` Cargo features compiled into this
+/// build, in the same relative order as the input; `"cpu"` and unknown names are always dropped
+/// (they fall to ORT's implicit CPU execution provider either way). Pure name-level logic, no
+/// `ort`/session access — both [`execution_provider_dispatch`] (production) and the unit tests
+/// below call this same function, so there is exactly one place the EP-name filter lives.
 fn compiled_gpu_providers(providers: &[String]) -> Vec<&'static str> {
     providers
         .iter()
@@ -546,6 +546,10 @@ fn compiled_gpu_name(name: &str) -> Option<&'static str> {
     if name == "coreml" {
         return Some("coreml");
     }
+    #[cfg(feature = "nli-rocm")]
+    if name == "rocm" {
+        return Some("rocm");
+    }
     let _ = name; // reachable when no GPU feature above ran (or matched nothing)
     None // cpu (implicit), unknown, or a feature not compiled in → skip.
 }
@@ -566,6 +570,10 @@ fn dispatch_for_gpu_name(name: &str) -> Option<ExecutionProviderDispatch> {
     #[cfg(feature = "nli-coreml")]
     if name == "coreml" {
         return Some(ort::ep::CoreML::default().build());
+    }
+    #[cfg(feature = "nli-rocm")]
+    if name == "rocm" {
+        return Some(ort::ep::ROCm::default().build());
     }
     let _ = name;
     None // unreachable in practice (name already passed compiled_gpu_providers), but total.
@@ -843,6 +851,22 @@ mod tests {
         assert!(
             out.is_empty(),
             "nli-cuda NOT compiled in: cuda must fall through to CPU, got {out:?}"
+        );
+    }
+
+    /// Mirrors [`compiled_gpu_providers_cuda_gated_by_compiled_feature`] for `"rocm"` /
+    /// `nli-rocm` — same rationale: CI's default-feature build exercises the `#[cfg(not(...))]`
+    /// arm, a local `--features nli-rocm` build exercises the other.
+    #[test]
+    fn compiled_gpu_providers_rocm_gated_by_compiled_feature() {
+        let input = vec!["rocm".to_string(), "cpu".to_string()];
+        let out = compiled_gpu_providers(&input);
+        #[cfg(feature = "nli-rocm")]
+        assert_eq!(out, vec!["rocm"], "nli-rocm compiled in: rocm must survive");
+        #[cfg(not(feature = "nli-rocm"))]
+        assert!(
+            out.is_empty(),
+            "nli-rocm NOT compiled in: rocm must fall through to CPU, got {out:?}"
         );
     }
 

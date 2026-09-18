@@ -54,11 +54,11 @@ pub struct VerifyConfig {
     pub execution_providers: Vec<String>,
 }
 
-/// Execution providers the runtime knows how to register (Plan 3's later task); anything else is
-/// dropped with a warning rather than erroring — fail-open, since a bad/typo'd EP name should never
-/// block the gate from resolving.
-const KNOWN_EXECUTION_PROVIDERS: &[&str] =
-    &["cpu", "cuda", "directml", "coreml", "rocm", "tensorrt"];
+/// Execution providers the runtime actually knows how to register — exactly the EPs `glossa-nli`
+/// has a Cargo feature + dispatch arm for (`nli-cuda`, `nli-directml`, `nli-coreml`, `nli-rocm`)
+/// plus the implicit `"cpu"` fallback. Anything else is dropped with a warning rather than
+/// erroring — fail-open, since a bad/typo'd EP name should never block the gate from resolving.
+const KNOWN_EXECUTION_PROVIDERS: &[&str] = &["cpu", "cuda", "directml", "coreml", "rocm"];
 
 /// Lowercase + trim each entry, drop anything outside [`KNOWN_EXECUTION_PROVIDERS`] (warning, not
 /// error), and default to `["cpu"]` when the result is empty — whether because the input was empty
