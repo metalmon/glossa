@@ -176,7 +176,16 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
 
     let facts = NliFacts {
         mode,
-        feature_built: cfg!(feature = "nli"),
+        // Any kb-eval feature that compiles the NLI engine counts — the GPU builds enable it via
+        // `nli-cuda`/`nli-directml`/... (which route through glossa's `nli-dynamic`), NOT kb-eval's
+        // own `nli`, so checking `nli` alone would misreport a GPU build as "feature not built".
+        feature_built: cfg!(any(
+            feature = "nli",
+            feature = "nli-cuda",
+            feature = "nli-directml",
+            feature = "nli-coreml",
+            feature = "nli-rocm",
+        )),
         scorer: cfg.scorer.clone(),
         model_dir: cfg.model_dir.clone(),
         model_dir_exists,
