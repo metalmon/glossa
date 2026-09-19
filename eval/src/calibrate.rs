@@ -40,6 +40,12 @@ pub struct CalibrateArgs {
     /// Run tag to calibrate on (a directory under `runs/`). Omit to use the most recent run.
     #[arg(long)]
     pub run: Option<String>,
+    /// Calibrate from a `dataset.toml` (a run-free BOOTSTRAP PRIOR) instead of a run: positives =
+    /// answerable golds vs their `source` (or a retrieved proxy), negatives = unanswerable golds +
+    /// hard retrieval distractors. Mutually exclusive with `--run`. Recalibrate on a real run when
+    /// one exists — this prior scores GOLD answers (clean), not the reader's own outputs.
+    #[arg(long, conflicts_with = "run")]
+    pub from_dataset: Option<std::path::PathBuf>,
     /// Which cited-chunk bucket(s) to sweep: `single`, `multi`, or `both`.
     #[arg(long, default_value = "both")]
     pub bucket: String,
@@ -154,6 +160,190 @@ pub fn load_cases(
         });
     }
     pb.finish_and_clear();
+    Ok(out)
+}
+
+/// Where each calibration case came from when built from a dataset (not a run) — printed so the
+/// operator sees what the run-free prior was fit on. Datasets vary: some carry `source`, some carry
+/// `answerable=false` golds, some neither.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct Composition {
+    /// Positive (ShouldServe): answerable gold vs its declared `source` chunk(s).
+    pub pos_source: usize,
+    /// Positive: answerable gold with no `source` → scored vs a retrieved top-1 proxy chunk.
+    pub pos_proxy: usize,
+    /// Negative (ShouldAbstain): an `answerable=false` gold's answer vs the top-retrieved chunk.
+    pub neg_unanswerable: usize,
+    /// Negative: an answerable gold's answer vs a hard retrieval DISTRACTOR (a different document
+    /// than its source, retrieved for the same question).
+    pub neg_mismatch: usize,
+}
+
+impl Composition {
+    pub fn positives(&self) -> usize {
+        self.pos_source + self.pos_proxy
+    }
+    pub fn negatives(&self) -> usize {
+        self.neg_unanswerable + self.neg_mismatch
+    }
+    /// One-line human summary of what the dataset yielded.
+    pub fn summary(&self) -> String {
+        format!(
+            "dataset calibration pool: {} pos ({} source, {} proxy) · {} neg ({} unanswerable, {} mismatch)",
+            self.positives(),
+            self.pos_source,
+            self.pos_proxy,
+            self.negatives(),
+            self.neg_unanswerable,
+            self.neg_mismatch,
+        )
+    }
+    /// Guard: both classes must clear `min` or the swept threshold is meaningless (a single-class or
+    /// tiny pool). Returns a clear error string instead of writing a garbage prior. Pure.
+    pub fn check(&self, min: usize) -> Result<(), String> {
+        if self.positives() < min || self.negatives() < min {
+            return Err(format!(
+                "dataset calibration needs >= {min} positives AND >= {min} negatives, got {} pos / {} neg \
+                 ({}). The dataset is too small or single-class (e.g. no answerable golds, or no \
+                 distractor chunks in the corpus) — calibrate on a real run instead.",
+                self.positives(),
+                self.negatives(),
+                self.summary(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The chunk ref token (`path#ord`) for one search hit — the copy-ready shape `read_chunk_text`
+/// resolves.
+fn hit_ref(h: &glossa::index::store::RankedHit) -> String {
+    format!("{}#{}", h.path, h.ord)
+}
+
+/// Document path of a `path#loc` source ref (strip the `#…` anchor) — used to keep a hard
+/// distractor out of the gold's source DOCUMENT entirely (a genuinely different doc, not just a
+/// different chunk of the same one).
+fn ref_doc(r: &str) -> &str {
+    r.rsplit_once('#').map(|(p, _)| p).unwrap_or(r)
+}
+
+/// Build calibration cases from a `dataset.toml` instead of a run — a run-free BOOTSTRAP PRIOR (see
+/// the design doc). Positives = answerable golds vs their `source` chunk (or a retrieved top-1 proxy
+/// when a gold carries no `source`); negatives = `answerable=false` golds (if any) vs the top hit,
+/// plus a hard retrieval distractor (a different document) for every answerable gold. Each case is
+/// scored with the SAME `score()` (AC) and `nli_score()` (NLI) the run loader uses, so AC/NLI/
+/// combined all calibrate from the dataset. Composition-robust: takes whatever classes the dataset
+/// yields and errors (via [`Composition::check`]) only when a class is too thin.
+///
+/// Gated on `nli` (needs the corpus index for retrieval + the optional NLI scorer). `min_class` is
+/// the per-class floor (production passes a constant; tests pass a small value).
+pub fn load_cases_from_dataset(
+    dataset_path: &std::path::Path,
+    corpus_glossa: &std::path::Path,
+    root: &std::path::Path,
+    min_class: usize,
+) -> anyhow::Result<Vec<Case>> {
+    use glossa::gate::{read_chunk_text, score};
+
+    let df =
+        glossa::gate::df::DfTable::load(&glossa::gate::df::DfTable::sidecar_path(corpus_glossa))
+            .with_context(|| format!("loading df sidecar under {}", corpus_glossa.display()))?;
+    let cfg = VerifyConfig::resolve(corpus_glossa);
+    let rare = cfg.rare_df_frac;
+    let scorer = glossa::gate::resolve_scorer(&cfg);
+    let text = std::fs::read_to_string(dataset_path)
+        .with_context(|| format!("reading dataset {}", dataset_path.display()))?;
+    let golds = crate::dataset_toml::parse_dataset_toml(&text)
+        .with_context(|| format!("parsing dataset {}", dataset_path.display()))?;
+    let idx = glossa::index::store::DocIndex::open_or_create(root)
+        .with_context(|| format!("opening index at {}", root.display()))?;
+
+    const RETRIEVE_K: usize = 8;
+    let retrieve = |q: &str, n: usize| -> Vec<glossa::index::store::RankedHit> {
+        idx.search_filtered(q, n, None, None, None)
+            .unwrap_or_default()
+    };
+    let chunk_text = |token: &str| -> Option<String> { read_chunk_text(corpus_glossa, token).ok() };
+    let mk = |answer: &str, chunks: Vec<String>, cell: Cell| -> Option<Case> {
+        if chunks.is_empty() {
+            return None;
+        }
+        let s = score(answer, &chunks, &df, rare);
+        let nli = scorer
+            .as_deref()
+            .and_then(|sc| glossa::gate::nli::nli_score(answer, &chunks, &df, &cfg, sc));
+        Some(Case {
+            grounding: s.grounding,
+            bucket: s.bucket,
+            cell,
+            nli,
+        })
+    };
+
+    let pb = mk_bar(golds.len() as u64);
+    pb.set_prefix("scoring golds");
+    let mut comp = Composition::default();
+    let mut out = Vec::new();
+    for g in &golds {
+        pb.inc(1);
+        let answer = g.answer.trim();
+        if answer.is_empty() {
+            continue;
+        }
+        if g.answerable {
+            // Positive: gold answer vs its source chunk(s), or a retrieved top-1 proxy.
+            let (chunks, proxy) = if !g.source.is_empty() {
+                (
+                    g.source
+                        .iter()
+                        .filter_map(|r| chunk_text(r))
+                        .collect::<Vec<_>>(),
+                    false,
+                )
+            } else {
+                let top = retrieve(&g.question, 1);
+                (
+                    top.iter()
+                        .filter_map(|h| chunk_text(&hit_ref(h)))
+                        .collect::<Vec<_>>(),
+                    true,
+                )
+            };
+            if let Some(c) = mk(answer, chunks, Cell::ShouldServe) {
+                out.push(c);
+                if proxy {
+                    comp.pos_proxy += 1;
+                } else {
+                    comp.pos_source += 1;
+                }
+            }
+            // Hard-mismatch negative: the best retrieved hit from a DIFFERENT document than any source.
+            let source_docs: Vec<&str> = g.source.iter().map(|r| ref_doc(r)).collect();
+            let distractor = retrieve(&g.question, RETRIEVE_K)
+                .into_iter()
+                .find(|h| !source_docs.contains(&h.path.as_str()))
+                .and_then(|h| chunk_text(&hit_ref(&h)));
+            if let Some(d) = distractor {
+                if let Some(c) = mk(answer, vec![d], Cell::ShouldAbstain) {
+                    out.push(c);
+                    comp.neg_mismatch += 1;
+                }
+            }
+        } else {
+            // Unanswerable negative: the gold's out-of-corpus answer vs the top-retrieved chunk.
+            let top = retrieve(&g.question, 1);
+            let chunks: Vec<String> = top.iter().filter_map(|h| chunk_text(&hit_ref(h))).collect();
+            if let Some(c) = mk(answer, chunks, Cell::ShouldAbstain) {
+                out.push(c);
+                comp.neg_unanswerable += 1;
+            }
+        }
+    }
+    pb.finish_and_clear();
+
+    eprintln!("{}", comp.summary());
+    comp.check(min_class).map_err(|e| anyhow::anyhow!(e))?;
     Ok(out)
 }
 
@@ -713,21 +903,40 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
         crate::lab::AbstentionPolicy::from_opt(lab.tuning.abstention_policy.as_deref())
             .credit_abstention();
 
-    let tag = match &args.run {
-        Some(t) => t.clone(),
-        None => latest_run(&kbx_paths.runs)?,
-    };
-    let run_dir = kbx_paths.runs.join(&tag);
     let corpus_glossa = crate::workspace::glossa_dir(&kbx_paths.root);
 
-    let cases = load_cases(&run_dir, &corpus_glossa, credit_abstention)?;
-
-    // Output dir: `--out` if given, else the run dir under the kbx workspace (`runs_dir` is
-    // already `.glossa/kbx/runs`, excluded from indexing). NEVER the indexed corpus content root.
-    let out_dir = args
-        .out
-        .clone()
-        .unwrap_or_else(|| kbx_paths.runs.join(&tag));
+    // Two case sources: a past run's graded cases (default), or — with `--from-dataset` — a run-free
+    // BOOTSTRAP PRIOR built straight from the dataset (see `load_cases_from_dataset`). The output dir
+    // (`--out` if given) is the run dir for a run, else a `dataset-calibration/` dir under the kbx
+    // workspace (`.glossa/kbx/runs`, excluded from indexing). NEVER the indexed corpus content root.
+    // `label` is the calibration source, shown in the summary/JSON and recorded as provenance in
+    // `ontology.toml` by `write_threshold`.
+    let (cases, out_dir, label) = if let Some(ds) = &args.from_dataset {
+        eprintln!(
+            "calibrating from dataset (run-free PRIOR — scores gold answers, not reader outputs; \
+             recalibrate on a real run when one exists): {}",
+            ds.display()
+        );
+        const MIN_CLASS: usize = 8;
+        let cases = load_cases_from_dataset(ds, &corpus_glossa, &kbx_paths.root, MIN_CLASS)?;
+        let out = args
+            .out
+            .clone()
+            .unwrap_or_else(|| kbx_paths.runs.join("dataset-calibration"));
+        (cases, out, "dataset (run-free prior)".to_string())
+    } else {
+        let tag = match &args.run {
+            Some(t) => t.clone(),
+            None => latest_run(&kbx_paths.runs)?,
+        };
+        let run_dir = kbx_paths.runs.join(&tag);
+        let cases = load_cases(&run_dir, &corpus_glossa, credit_abstention)?;
+        let out = args
+            .out
+            .clone()
+            .unwrap_or_else(|| kbx_paths.runs.join(&tag));
+        (cases, out, format!("run \"{tag}\""))
+    };
     std::fs::create_dir_all(&out_dir)?;
 
     // Keep whichever bucket's threshold this sweep didn't touch as it already is in
@@ -807,7 +1016,7 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
         Some(e) => format!("target error ≤ {:.0}%", e * 100.0),
         None => "no error cap".to_string(),
     };
-    println!("\nCalibration — run \"{tag}\"   ({cap})\n");
+    println!("\nCalibration — {label}   ({cap})\n");
     if summaries.is_empty() {
         println!("  (no eligible cases to calibrate on)");
     } else {
@@ -820,7 +1029,7 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
     std::fs::write(out_dir.join("calibration.svg"), &svg_report)
         .with_context(|| format!("writing {}", out_dir.join("calibration.svg").display()))?;
     let json_doc = serde_json::json!({
-        "run": tag,
+        "run": label,
         "bucket": args.bucket,
         "folds": args.folds,
         "max_error": args.max_error,
@@ -880,7 +1089,7 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
         write_threshold(
             &corpus_glossa,
             &sel,
-            &tag,
+            &label,
             args.max_error,
             answered_pct,
             error_pct,
@@ -905,6 +1114,30 @@ mod tests {
     use super::{load_cases, Cell};
     use crate::judge::Verdict;
     use crate::report::{write_case, CaseResult};
+
+    /// `Composition::check` — the dataset-calibration guard. Both classes must clear the floor;
+    /// mismatch-only negatives (a dataset with NO unanswerable golds) are a valid negative class,
+    /// while a single-class pool (only positives, or only negatives) is rejected.
+    #[test]
+    fn composition_check_requires_both_classes() {
+        let c = |ps, pp, nu, nm| super::Composition {
+            pos_source: ps,
+            pos_proxy: pp,
+            neg_unanswerable: nu,
+            neg_mismatch: nm,
+        };
+        assert!(c(6, 3, 4, 5).check(8).is_ok());
+        // No unanswerable golds → negatives come purely from mismatch. Still valid.
+        assert!(c(10, 0, 0, 10).check(8).is_ok());
+        // Single-class pools are rejected.
+        assert!(c(20, 0, 0, 0).check(8).is_err(), "only positives must fail");
+        assert!(c(0, 0, 20, 0).check(8).is_err(), "only negatives must fail");
+        // Below the per-class floor on either side → error.
+        assert!(
+            c(3, 0, 0, 20).check(8).is_err(),
+            "too few positives must fail"
+        );
+    }
 
     /// Writes a minimal corpus (indexed, so `.glossa/df` exists) + one answerable-correct
     /// `CaseResult` under `runs/t1/cases/`. Returns `(run_dir, corpus_glossa, _tempdir_guard)` —
