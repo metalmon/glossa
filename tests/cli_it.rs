@@ -313,19 +313,9 @@ fn read_and_cat_emit_raw_content_only_no_summary_block() {
     let content = "# Title\nfirst section body\n\nsecond section body\n";
     fs::write(&f, content).unwrap();
 
-    for sub in ["read", "cat"] {
-        let assert = Command::cargo_bin("kb")
-            .unwrap()
-            .args([sub, f.to_str().unwrap()])
-            .assert()
-            .success();
-        let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
-        // The body text is present (raw content, not a report) ...
-        assert!(
-            stdout.contains("second section body"),
-            "`kb {sub}` stdout must contain the document body:\n{stdout}"
-        );
-        // ... and there is NO summary block: no `─` rule.
+    // No trailing `cli_fmt::summary` block: no full-width `─` rule (piped output — the `read`
+    // number-shortcut only prints its `── p · loc ──` header on a TTY) and no `label: value` line.
+    let assert_content_only = |sub: &str, stdout: &str| {
         assert!(
             !stdout.contains('\u{2500}'),
             "`kb {sub}` stdout must not contain the summary separator rule:\n{stdout}"
@@ -337,10 +327,43 @@ fn read_and_cat_emit_raw_content_only_no_summary_block() {
             .unwrap_or("");
         assert!(
             !last_line.contains(": "),
-            "`kb {sub}` stdout must not end with a `label: value` summary line: {:?}",
-            last_line
+            "`kb {sub}` stdout must not end with a `label: value` summary line: {last_line:?}"
         );
-    }
+    };
+
+    // `cat` dumps the whole raw file text straight from disk.
+    let cat = Command::cargo_bin("kb")
+        .unwrap()
+        .args(["cat", f.to_str().unwrap()])
+        .assert()
+        .success();
+    let cat_out = String::from_utf8_lossy(&cat.get_output().stdout).to_string();
+    assert!(
+        cat_out.contains("second section body"),
+        "`kb cat` body:\n{cat_out}"
+    );
+    assert_content_only("cat", &cat_out);
+
+    // `read <#>` prints the raw chunk body of the last search's Nth hit (the `read` contract is
+    // index-based now — a filesystem path is `cat`'s job; `read path#N` mirrors the MCP tool).
+    Command::cargo_bin("kb")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["search", "--scan", "section", "--format", "pretty"])
+        .assert()
+        .success();
+    let read = Command::cargo_bin("kb")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["read", "1"])
+        .assert()
+        .success();
+    let read_out = String::from_utf8_lossy(&read.get_output().stdout).to_string();
+    assert!(
+        !read_out.trim().is_empty(),
+        "`kb read 1` must print the chunk body:\n{read_out}"
+    );
+    assert_content_only("read", &read_out);
 }
 
 #[test]

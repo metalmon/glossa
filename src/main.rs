@@ -231,12 +231,18 @@ enum Cmd {
         #[arg(short = 'f', long, value_enum, default_value = "auto")]
         format: OutputFormat,
     },
-    /// Read a document's text. TARGET is a path, or a result number from the last search.
+    /// Read an indexed chunk by its copy-ready `path#N` reference — exactly as `kb search`/`kb grep`
+    /// print it. Resolves identically to the MCP `read` tool: `path#N` (N = 1-based chunk ordinal,
+    /// the page number for PDFs), a bare path (reads chunk #1), an out-of-range N clamps into range,
+    /// a graph node id (`res:…`) reads that node. TARGET may also be a bare number = the Nth hit of
+    /// the last `kb search`. To dump a raw file off disk, use `kb cat`.
     Read {
-        /// A file path, or a number referencing the last search's Nth result.
+        /// `path#N` token (or a document path, with the chunk number N below); a graph node id; or a
+        /// bare number = the Nth result of the last `kb search`.
         target: String,
-        /// Optional location (heading / "p.N") to narrow to.
-        location: Option<String>,
+        /// Chunk number, when not baked into TARGET as `#N` (1-based; the page number for PDFs).
+        #[arg(default_value_t = 1)]
+        n: u64,
     },
     /// Print a file's full extracted text — a `cat` that understands Office and PDF. Reads the file
     /// directly: no index, no `.glossa`. Pipe it to your agent or grep it.
@@ -1665,17 +1671,21 @@ fn main() -> anyhow::Result<()> {
             }
             print_read(&target, None)
         }
-        Cmd::Read { target, location } => {
-            // Precedence: existing path beats result-number beats fallback path open.
-            // A real file named "3" should be opened directly, not treated as result #3.
-            if std::path::Path::new(&target).exists() {
-                // 1. Target is an existing path — open it directly.
-                print_read(std::path::Path::new(&target), location.as_deref())?;
-            } else if let Ok(n) = target.parse::<usize>() {
-                // 2. Target is a number and no file by that name exists — resolve from last search.
-                let rr = resolve_inputs(None, &root_flags, state_dir.clone())?;
+        Cmd::Read { target, n } => {
+            let rr = resolve_inputs(None, &root_flags, state_dir.clone())?;
+
+            // A bare number (no `#` anchor, no existing file by that name) is the Nth hit of the last
+            // `kb search` — a CLI convenience the MCP tool doesn't need (its results already carry the
+            // `path#n` token). Behaviour is unchanged: resolve it from the persisted last-search
+            // records and read that chunk straight from the index (cwd-independent — the stored path
+            // is the index key), falling back to opening the file only when the chunk isn't indexed.
+            let last_search_n = (!target.contains('#') && !std::path::Path::new(&target).exists())
+                .then(|| target.parse::<usize>().ok())
+                .flatten();
+
+            if let Some(k) = last_search_n {
                 let rec = glossa::cli_fmt::read_last_search(&rr.state_base)
-                    .and_then(|c| glossa::cli_fmt::nth_record(&c, n));
+                    .and_then(|c| glossa::cli_fmt::nth_record(&c, k));
                 match rec {
                     Some((p, loc)) => {
                         let loc_opt = if loc.is_empty() || loc == "(no-text)" {
@@ -1683,11 +1693,6 @@ fn main() -> anyhow::Result<()> {
                         } else {
                             Some(loc.clone())
                         };
-                        // The stored path is the INDEX key — it carries the corpus-root prefix from
-                        // index time, so it does NOT resolve as a filesystem path from an arbitrary
-                        // cwd (e.g. running `kb read 1` from inside the corpus dir → os error 3).
-                        // Read the chunk straight from the index (cwd-independent, like MCP `read`);
-                        // fall back to opening the file only when the chunk isn't indexed.
                         let from_index = loc_opt.as_deref().and_then(|l| {
                             glossa::index::store::DocIndex::open_or_create_at(
                                 &rr.roots,
@@ -1712,11 +1717,35 @@ fn main() -> anyhow::Result<()> {
                             None => print_read(std::path::Path::new(&p), loc_opt.as_deref())?,
                         }
                     }
-                    None => println!("no result #{n} (run a search first)"),
+                    None => println!("no result #{k} (run a search first)"),
                 }
             } else {
-                // 3. Non-numeric, non-existing path — attempt open (will surface not-found error).
-                print_read(std::path::Path::new(&target), location.as_deref())?;
+                // TARGET is a `path#N` token / document path / graph node id — resolve it EXACTLY
+                // like the MCP `read` tool: parse the `#N` anchor (it wins over the `n` arg), clamp
+                // an out-of-range N into range, resolve a graph node id to its evidence, and repair a
+                // lightly-mangled path. Raw off-disk files are `kb cat`'s job, not `read`'s.
+                glossa::index::store::ensure_fresh_at(&rr.roots, &rr.state_base)?;
+                let idx =
+                    glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
+                let graph = glossa::graph::store::GraphStore::open(&rr.state_base).ok();
+                let root = rr
+                    .roots
+                    .first()
+                    .map(|r| r.path.as_path())
+                    .unwrap_or(rr.state_base.as_path());
+                let out = glossa::tools::read(
+                    root,
+                    &idx,
+                    graph.as_ref(),
+                    &target,
+                    n,
+                    false,
+                    &glossa::trace::TraceLog::disabled(),
+                );
+                print!("{}", out.text);
+                if !out.text.ends_with('\n') {
+                    println!();
+                }
             }
             Ok(())
         }
