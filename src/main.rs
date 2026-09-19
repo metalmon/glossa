@@ -197,9 +197,9 @@ struct Cli {
 enum Cmd {
     /// Search the knowledge base (BM25-ranked keywords over the index).
     Search {
-        /// keywords (or a ripgrep regex with `--scan`)
+        /// Search keywords (BM25-ranked, stemmed). With `--scan`, a raw ripgrep regex over file text.
         pattern: String,
-        /// Directory to search.
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// Case-insensitive (rg -i).
         #[arg(short = 'i', long = "ignore-case")]
@@ -223,7 +223,8 @@ enum Cmd {
         /// Max number of hits.
         #[arg(short = 'l', long, default_value_t = 100)]
         limit: usize,
-        /// literal ripgrep-regex scan of raw files instead of the BM25 index (slow, not stemmed)
+        /// Raw ripgrep regex over file text instead of the BM25 index (slower, not stemmed; matches
+        /// are line-based, so they carry no `path#N` chunk ref).
         #[arg(short = 's', long)]
         scan: bool,
         /// Disable .gitignore/.ignore/hidden filtering (index everything).
@@ -233,12 +234,18 @@ enum Cmd {
         #[arg(short = 'f', long, value_enum, default_value = "auto")]
         format: OutputFormat,
     },
-    /// Read a document's text. TARGET is a path, or a result number from the last search.
+    /// Read an indexed chunk by its copy-ready `path#N` reference — exactly as `kb search`/`kb grep`
+    /// print it. Resolves identically to the MCP `read` tool: `path#N` (N = 1-based chunk ordinal,
+    /// the page number for PDFs), a bare path (reads chunk #1), an out-of-range N clamps into range,
+    /// a graph node id (`res:…`) reads that node. TARGET may also be a bare number = the Nth hit of
+    /// the last `kb search`. To dump a raw file off disk, use `kb cat`.
     Read {
-        /// A file path, or a number referencing the last search's Nth result.
+        /// `path#N` token (or a document path, with the chunk number N below); a graph node id; or a
+        /// bare number = the Nth result of the last `kb search`.
         target: String,
-        /// Optional location (heading / "p.N") to narrow to.
-        location: Option<String>,
+        /// Chunk number, when not baked into TARGET as `#N` (1-based; the page number for PDFs).
+        #[arg(default_value_t = 1)]
+        n: u64,
     },
     /// Print a file's full extracted text — a `cat` that understands Office and PDF. Reads the file
     /// directly: no index, no `.glossa`. Pipe it to your agent or grep it.
@@ -249,12 +256,15 @@ enum Cmd {
     /// Update the index. No flags: incremental over the whole corpus. --force: full rebuild.
     /// --file <rel>: reindex just that one document (picks up an in-place edit).
     Index {
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// Full rebuild from scratch. This is also the ONLY pass that (re)builds the answer-grounding
         /// DF sidecar (`.glossa/df`): incremental indexing never refreshes it, so run `--force` after
         /// large corpus changes to keep the `verify` gate's rarity counts accurate.
         #[arg(long)]
         force: bool,
+        /// Reindex just this one document (path relative to the corpus root) — picks up an in-place
+        /// edit without a full pass.
         #[arg(long)]
         file: Option<String>,
         /// Materialize a baked ontology preset before indexing (see `kb ontology list`).
@@ -264,6 +274,7 @@ enum Cmd {
     /// Delete notebook notes whose owner document no longer exists in the corpus.
     #[cfg(feature = "notebook")]
     Prune {
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// List what would be deleted without touching anything.
         #[arg(long)]
@@ -283,7 +294,7 @@ enum Cmd {
     Grep {
         /// regex or literal pattern
         pattern: String,
-        /// knowledge-base directory (default: nearest indexed root / current dir)
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         #[arg(short = 'i', long, help = "case-insensitive matching (-i)")]
         ignore_case: bool,
@@ -341,7 +352,7 @@ enum Cmd {
     Glob {
         /// glob over document PATHS, e.g. *.pdf or *Safety* (not a content search)
         pattern: String,
-        /// knowledge-base directory (default: nearest indexed root / current dir)
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
     },
     /// Run the MCP server (stdio for a local subprocess, or streamable-http for the network), or an
@@ -349,6 +360,7 @@ enum Cmd {
     Mcp {
         #[command(subcommand)]
         action: Option<McpAction>,
+        /// Knowledge-base directory to serve (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// Tool profile: reader | editor | full.
         #[arg(short = 'p', long, default_value = "editor")]
@@ -470,12 +482,16 @@ enum McpAction {
 #[derive(Subcommand)]
 enum GraphAction {
     /// Print node/edge counts.
-    Stats { path: Option<PathBuf> },
+    Stats {
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
+        path: Option<PathBuf>,
+    },
     /// Find graph nodes by concept (the `glossary` tool) — prints `id [type] label` + edges.
     #[command(visible_aliases = ["search", "find"])]
     Glossary {
         /// concept in your own words, e.g. "connection loss"
         query: String,
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// Show the graph as it was valid on this date (ISO-8601); a matched node outside its
         /// validity interval is hidden. Timeless nodes are always shown.
@@ -490,10 +506,12 @@ enum GraphAction {
         /// a SELECT over nodes/edges/node_validity/edges_labeled; empty = show schema
         #[arg(default_value = "")]
         sql: String,
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
     },
     /// Browse graph nodes: a per-type count, or `--type T` to list that type.
     Ls {
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// list nodes of this type, e.g. Symptom (omit for a per-type summary)
         #[arg(short = 't', long = "type")]
@@ -512,6 +530,7 @@ enum GraphAction {
     /// and centrality (written as derived `auto-generalized` edges + `node_meta`). With `--merge`,
     /// also COLLAPSE near-duplicate nodes (mutates/deletes agent nodes); without it, report only.
     Generalize {
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         #[arg(
             short = 'm',
@@ -522,6 +541,7 @@ enum GraphAction {
     },
     /// Diagnose graph health: ungrounded / stale / incomplete nodes.
     Doctor {
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// Delete off-spine (incomplete/degenerate) nodes.
         #[arg(long = "prune-incomplete")]
@@ -550,6 +570,7 @@ enum GraphAction {
     #[command(visible_alias = "neighbors")]
     Near {
         node_id: String,
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         #[arg(short = 'd', long, default_value_t = 1)]
         depth: usize,
@@ -569,6 +590,7 @@ enum GraphAction {
     /// Show a node: type, label, provenance, and its outgoing edges.
     Node {
         node_id: String,
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// Show the graph as it was valid on this date (ISO-8601); the node is treated as not
         /// found when outside its validity interval. Timeless nodes are always shown.
@@ -594,6 +616,7 @@ enum GraphAction {
         /// end: node id to verify a connection to; omit for discovery
         #[arg(long)]
         to: Option<String>,
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// Disable the cross-document bridge (graph-only, in-document connectivity only).
         #[arg(long = "no-bridge")]
@@ -606,7 +629,7 @@ enum GraphAction {
     },
     /// Dump all nodes (optionally filtered by type) with their outgoing edges.
     Dump {
-        /// corpus directory (default: current directory)
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// only show nodes of this type, e.g. Symptom or Resolution (omit for all)
         #[arg(short = 't', long = "type")]
@@ -627,6 +650,7 @@ enum GraphAction {
     /// the file as source of truth for its types (prunes them first).
     Import {
         file: PathBuf,
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: PathBuf,
         #[arg(short = 'f', long)]
         format: Option<String>,
@@ -636,6 +660,7 @@ enum GraphAction {
     },
     /// Delete all nodes of the given type (and edges touching them) — clean-slate a semantic layer.
     Prune {
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: PathBuf,
         /// node type to delete, e.g. Symptom (repeatable)
         #[arg(short = 't', long = "type", required = true)]
@@ -651,6 +676,7 @@ enum GraphAction {
     /// Compile a document's `.csp` limit tables (notebook notes) into the constraint graph.
     #[cfg(feature = "constraint")]
     Build {
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// Owner document (`Field.source_path`), corpus-relative.
         #[arg(long)]
@@ -674,6 +700,7 @@ enum OntologyAction {
     Show { name: String },
     /// Materialize a preset to <path>/.glossa/ontology.toml (no indexing).
     Init {
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         #[arg(short = 't', long = "template")]
         template: String,
@@ -1598,17 +1625,22 @@ fn main() -> anyhow::Result<()> {
                     file_type.as_deref(),
                     scope.as_deref(),
                 )? {
+                    // Lead with the copy-ready `path#ord` token (same ref the MCP tools + `kb read`
+                    // consume), then the human location label + snippet.
                     rg_lines.push(format!(
-                        "{}:{}: {}  [{:.3}]",
-                        h.path, h.location, h.snippet, h.score
+                        "{}#{}  {}: {}  [{:.3}]",
+                        h.path, h.ord, h.location, h.snippet, h.score
                     ));
                     display.push(glossa::cli_fmt::DisplayHit {
                         file: glossa::cli_fmt::rel_file(&rr.root, &h.path),
                         location: h.location.clone(),
                         snippet: h.snippet.clone(),
                         score: Some(h.score),
+                        ord: Some(h.ord),
                     });
-                    records.push((h.path.clone(), h.location.clone()));
+                    // Persist the chunk ORDINAL so `kb read <#>` resolves it through the same core as
+                    // the MCP `read` tool (`path#ord`), not a heading/`p.N` substring.
+                    records.push((h.path.clone(), h.ord.to_string()));
                 }
             } else {
                 let opts = QueryOpts {
@@ -1627,6 +1659,8 @@ fn main() -> anyhow::Result<()> {
                         location: h.location.clone(),
                         snippet: h.snippet.clone(),
                         score: None,
+                        // Raw-file scan has no chunk ordinal — its `read <#>` stays location-based.
+                        ord: None,
                     });
                     records.push((p, h.location.clone()));
                 }
@@ -1667,29 +1701,59 @@ fn main() -> anyhow::Result<()> {
             }
             print_read(&target, None)
         }
-        Cmd::Read { target, location } => {
-            // Precedence: existing path beats result-number beats fallback path open.
-            // A real file named "3" should be opened directly, not treated as result #3.
-            if std::path::Path::new(&target).exists() {
-                // 1. Target is an existing path — open it directly.
-                print_read(std::path::Path::new(&target), location.as_deref())?;
-            } else if let Ok(n) = target.parse::<usize>() {
-                // 2. Target is a number and no file by that name exists — resolve from last search.
-                let rr = resolve_inputs(None, &root_flags, state_dir.clone())?;
+        Cmd::Read { target, n } => {
+            let rr = resolve_inputs(None, &root_flags, state_dir.clone())?;
+
+            // A bare number (no `#` anchor, no existing file by that name) is the Nth hit of the last
+            // `kb search` — a CLI convenience the MCP tool doesn't need (its results already carry the
+            // `path#n` token). Behaviour is unchanged: resolve it from the persisted last-search
+            // records and read that chunk straight from the index (cwd-independent — the stored path
+            // is the index key), falling back to opening the file only when the chunk isn't indexed.
+            let last_search_n = (!target.contains('#') && !std::path::Path::new(&target).exists())
+                .then(|| target.parse::<usize>().ok())
+                .flatten();
+
+            if let Some(k) = last_search_n {
                 let rec = glossa::cli_fmt::read_last_search(&rr.state_base)
-                    .and_then(|c| glossa::cli_fmt::nth_record(&c, n));
+                    .and_then(|c| glossa::cli_fmt::nth_record(&c, k));
                 match rec {
+                    // Index search recorded the chunk ORDINAL → resolve `path#ord` through the same
+                    // core as the MCP `read` tool (identical output, incl. the `── path#ord ──` head).
+                    Some((p, loc)) if loc.parse::<u64>().is_ok() => {
+                        let ord = loc.parse::<u64>().unwrap();
+                        glossa::index::store::ensure_fresh_at(&rr.roots, &rr.state_base)?;
+                        let idx = glossa::index::store::DocIndex::open_or_create_at(
+                            &rr.roots,
+                            &rr.state_base,
+                        )?;
+                        let graph = glossa::graph::store::GraphStore::open(&rr.state_base).ok();
+                        let root = rr
+                            .roots
+                            .first()
+                            .map(|r| r.path.as_path())
+                            .unwrap_or(rr.state_base.as_path());
+                        let out = glossa::tools::read(
+                            root,
+                            &idx,
+                            graph.as_ref(),
+                            &p,
+                            ord,
+                            false,
+                            &glossa::trace::TraceLog::disabled(),
+                        );
+                        print!("{}", out.text);
+                        if !out.text.ends_with('\n') {
+                            println!();
+                        }
+                    }
+                    // `--scan` result: no chunk ordinal, only a location label — read by that label
+                    // (the legacy path; a raw-file scan has no `path#ord` to hand the MCP core).
                     Some((p, loc)) => {
                         let loc_opt = if loc.is_empty() || loc == "(no-text)" {
                             None
                         } else {
                             Some(loc.clone())
                         };
-                        // The stored path is the INDEX key — it carries the corpus-root prefix from
-                        // index time, so it does NOT resolve as a filesystem path from an arbitrary
-                        // cwd (e.g. running `kb read 1` from inside the corpus dir → os error 3).
-                        // Read the chunk straight from the index (cwd-independent, like MCP `read`);
-                        // fall back to opening the file only when the chunk isn't indexed.
                         let from_index = loc_opt.as_deref().and_then(|l| {
                             glossa::index::store::DocIndex::open_or_create_at(
                                 &rr.roots,
@@ -1714,11 +1778,35 @@ fn main() -> anyhow::Result<()> {
                             None => print_read(std::path::Path::new(&p), loc_opt.as_deref())?,
                         }
                     }
-                    None => println!("no result #{n} (run a search first)"),
+                    None => println!("no result #{k} (run a search first)"),
                 }
             } else {
-                // 3. Non-numeric, non-existing path — attempt open (will surface not-found error).
-                print_read(std::path::Path::new(&target), location.as_deref())?;
+                // TARGET is a `path#N` token / document path / graph node id — resolve it EXACTLY
+                // like the MCP `read` tool: parse the `#N` anchor (it wins over the `n` arg), clamp
+                // an out-of-range N into range, resolve a graph node id to its evidence, and repair a
+                // lightly-mangled path. Raw off-disk files are `kb cat`'s job, not `read`'s.
+                glossa::index::store::ensure_fresh_at(&rr.roots, &rr.state_base)?;
+                let idx =
+                    glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
+                let graph = glossa::graph::store::GraphStore::open(&rr.state_base).ok();
+                let root = rr
+                    .roots
+                    .first()
+                    .map(|r| r.path.as_path())
+                    .unwrap_or(rr.state_base.as_path());
+                let out = glossa::tools::read(
+                    root,
+                    &idx,
+                    graph.as_ref(),
+                    &target,
+                    n,
+                    false,
+                    &glossa::trace::TraceLog::disabled(),
+                );
+                print!("{}", out.text);
+                if !out.text.ends_with('\n') {
+                    println!();
+                }
             }
             Ok(())
         }

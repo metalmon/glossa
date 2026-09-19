@@ -149,6 +149,10 @@ pub struct DisplayHit {
     pub location: String, // "p.142" | heading | "(no-text)"
     pub snippet: String,
     pub score: Option<f32>, // Some for --rank
+    /// Chunk ordinal, when known (index search). `Some` → the pretty view leads the hit with the
+    /// copy-ready `path#ord` token that `kb read` consumes (same contract as the MCP tools).
+    /// `None` for the `--scan` raw-file mode, which has no chunk ordinal (its refs are line-based).
+    pub ord: Option<u64>,
 }
 
 /// Render results as two-line entries — `#N  score  path  · loc`, then the snippet indented below —
@@ -176,6 +180,11 @@ pub fn render_search_pretty(hits: &[DisplayHit], reverse: bool, query: &str) -> 
             l1.push_str("  ");
         }
         l1.push_str(&magenta(&h.file));
+        // Append the chunk ordinal so line 1 is the copy-ready `path#ord` token to paste into
+        // `kb read` (mirrors the MCP tools). `--scan` hits have no ordinal → path only.
+        if let Some(o) = h.ord {
+            l1.push_str(&magenta(&format!("#{o}")));
+        }
         // Line 2: indented  location  snippet (with the matched term highlighted).
         let mut l2 = String::from("    ");
         if !h.location.is_empty() {
@@ -404,12 +413,14 @@ mod tests {
                 location: "p.1".into(),
                 snippet: " hello ".into(),
                 score: None,
+                ord: None,
             },
             DisplayHit {
                 file: "deep\\longname.pdf".into(),
                 location: "Sec".into(),
                 snippet: "world".into(),
                 score: Some(1.234),
+                ord: Some(7),
             },
         ];
         let s = render_search_pretty(&hits, false, "hello");
@@ -418,6 +429,16 @@ mod tests {
         assert!(
             s.contains("#2  1.234  deep\\longname.pdf"),
             "score precedes the path"
+        );
+        // The chunk ordinal is appended to line 1 as the copy-ready `path#ord` token (fed to
+        // `kb read`); a hit with no ordinal (`--scan`) shows the bare path.
+        assert!(
+            s.contains("deep\\longname.pdf#7"),
+            "index hit leads with the copy-ready path#ord token: {s}"
+        );
+        assert!(
+            !s.contains("a.md#"),
+            "a hit with no ordinal must not gain a #suffix: {s}"
         );
         // Line 2: location leads the indented snippet line (page can't orphan off a long path).
         assert!(s.contains("\n    p.1  hello\n"));
@@ -435,12 +456,14 @@ mod tests {
                 location: "p.1".into(),
                 snippet: "a".into(),
                 score: Some(9.0),
+                ord: None,
             },
             DisplayHit {
                 file: "worst.md".into(),
                 location: "p.2".into(),
                 snippet: "b".into(),
                 score: Some(1.0),
+                ord: None,
             },
         ];
         let s = render_search_pretty(&hits, true, "");

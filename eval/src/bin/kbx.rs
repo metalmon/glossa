@@ -80,8 +80,7 @@ enum DpoFocus {
 enum Cmd {
     /// Scaffold a fresh eval workspace at `<path>/.glossa/kbx/`: lab.toml + prompts + dataset.toml + runs/.
     Init {
-        /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
-        /// current directory upward, else the current directory).
+        /// Corpus root (kb-style PATH resolution — explicit, else discovered upward from the cwd, else the cwd).
         path: Option<PathBuf>,
         /// Overwrite existing template files instead of skipping them.
         #[arg(long)]
@@ -134,8 +133,7 @@ enum Cmd {
     },
     /// Build a corpus's reasoning graph: extract -> candidates -> judge -> finalize.
     Build {
-        /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
-        /// current directory upward, else the current directory).
+        /// Corpus root (kb-style PATH resolution — explicit, else discovered upward from the cwd, else the cwd).
         path: Option<PathBuf>,
         /// Which stage(s) of the pipeline to run.
         #[arg(long, value_enum, default_value = "all")]
@@ -199,8 +197,7 @@ enum Cmd {
     /// `dataset.toml`, applying the winner back onto the workspace only when it strictly beats
     /// the seed prompt's full-val EM.
     Train {
-        /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
-        /// current directory upward, else the current directory).
+        /// Corpus root (kb-style PATH resolution — explicit, else discovered upward from the cwd, else the cwd).
         path: Option<PathBuf>,
         /// Dataset-relative budget preset (tiny|light|medium|heavy): sizes the metric-call ceiling
         /// as mult×N (N = answerable golds) and the candidate cap. Mutually exclusive with
@@ -275,8 +272,7 @@ enum Cmd {
     /// Phase-2 of graph construction: backward query-side synthesis (one `chain_one_seed` pass per
     /// grounded terminal, fan-out), checkpointed for `--resume`, then finalize.
     Reason {
-        /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
-        /// current directory upward, else the current directory).
+        /// Corpus root (kb-style PATH resolution — explicit, else discovered upward from the cwd, else the cwd).
         path: Option<PathBuf>,
         /// Restrict seeds to this node_type (default: the ontology's grounding-required types).
         #[arg(long = "seed-type")]
@@ -312,8 +308,7 @@ enum Cmd {
     /// the corpus read-only, propose one gated gold per attempt, and write the kept ones to that
     /// file.
     Distil {
-        /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
-        /// current directory upward, else the current directory).
+        /// Corpus root (kb-style PATH resolution — explicit, else discovered upward from the cwd, else the cwd).
         path: Option<PathBuf>,
         /// Run the synthetic gold generator instead of densify, writing kept `(question, answer)`
         /// golds to this dataset TOML — the same shape `kbx eval --dataset`/`kbx reason --gold`
