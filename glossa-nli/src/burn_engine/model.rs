@@ -116,7 +116,9 @@ impl<B: Backend> BertLayer<B> {
     fn forward(&self, h: Tensor<B, 3>, add_mask: Tensor<B, 4>) -> Tensor<B, 3> {
         let a = self.attention.forward(h, add_mask);
         let inter = gelu(self.intermediate.dense.forward(a.clone())); // erf-exact GELU
-        self.output.layer_norm.forward(self.output.dense.forward(inter) + a)
+        self.output
+            .layer_norm
+            .forward(self.output.dense.forward(inter) + a)
     }
 }
 
@@ -145,7 +147,11 @@ pub struct BertNliModel<B: Backend> {
 
 impl BertNliConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> BertNliModel<B> {
-        let ln = || LayerNormConfig::new(self.hidden).with_epsilon(self.ln_eps).init(device);
+        let ln = || {
+            LayerNormConfig::new(self.hidden)
+                .with_epsilon(self.ln_eps)
+                .init(device)
+        };
         let lin = |i: usize, o: usize| LinearConfig::new(i, o).init::<B>(device);
         let layer = || BertLayer {
             attention: BertAttention {
@@ -155,21 +161,36 @@ impl BertNliConfig {
                     value: lin(self.hidden, self.hidden),
                     heads: self.heads,
                 },
-                output: BertSelfOutput { dense: lin(self.hidden, self.hidden), layer_norm: ln() },
+                output: BertSelfOutput {
+                    dense: lin(self.hidden, self.hidden),
+                    layer_norm: ln(),
+                },
             },
-            intermediate: BertIntermediate { dense: lin(self.hidden, self.intermediate) },
-            output: BertOutput { dense: lin(self.intermediate, self.hidden), layer_norm: ln() },
+            intermediate: BertIntermediate {
+                dense: lin(self.hidden, self.intermediate),
+            },
+            output: BertOutput {
+                dense: lin(self.intermediate, self.hidden),
+                layer_norm: ln(),
+            },
         };
         BertNliModel {
             bert: BertModel {
                 embeddings: BertEmbeddings {
-                    word_embeddings: EmbeddingConfig::new(self.vocab_size, self.hidden).init(device),
-                    position_embeddings: EmbeddingConfig::new(self.max_pos, self.hidden).init(device),
-                    token_type_embeddings: EmbeddingConfig::new(self.type_vocab, self.hidden).init(device),
+                    word_embeddings: EmbeddingConfig::new(self.vocab_size, self.hidden)
+                        .init(device),
+                    position_embeddings: EmbeddingConfig::new(self.max_pos, self.hidden)
+                        .init(device),
+                    token_type_embeddings: EmbeddingConfig::new(self.type_vocab, self.hidden)
+                        .init(device),
                     layer_norm: ln(),
                 },
-                encoder: BertEncoder { layer: (0..self.layers).map(|_| layer()).collect() },
-                pooler: BertPooler { dense: lin(self.hidden, self.hidden) },
+                encoder: BertEncoder {
+                    layer: (0..self.layers).map(|_| layer()).collect(),
+                },
+                pooler: BertPooler {
+                    dense: lin(self.hidden, self.hidden),
+                },
             },
             classifier: lin(self.hidden, self.num_labels),
         }

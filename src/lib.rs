@@ -51,7 +51,10 @@ pub fn version() -> &'static str {
 
 #[cfg(feature = "nli-burn")]
 const VERSION_WITH_ENGINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (nli engine: burn-wgpu)");
-#[cfg(all(any(feature = "nli", feature = "nli-dynamic"), not(feature = "nli-burn")))]
+#[cfg(all(
+    any(feature = "nli", feature = "nli-dynamic"),
+    not(feature = "nli-burn")
+))]
 const VERSION_WITH_ENGINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (nli engine: ort)");
 #[cfg(not(any(feature = "nli", feature = "nli-dynamic", feature = "nli-burn")))]
 const VERSION_WITH_ENGINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (nli engine: none)");

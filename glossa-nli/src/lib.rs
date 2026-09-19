@@ -149,7 +149,9 @@ mod ort_engine {
             providers: &[String],
         ) -> anyhow::Result<Self> {
             let cache_key = (
-                model_dir.canonicalize().unwrap_or_else(|_| model_dir.to_path_buf()),
+                model_dir
+                    .canonicalize()
+                    .unwrap_or_else(|_| model_dir.to_path_buf()),
                 providers.to_vec(),
             );
             let cache = MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -159,7 +161,10 @@ mod ort_engine {
                 .map_err(|_| anyhow::anyhow!("nli model cache mutex poisoned"))?
                 .get(&cache_key)
             {
-                return Ok(Self { inner: Arc::clone(inner), entail_index });
+                return Ok(Self {
+                    inner: Arc::clone(inner),
+                    entail_index,
+                });
             }
 
             let built = Arc::new(Self::build_inner(model_dir, providers)?);
@@ -167,13 +172,17 @@ mod ort_engine {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("nli model cache mutex poisoned"))?;
             let inner = Arc::clone(guard.entry(cache_key).or_insert(built));
-            Ok(Self { inner, entail_index })
+            Ok(Self {
+                inner,
+                entail_index,
+            })
         }
 
         fn build_inner(model_dir: &Path, providers: &[String]) -> anyhow::Result<Inner> {
             let tokenizer_path = model_dir.join("tokenizer.json");
-            let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
-                .map_err(|e| anyhow::anyhow!("tokenizer load ({}): {e}", tokenizer_path.display()))?;
+            let mut tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
+                anyhow::anyhow!("tokenizer load ({}): {e}", tokenizer_path.display())
+            })?;
             // Premise windowing does its own truncation; disable any baked-in truncation/padding.
             tokenizer
                 .with_truncation(None)
@@ -193,7 +202,9 @@ mod ort_engine {
                 .with_intra_threads(1)
                 .map_err(|e| anyhow::anyhow!("onnx session intra-threads: {e}"))?
                 .commit_from_file(&model_path)
-                .map_err(|e| anyhow::anyhow!("onnx session load ({}): {e}", model_path.display()))?;
+                .map_err(|e| {
+                    anyhow::anyhow!("onnx session load ({}): {e}", model_path.display())
+                })?;
 
             Ok(Inner {
                 tokenizer,
@@ -269,7 +280,10 @@ mod ort_engine {
     /// Returns the subset of `providers` registered as GPU EPs given the compiled Cargo features,
     /// in input order; `"cpu"` and unknown names are dropped (they fall to ORT's implicit CPU EP).
     fn compiled_gpu_providers(providers: &[String]) -> Vec<&'static str> {
-        providers.iter().filter_map(|p| compiled_gpu_name(p)).collect()
+        providers
+            .iter()
+            .filter_map(|p| compiled_gpu_name(p))
+            .collect()
     }
 
     /// Per-name lookup used by [`compiled_gpu_providers`]. Chain of early returns so `name` stays
@@ -337,7 +351,10 @@ mod ort_engine {
                 .expect("entail should succeed against a real model");
             assert_eq!(scores.len(), 2);
             for s in &scores {
-                assert!((0.0..=1.0).contains(s), "entail score outside [0,1]: {scores:?}");
+                assert!(
+                    (0.0..=1.0).contains(s),
+                    "entail score outside [0,1]: {scores:?}"
+                );
             }
         }
 
@@ -364,7 +381,10 @@ mod ort_engine {
             let fp16 = dir.path().join("model.fp16.onnx");
             std::fs::write(&canonical, b"").expect("write model.onnx");
             std::fs::write(&fp16, b"").expect("write model.fp16.onnx");
-            assert_eq!(resolve_model_file(dir.path()).expect("resolve canonical"), canonical);
+            assert_eq!(
+                resolve_model_file(dir.path()).expect("resolve canonical"),
+                canonical
+            );
         }
 
         #[test]
@@ -432,7 +452,10 @@ mod ort_engine {
             let out = compiled_gpu_providers(&input);
             let mut last_pos: Option<usize> = None;
             for name in &out {
-                let pos = input.iter().position(|p| p == name).expect("survivor from input");
+                let pos = input
+                    .iter()
+                    .position(|p| p == name)
+                    .expect("survivor from input");
                 if let Some(last) = last_pos {
                     assert!(last < pos, "order not preserved: {out:?} vs {input:?}");
                 }
@@ -473,8 +496,14 @@ mod ort_engine {
                 for window in &windows {
                     let (ids, mask, types) =
                         harness::encode_row(tok, msl, window, hypothesis).expect("encode_row");
-                    let row = harness::Row { hyp_idx, input_ids: ids, attention_mask: mask, token_type_ids: types };
-                    let scores = harness::run_batch(&nli, &[row], &[0], ENTAIL_IDX).expect("run_batch");
+                    let row = harness::Row {
+                        hyp_idx,
+                        input_ids: ids,
+                        attention_mask: mask,
+                        token_type_ids: types,
+                    };
+                    let scores =
+                        harness::run_batch(&nli, &[row], &[0], ENTAIL_IDX).expect("run_batch");
                     if scores[0] > reference[hyp_idx] {
                         reference[hyp_idx] = scores[0];
                     }
@@ -490,11 +519,19 @@ mod ort_engine {
                 harness::encode_row(tok, msl, short_premise, short_hyp).expect("encode short");
             let (l_ids, l_mask, l_types) =
                 harness::encode_row(tok, msl, short_premise, long_hyp).expect("encode long");
-            assert!(l_ids.len() > s_ids.len(), "long row must be strictly longer");
+            assert!(
+                l_ids.len() > s_ids.len(),
+                "long row must be strictly longer"
+            );
 
             let alone = harness::run_batch(
                 &nli,
-                &[harness::Row { hyp_idx: 0, input_ids: s_ids.clone(), attention_mask: s_mask.clone(), token_type_ids: s_types.clone() }],
+                &[harness::Row {
+                    hyp_idx: 0,
+                    input_ids: s_ids.clone(),
+                    attention_mask: s_mask.clone(),
+                    token_type_ids: s_types.clone(),
+                }],
                 &[0],
                 ENTAIL_IDX,
             )
@@ -502,14 +539,28 @@ mod ort_engine {
             let padded = harness::run_batch(
                 &nli,
                 &[
-                    harness::Row { hyp_idx: 0, input_ids: s_ids, attention_mask: s_mask, token_type_ids: s_types },
-                    harness::Row { hyp_idx: 0, input_ids: l_ids, attention_mask: l_mask, token_type_ids: l_types },
+                    harness::Row {
+                        hyp_idx: 0,
+                        input_ids: s_ids,
+                        attention_mask: s_mask,
+                        token_type_ids: s_types,
+                    },
+                    harness::Row {
+                        hyp_idx: 0,
+                        input_ids: l_ids,
+                        attention_mask: l_mask,
+                        token_type_ids: l_types,
+                    },
                 ],
                 &[0, 1],
                 ENTAIL_IDX,
             )
             .expect("padded");
-            assert!((padded[0] - alone).abs() < 1e-6, "padding changed score: {alone} vs {}", padded[0]);
+            assert!(
+                (padded[0] - alone).abs() < 1e-6,
+                "padding changed score: {alone} vs {}",
+                padded[0]
+            );
         }
     }
 }

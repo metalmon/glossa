@@ -87,7 +87,12 @@ pub fn entail(
         for window in &windows {
             let (input_ids, attention_mask, token_type_ids) =
                 encode_row(tokenizer, max_seq_len, window, hypothesis)?;
-            rows.push(Row { hyp_idx, input_ids, attention_mask, token_type_ids });
+            rows.push(Row {
+                hyp_idx,
+                input_ids,
+                attention_mask,
+                token_type_ids,
+            });
         }
     }
 
@@ -121,7 +126,11 @@ pub fn run_batch(
     entail_index: usize,
 ) -> anyhow::Result<Vec<f32>> {
     let n = batch.len();
-    let seq = batch.iter().map(|&i| rows[i].input_ids.len()).max().unwrap_or(0);
+    let seq = batch
+        .iter()
+        .map(|&i| rows[i].input_ids.len())
+        .max()
+        .unwrap_or(0);
 
     let mut input_ids = vec![0i64; n * seq];
     let mut attention_mask = vec![0i64; n * seq];
@@ -229,10 +238,12 @@ pub fn encode_row(
         .map_err(|e| anyhow::anyhow!("pair tokenize: {e}"))?;
 
     let mut input_ids: Vec<i64> = encoding.get_ids().iter().map(|&x| x as i64).collect();
-    let mut attention_mask: Vec<i64> =
-        encoding.get_attention_mask().iter().map(|&x| x as i64).collect();
-    let mut token_type_ids: Vec<i64> =
-        encoding.get_type_ids().iter().map(|&x| x as i64).collect();
+    let mut attention_mask: Vec<i64> = encoding
+        .get_attention_mask()
+        .iter()
+        .map(|&x| x as i64)
+        .collect();
+    let mut token_type_ids: Vec<i64> = encoding.get_type_ids().iter().map(|&x| x as i64).collect();
 
     if input_ids.len() > max_seq_len {
         input_ids.truncate(max_seq_len);
@@ -317,7 +328,10 @@ mod tests {
                 seen[idx] = true;
             }
         }
-        assert!(seen.iter().all(|&s| s), "not every index was covered: {seen:?}");
+        assert!(
+            seen.iter().all(|&s| s),
+            "not every index was covered: {seen:?}"
+        );
     }
 
     #[test]
@@ -331,7 +345,10 @@ mod tests {
             if batch.len() == 1 && lens[batch[0]] > budget {
                 continue;
             }
-            assert!(total <= budget, "batch {batch:?} violates budget: {total} > {budget}");
+            assert!(
+                total <= budget,
+                "batch {batch:?} violates budget: {total} > {budget}"
+            );
         }
     }
 
@@ -341,7 +358,11 @@ mod tests {
         let max_rows = 16;
         let batches = plan_batches(&lens, 1_000_000, max_rows);
         for batch in &batches {
-            assert!(batch.len() <= max_rows, "batch of {} rows exceeds {max_rows}", batch.len());
+            assert!(
+                batch.len() <= max_rows,
+                "batch of {} rows exceeds {max_rows}",
+                batch.len()
+            );
         }
     }
 
@@ -357,8 +378,14 @@ mod tests {
         lens.push(500);
         let long_idx = lens.len() - 1;
         let batches = plan_batches(&lens, 1000, 64);
-        let long_batch = batches.iter().find(|b| b.contains(&long_idx)).expect("long row batched");
-        assert!(long_batch.len() <= 2, "long row batched with too many shorts: {long_batch:?}");
+        let long_batch = batches
+            .iter()
+            .find(|b| b.contains(&long_idx))
+            .expect("long row batched");
+        assert!(
+            long_batch.len() <= 2,
+            "long row batched with too many shorts: {long_batch:?}"
+        );
     }
 
     #[test]
@@ -367,7 +394,10 @@ mod tests {
         let b = softmax3([101.0, 102.0, 103.0]);
         assert!((a.iter().sum::<f32>() - 1.0).abs() < 1e-6);
         for (x, y) in a.iter().zip(b.iter()) {
-            assert!((x - y).abs() < 1e-5, "softmax not shift-invariant: {a:?} vs {b:?}");
+            assert!(
+                (x - y).abs() < 1e-5,
+                "softmax not shift-invariant: {a:?} vs {b:?}"
+            );
         }
     }
 }

@@ -56,7 +56,10 @@ pub fn verify_outcome(
 /// falls back to AC-only. With neither the `nli` nor `nli-dynamic` feature on this is the stub
 /// below, so `verify_outcome`'s behaviour is byte-for-byte unchanged from before this scorer
 /// existed.
-#[cfg(all(any(feature = "nli", feature = "nli-dynamic"), not(feature = "nli-burn")))]
+#[cfg(all(
+    any(feature = "nli", feature = "nli-dynamic"),
+    not(feature = "nli-burn")
+))]
 pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
     if cfg.scorer.as_deref() != Some("in_process") {
         return None;

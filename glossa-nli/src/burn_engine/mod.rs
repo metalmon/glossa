@@ -55,7 +55,9 @@ fn resolve_weights_file(model_dir: &Path) -> Result<PathBuf> {
     for entry in std::fs::read_dir(model_dir)
         .map_err(|e| anyhow!("reading model dir ({}): {e}", model_dir.display()))?
     {
-        let path = entry.map_err(|e| anyhow!("reading model dir entry: {e}"))?.path();
+        let path = entry
+            .map_err(|e| anyhow!("reading model dir entry: {e}"))?
+            .path();
         let is_st = path
             .extension()
             .and_then(|e| e.to_str())
@@ -96,7 +98,9 @@ impl InProcessBurnNli {
 
         let weights = resolve_weights_file(model_dir)?;
         let mut store = SafetensorsStore::from_file(
-            weights.to_str().ok_or_else(|| anyhow!("non-utf8 weights path"))?,
+            weights
+                .to_str()
+                .ok_or_else(|| anyhow!("non-utf8 weights path"))?,
         )
         .with_from_adapter(PyTorchToBurnAdapter)
         .with_key_remapping(r"\.self\.", ".self_attention.")
@@ -149,7 +153,10 @@ impl RawForward for InProcessBurnNli {
         seq: usize,
     ) -> Result<Vec<f32>> {
         let mk = |v: &[i64]| {
-            Tensor::<BurnBackend, 2, Int>::from_data(TensorData::new(v.to_vec(), [n, seq]), &self.device)
+            Tensor::<BurnBackend, 2, Int>::from_data(
+                TensorData::new(v.to_vec(), [n, seq]),
+                &self.device,
+            )
         };
         let logits = self
             .model

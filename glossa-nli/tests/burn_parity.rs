@@ -22,7 +22,11 @@ fn burn_forward_matches_ort_reference_logits() {
     };
     let fixtures = std::env::var("GLOSSA_NLI_BURN_TEST_FIXTURES")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures"));
+        .unwrap_or_else(|_| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("fixtures")
+        });
     const ENTAIL_IDX: usize = 0;
 
     let nli = InProcessBurnNli::load(Path::new(&model_dir), ENTAIL_IDX)
@@ -39,7 +43,12 @@ fn burn_forward_matches_ort_reference_logits() {
     .expect("parse reference_logits.json");
 
     let col = |item: &serde_json::Value, k: &str| -> Vec<i64> {
-        item[k].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect()
+        item[k]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_i64().unwrap())
+            .collect()
     };
 
     let mut maxdiff = 0f32;
