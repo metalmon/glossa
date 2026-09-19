@@ -318,14 +318,21 @@ pub fn load_cases_from_dataset(
                     comp.pos_source += 1;
                 }
             }
-            // Hard-mismatch negative: the best retrieved hit from a DIFFERENT document than any source.
+            // Hard-mismatch negative: retrieved hits from DIFFERENT documents than any source. Take
+            // as MANY distractor chunks as the gold has source chunks, so the negative lands in the
+            // SAME bucket as its positive — exactly how a run scores answer-vs-its-several-cited-
+            // chunks (`load_cases`): a multi-source gold thus gives the MULTI bucket a negative
+            // class, not just the single bucket.
             let source_docs: Vec<&str> = g.source.iter().map(|r| ref_doc(r)).collect();
-            let distractor = retrieve(&g.question, RETRIEVE_K)
+            let n_src = g.source.len().max(1);
+            let distractors: Vec<String> = retrieve(&g.question, RETRIEVE_K + n_src)
                 .into_iter()
-                .find(|h| !source_docs.contains(&h.path.as_str()))
-                .and_then(|h| chunk_text(&hit_ref(&h)));
-            if let Some(d) = distractor {
-                if let Some(c) = mk(answer, vec![d], Cell::ShouldAbstain) {
+                .filter(|h| !source_docs.contains(&h.path.as_str()))
+                .filter_map(|h| chunk_text(&hit_ref(&h)))
+                .take(n_src)
+                .collect();
+            if !distractors.is_empty() {
+                if let Some(c) = mk(answer, distractors, Cell::ShouldAbstain) {
                     out.push(c);
                     comp.neg_mismatch += 1;
                 }
