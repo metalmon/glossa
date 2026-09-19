@@ -148,7 +148,20 @@ fn model_weights_present(dir: &Path) -> bool {
 
 #[cfg(not(any(feature = "nli-burn", feature = "nli-burn-cpu")))]
 fn model_weights_present(dir: &Path) -> bool {
-    dir.join("model.onnx").is_file()
+    // Mirror `resolve_model_file`: `model.onnx`, else any lone `*.onnx` (e.g. `model.fp16.onnx`,
+    // the recommended fp16 download). Checking only `model.onnx` false-negatived an fp16-only dir
+    // even though the ORT engine loads it fine.
+    if dir.join("model.onnx").is_file() {
+        return true;
+    }
+    std::fs::read_dir(dir).is_ok_and(|rd| {
+        rd.filter_map(|e| e.ok()).any(|e| {
+            e.path()
+                .extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| x.eq_ignore_ascii_case("onnx"))
+        })
+    })
 }
 
 /// Human label for the compiled inference engine, shown in the `check` report.
