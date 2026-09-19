@@ -1,0 +1,71 @@
+[package]
+name = "glossa-nli"
+version = "0.1.0"
+edition = "2021"
+description = "In-process NLI (entailment) scorer over an ONNX 3-way NLI model — standalone crate (no glossa dep)"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["nli-ort-bundled"]                 # standalone/tests/CI => self-contained CPU
+# EXACTLY ONE engine per build. nli-burn-wgpu is a FUTURE alternative; enabling both is a compile
+# error (see lib.rs). Only nli-ort is implemented in this plan.
+nli-ort = ["dep:ort", "dep:tokenizers"]       # engine CODE only, NO linking strategy
+nli-burn-wgpu = []  # placeholder; not implemented (kept so the XOR guard has something to guard)
+# Linking strategy — EXACTLY ONE (XOR, enforced by compile_error! in lib.rs). `nli-ort` (above) is
+# just the engine code; it does NOT choose how `ort-sys` links against ONNX Runtime. These two
+# features make that choice:
+#   - `nli-ort-bundled`: `download-binaries` fetches ONNX Runtime at BUILD time and places it
+#     beside the binary — self-contained, no `ORT_DYLIB_PATH`, no dll to source. `tls-rustls` is
+#     REQUIRED alongside it: the downloader fetches over HTTPS (ureq), and with the `ort` dep's
+#     `default-features = false` no TLS is otherwise configured, so ort-sys errors "a TLS feature
+#     must be configured" and ureq's `tls` module stays cfg'd out. rustls (ring provider) is
+#     pure-Rust: no system OpenSSL/schannel dep, so the build stays portable. This is the CPU/
+#     DirectML/CoreML path — all self-contained execution providers.
+#   - `nli-ort-dynamic`: `load-dynamic` links against a runtime dylib resolved via `ORT_DYLIB_PATH`
+#     at process start, instead of a build-time download. Required for CUDA/ROCm: ort's
+#     `download-binaries` archive does NOT ship the CUDA/ROCm execution providers (validated
+#     locally — a `download-binaries` CUDA build silently ran on CPU), so a GPU build must bring
+#     its own `onnxruntime-gpu` dll and point `ORT_DYLIB_PATH` at it.
+#
+# ureq is ALSO pinned to 3.3.0 in Cargo.lock (belt-and-suspenders, `nli-ort-bundled` only): ort-sys
+# rc.13 (2026-07-28) was written against ureq <= 3.3.0, and ureq 3.4.x (2026-08/09) renamed the tls
+# builder API the downloader calls (`tls_config` / `TlsConfig`). The pin (Cargo.lock; kb-eval's
+# `ureq = "2"` is a different major, unaffected) keeps that API stable. Drop it once ort-sys
+# supports ureq 3.4.
+nli-ort-bundled = ["nli-ort", "ort/download-binaries", "ort/tls-rustls"]  # static, self-contained (CPU, DirectML, CoreML)
+nli-ort-dynamic = ["nli-ort", "ort/load-dynamic"]                        # runtime dll (CUDA/ROCm: bring onnxruntime-gpu)
+# Execution providers for the nli-ort engine (runtime-selected via `[verify.nli]
+# execution_providers`, see `InProcessNli::load`'s `providers` param). CPU/DirectML/CoreML ride the
+# self-contained `nli-ort-bundled` linking strategy; CUDA/ROCm require `nli-ort-dynamic` (see above
+# — `download-binaries` doesn't ship those providers). Registration is fail-open: a GPU EP that
+# can't init at runtime (no GPU/driver) falls through to ORT's implicit CPU EP on its own (see
+# lib.rs; no `.error_on_failure()` anywhere). Nothing in `glossa`'s own Cargo.toml enables the
+# dynamic-linking features — see glossa/Cargo.toml's `nli`/`nli-dynamic` feature comments and
+# eval/Cargo.toml's passthrough features, which is how `cargo test -p glossa --all-features` stays
+# on `nli-ort-bundled` only while `cargo build -p kb-eval --features nli-cuda` gets a GPU-capable
+# `InProcessNli` via `nli-ort-dynamic`.
+nli-directml = ["nli-ort-bundled", "ort/directml"]   # Windows all-vendor; works self-contained
+nli-coreml   = ["nli-ort-bundled", "ort/coreml"]     # macOS; self-contained
+nli-cuda     = ["nli-ort-dynamic", "ort/cuda"]       # NVIDIA; load-dynamic + runtime
+nli-rocm     = ["nli-ort-dynamic", "ort/rocm"]       # AMD/Linux; load-dynamic + runtime
+
+[dependencies]
+anyhow = "1"
+# Pinned via context7 (pykeio/ort docs, crates.io newest_version) 2026-09: 2.0.0-rc.13, EXACT pin
+# on the pre-1.0 rc. `default-features = false` drops `ndarray`/ONNX-Runtime-version defaults we
+# don't need yet plus any linking strategy; `std` is required for filesystem-backed session loading
+# (loads `model.onnx` from a local dir). The linking strategy (`download-binaries` vs
+# `load-dynamic`) and its supporting features (`tls-rustls`) live on the `nli-ort-bundled` /
+# `nli-ort-dynamic` features above, NOT here — see the `[features]` comment for the full rationale.
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std"] }
+# Pinned via context7 (huggingface/tokenizers docs.rs Cargo.toml) + crates.io newest_version
+# 2026-09: 0.23.2. `default-features = false` drops `progressbar` (indicatif) and `http` (hf-hub
+# download support, not needed — Task 2 loads `tokenizer.json` from the local model_dir); `onig`
+# is the default regex backend used for pre-tokenization patterns.
+tokenizers = { version = "=0.23.2", optional = true, default-features = false, features = ["onig"] }
+
+[dev-dependencies]
+# Temp dirs for `resolve_model_file`'s unit tests (pure filesystem resolution, no model/session).
+tempfile = "3"

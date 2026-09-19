@@ -401,6 +401,64 @@ enum Cmd {
         #[command(subcommand)]
         cmd: DatasetCmd,
     },
+    /// NLI answer-grounding verifier maintenance (model download + readiness check).
+    Nli {
+        #[command(subcommand)]
+        cmd: NliCmd,
+    },
+}
+
+/// `kbx nli` subcommands: `download` fetches the ONNX model + tokenizer so `[verify.nli].model_dir`
+/// has something to point at; `check` is a readiness doctor that reports whether the NLI verifier
+/// will actually run for a corpus or has silently fallen back to AC-only.
+#[derive(Subcommand)]
+enum NliCmd {
+    /// Download the ONNX model + tokenizer from a HuggingFace repo into a local dir (the dir
+    /// `[verify.nli].model_dir` points at). No network happens until this runs.
+    Download {
+        /// HuggingFace repo id, e.g. `metalmon/rubert-nli-threeway-onnx`.
+        #[arg(long)]
+        repo: String,
+        /// Git revision / branch / tag.
+        #[arg(long, default_value = "main")]
+        revision: String,
+        /// Local directory to write into (created if absent).
+        #[arg(long)]
+        to: PathBuf,
+        /// File(s) to fetch; repeat for several. Defaults to the standard export set.
+        #[arg(long = "file")]
+        files: Vec<String>,
+    },
+    /// Report whether the NLI verifier will actually run for a corpus, or why it fails open to AC.
+    Check {
+        /// Corpus root (kb-style PATH resolution, like other kbx subcommands).
+        path: Option<PathBuf>,
+    },
+    /// Write `[verify.nli]` (model_dir + scorer, optional entail_index/mode) into the corpus
+    /// `ontology.toml`, preserving all other tables/comments. Pairs with `download` + `check`.
+    Set {
+        /// Corpus root (kb-style PATH resolution, like `check`).
+        path: Option<PathBuf>,
+        /// Local model dir (what `download --to` produced). Written to `[verify.nli].model_dir`.
+        #[arg(long = "model-dir")]
+        model_dir: PathBuf,
+        /// Scorer backend. Written to `[verify.nli].scorer`.
+        #[arg(long, default_value = "in_process")]
+        scorer: String,
+        /// Entailment softmax class index; written to `[verify.nli].entail_index` only if given.
+        #[arg(long = "entail-index")]
+        entail_index: Option<usize>,
+        /// Also set `[verify].mode` (ac|nli|combined) — only written if given. NLI still needs
+        /// calibrated thresholds (`kbx eval calibrate`) to actually fire; `set` only wires the model.
+        #[arg(long)]
+        mode: Option<String>,
+        /// Ordered execution-provider preference list for a later task's GPU EP registration
+        /// (this task only writes the config). Repeat the flag or comma-join a single value, e.g.
+        /// `--ep cuda,cpu` or `--ep cuda --ep cpu` (each occurrence is comma-split too). Written to
+        /// `[verify.nli].execution_providers` only if given.
+        #[arg(long = "ep")]
+        ep: Vec<String>,
+    },
 }
 
 /// `kbx eval` subcommands: `run` is the former flat `kbx eval <path>` (BREAKING: now `kbx eval run
@@ -652,6 +710,61 @@ fn main() -> Result<()> {
             },
         ),
         Cmd::Dataset { cmd } => run_dataset(cmd),
+        Cmd::Nli {
+            cmd:
+                NliCmd::Download {
+                    repo,
+                    revision,
+                    to,
+                    files,
+                },
+        } => {
+            let files = if files.is_empty() {
+                vec![
+                    "model.onnx".to_string(),
+                    "tokenizer.json".to_string(),
+                    "config.json".to_string(),
+                ]
+            } else {
+                files
+            };
+            let downloaded = kb_eval::download::download_files(&repo, &revision, &files, &to)?;
+            let mut total = 0u64;
+            for (name, (path, bytes)) in files.iter().zip(downloaded.iter()) {
+                println!("downloaded {name} ({bytes} bytes) -> {}", path.display());
+                total += bytes;
+            }
+            println!(
+                "downloaded {} file(s), {total} bytes total",
+                downloaded.len()
+            );
+            Ok(())
+        }
+        Cmd::Nli {
+            cmd: NliCmd::Check { path },
+        } => kb_eval::nli_check::nli_check(path),
+        Cmd::Nli {
+            cmd:
+                NliCmd::Set {
+                    path,
+                    model_dir,
+                    scorer,
+                    entail_index,
+                    mode,
+                    ep,
+                },
+        } => {
+            // Each `--ep` occurrence may itself be comma-joined (`--ep cuda,cpu`); flatten both
+            // the repeated-flag and comma-joined forms into one ordered list.
+            let ep: Vec<String> = ep
+                .iter()
+                .flat_map(|s| s.split(','))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            kb_eval::nli_check::nli_set(path, model_dir, scorer, entail_index, mode, ep)
+        }
     }
 }
 

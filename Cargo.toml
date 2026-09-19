@@ -55,6 +55,7 @@ chardetng = "1.0"
 encoding_rs = "0.8"
 fs4 = "1.1"
 glossa-constraint = { path = "constraint", optional = true }
+glossa-nli = { path = "glossa-nli", optional = true, default-features = false }
 quick-xml = "0.41"
 sqlparser = "0.53"
 memmap2 = "0.9"
@@ -95,6 +96,19 @@ notebook = []
 e2e = []
 lingua = ["dep:lingua"]
 constraint = ["dep:glossa-constraint", "notebook"]
+# In-process NLI (entailment) scorer for the answer-grounding gate (opt-in — the default build
+# carries zero ML deps). `nli` pulls in glossa-nli's self-contained CPU linking strategy
+# (`nli-ort-bundled` => `download-binaries`) — this is where `--all-features` lands.
+nli = ["dep:glossa-nli", "glossa-nli/nli-ort-bundled"]
+# Code-only companion to `nli`: pulls in glossa-nli's `nli-ort` engine code WITHOUT a linking
+# strategy, so a GPU top-crate (eval's `nli-cuda`/`nli-rocm`) can supply `nli-ort-dynamic` +
+# `ort/cuda`/`ort/rocm` on the shared glossa-nli instance instead. glossa itself never enables a
+# GPU EP or `nli-ort-dynamic` — so `cargo test -p glossa --all-features` enables BOTH `nli` (=>
+# `nli-ort-bundled`) and `nli-dynamic` (=> plain `nli-ort`); Cargo's feature unification collapses
+# that to glossa-nli's `nli-ort + nli-ort-bundled` (download-binaries only, no load-dynamic, no
+# cuda/rocm) on the ONE shared glossa-nli instance — the CI invariant this feature is designed to
+# preserve.
+nli-dynamic = ["dep:glossa-nli", "glossa-nli/nli-ort"]
 # Native TLS + mTLS on the streamable-http listener (§3b). OFF by default: the default build
 # stays plaintext with no crypto surface (`kb mcp --transport streamable-http` behind a
 # reverse-proxy/TLS-terminator remains the default-supported deployment).
@@ -109,4 +123,4 @@ predicates = "3"
 filetime = "0.2"
 
 [workspace]
-members = ["eval", "constraint"]
+members = ["eval", "constraint", "glossa-nli"]

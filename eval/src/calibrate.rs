@@ -115,7 +115,14 @@ pub fn load_cases(
     let df =
         glossa::gate::df::DfTable::load(&glossa::gate::df::DfTable::sidecar_path(corpus_glossa))
             .with_context(|| format!("loading df sidecar under {}", corpus_glossa.display()))?;
-    let rare_df_frac = VerifyConfig::resolve(corpus_glossa).rare_df_frac;
+    let cfg = VerifyConfig::resolve(corpus_glossa);
+    let rare_df_frac = cfg.rare_df_frac;
+    // Plan 2: resolve the runtime NLI scorer from `[verify.nli]`. `None` when the `nli` feature is
+    // off, no `model_dir` is configured, or the model fails to load — fail-open, exactly like the
+    // live verify path. When present, each case gets its shadow NLI score below so `select_mode`
+    // can weigh `nli`/`combined`. In default builds / unit fixtures (no `model_dir`) this is `None`,
+    // so `load_cases` stays pure and its behavior is unchanged from Plan 1.
+    let scorer = glossa::gate::resolve_scorer(&cfg);
     let raw = crate::report::load_cases(&run_dir.join("cases"))?;
     let pb = mk_bar(raw.len() as u64);
     pb.set_prefix("scoring cases");
@@ -135,11 +142,15 @@ pub fn load_cases(
             .filter_map(|p| glossa::gate::read_chunk_text(corpus_glossa, p).ok())
             .collect();
         let s = score(&c.final_answer, &chunks, &df, rare_df_frac);
+        // Shadow NLI score for this case (None unless a scorer resolved — see `scorer` above).
+        let nli = scorer
+            .as_deref()
+            .and_then(|sc| glossa::gate::nli::nli_score(&c.final_answer, &chunks, &df, &cfg, sc));
         out.push(Case {
             grounding: s.grounding,
             bucket: s.bucket,
             cell,
-            nli: None, // Plan 1 has no NLI scorer wired in yet; Plan 2 fills this shadow slot.
+            nli,
         });
     }
     pb.finish_and_clear();
@@ -259,6 +270,13 @@ pub struct ModeSelection {
     /// `mode == Combined`.
     pub combined_single: Option<glossa::gate::config::CombinedStats>,
     pub combined_multi: Option<glossa::gate::config::CombinedStats>,
+    /// Served-coverage of the whole pool at each mode's calibrated operating point (the numbers the
+    /// selection compares). `ac_cov` always present; `nli_cov`/`combined_cov` are `Some` only when
+    /// that candidate materialized (both wanted buckets calibrated). Surfaced so the calibrate
+    /// summary can show WHY a mode won (ac vs nli vs combined coverage), not just the winner.
+    pub ac_cov: f32,
+    pub nli_cov: Option<f32>,
+    pub combined_cov: Option<f32>,
 }
 
 /// Population mean and standard deviation of a slice of scores (used to standardize AC and NLI
@@ -464,6 +482,9 @@ pub fn select_mode(
         nli_multi,
         combined_single,
         combined_multi,
+        ac_cov,
+        nli_cov,
+        combined_cov,
     }
 }
 
@@ -811,26 +832,51 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
     )
     .with_context(|| format!("writing {}", out_dir.join("calibration.json").display()))?;
 
+    let answered_pct = if weighted_n > 0 {
+        (weighted_answered / weighted_n as f64) as f32
+    } else {
+        0.0
+    };
+    let error_pct = if weighted_n > 0 {
+        (weighted_error / weighted_n as f64) as f32
+    } else {
+        0.0
+    };
+    // Decide the mode ALWAYS (dry-run too) so the summary shows WHY a mode wins — the served
+    // coverage of each candidate at its calibrated ≤budget-error operating point. `select_mode`
+    // works on the already-computed per-case `nli`, so this adds no inference cost; a dry-run that
+    // paid to compute NLI now actually surfaces it instead of discarding it.
+    let sel = select_mode(
+        &cases,
+        budget,
+        args.folds,
+        single_threshold,
+        multi_threshold,
+        want_single,
+        want_multi,
+    );
+    let mode_str = match sel.mode {
+        glossa::gate::config::VerifyMode::Ac => "ac",
+        glossa::gate::config::VerifyMode::Nli => "nli",
+        glossa::gate::config::VerifyMode::Combined => "combined",
+    };
+    // Coverage is the fraction of the WHOLE pool served (both buckets); `—` means that candidate
+    // didn't materialize (not enough labeled cases / bucket not calibrated). This is the ac-vs-nli-
+    // vs-combined comparison the selection is made on.
+    let cov = |o: Option<f32>| {
+        o.map(|c| format!("{:.0}%", c * 100.0))
+            .unwrap_or_else(|| "—".to_string())
+    };
+    println!(
+        "mode @ <={:.0}% err:  ac {:.0}%  ·  nli {}  ·  combined {}   ->  {}",
+        budget * 100.0,
+        sel.ac_cov * 100.0,
+        cov(sel.nli_cov),
+        cov(sel.combined_cov),
+        mode_str,
+    );
+
     if args.write {
-        let answered_pct = if weighted_n > 0 {
-            (weighted_answered / weighted_n as f64) as f32
-        } else {
-            0.0
-        };
-        let error_pct = if weighted_n > 0 {
-            (weighted_error / weighted_n as f64) as f32
-        } else {
-            0.0
-        };
-        let sel = select_mode(
-            &cases,
-            budget,
-            args.folds,
-            single_threshold,
-            multi_threshold,
-            want_single,
-            want_multi,
-        );
         write_threshold(
             &corpus_glossa,
             &sel,
@@ -840,11 +886,6 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
             error_pct,
             args.folds,
         )?;
-        let mode_str = match sel.mode {
-            glossa::gate::config::VerifyMode::Ac => "ac",
-            glossa::gate::config::VerifyMode::Nli => "nli",
-            glossa::gate::config::VerifyMode::Combined => "combined",
-        };
         println!(
             "written to ontology.toml: mode={mode_str} single={:.2} multi={:.2}   (weighted: answers {:.0}% at {:.0}% error)",
             sel.ac_single,
@@ -1079,6 +1120,9 @@ mod tests {
             nli_multi: None,
             combined_single: None,
             combined_multi: None,
+            ac_cov: 0.0,
+            nli_cov: None,
+            combined_cov: None,
         }
     }
 
@@ -1316,6 +1360,9 @@ mod tests {
             nli_multi: Some(0.65),
             combined_single: Some(stats),
             combined_multi: Some(stats),
+            ac_cov: 0.0,
+            nli_cov: None,
+            combined_cov: None,
         };
         super::write_threshold(&glossa, &sel, "runZ", None, 0.5, 0.0, 5).unwrap();
         let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
