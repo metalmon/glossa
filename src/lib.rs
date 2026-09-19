@@ -41,9 +41,20 @@ pub mod constraint_adapter;
 #[cfg(feature = "tls")]
 pub mod tls;
 
+/// Version string shown by `kb --version` / `kbx --version`, with the compiled NLI inference engine
+/// appended so a binary self-reports which build it is: `ort` (ONNX Runtime), `burn-wgpu` (pure-Rust
+/// GPU, Plan 4), or `none` (no NLI engine compiled). The EP/backend detail (cuda/directml/vulkan) is
+/// a glossa-nli-level feature not visible here; `kbx nli check` reports it at runtime.
 pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    VERSION_WITH_ENGINE
 }
+
+#[cfg(feature = "nli-burn")]
+const VERSION_WITH_ENGINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (nli engine: burn-wgpu)");
+#[cfg(all(any(feature = "nli", feature = "nli-dynamic"), not(feature = "nli-burn")))]
+const VERSION_WITH_ENGINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (nli engine: ort)");
+#[cfg(not(any(feature = "nli", feature = "nli-dynamic", feature = "nli-burn")))]
+const VERSION_WITH_ENGINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (nli engine: none)");
 
 /// Serializes tests that mutate process-global environment variables (`std::env::set_var`/
 /// `remove_var`). Rust runs tests concurrently in one process, so without this they race.

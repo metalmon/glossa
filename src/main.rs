@@ -169,7 +169,9 @@ enum OutputFormat {
 #[derive(Parser)]
 #[command(
     name = "kb",
-    version,
+    // Includes the compiled NLI engine (ort / burn-wgpu / none) so `kb --version` self-reports the
+    // build — same string kbx uses. See glossa::version().
+    version = glossa::version(),
     about = "File-First knowledge-base search (ripgrep syntax)"
 )]
 struct Cli {
