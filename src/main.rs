@@ -195,9 +195,9 @@ struct Cli {
 enum Cmd {
     /// Search the knowledge base (BM25-ranked keywords over the index).
     Search {
-        /// keywords (or a ripgrep regex with `--scan`)
+        /// Search keywords (BM25-ranked, stemmed). With `--scan`, a raw ripgrep regex over file text.
         pattern: String,
-        /// Directory to search.
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// Case-insensitive (rg -i).
         #[arg(short = 'i', long = "ignore-case")]
@@ -221,7 +221,8 @@ enum Cmd {
         /// Max number of hits.
         #[arg(short = 'l', long, default_value_t = 100)]
         limit: usize,
-        /// literal ripgrep-regex scan of raw files instead of the BM25 index (slow, not stemmed)
+        /// Raw ripgrep regex over file text instead of the BM25 index (slower, not stemmed; matches
+        /// are line-based, so they carry no `path#N` chunk ref).
         #[arg(short = 's', long)]
         scan: bool,
         /// Disable .gitignore/.ignore/hidden filtering (index everything).
@@ -253,12 +254,15 @@ enum Cmd {
     /// Update the index. No flags: incremental over the whole corpus. --force: full rebuild.
     /// --file <rel>: reindex just that one document (picks up an in-place edit).
     Index {
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// Full rebuild from scratch. This is also the ONLY pass that (re)builds the answer-grounding
         /// DF sidecar (`.glossa/df`): incremental indexing never refreshes it, so run `--force` after
         /// large corpus changes to keep the `verify` gate's rarity counts accurate.
         #[arg(long)]
         force: bool,
+        /// Reindex just this one document (path relative to the corpus root) — picks up an in-place
+        /// edit without a full pass.
         #[arg(long)]
         file: Option<String>,
         /// Materialize a baked ontology preset before indexing (see `kb ontology list`).
