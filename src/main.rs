@@ -272,6 +272,7 @@ enum Cmd {
     /// Delete notebook notes whose owner document no longer exists in the corpus.
     #[cfg(feature = "notebook")]
     Prune {
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// List what would be deleted without touching anything.
         #[arg(long)]
@@ -291,7 +292,7 @@ enum Cmd {
     Grep {
         /// regex or literal pattern
         pattern: String,
-        /// knowledge-base directory (default: nearest indexed root / current dir)
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         #[arg(short = 'i', long, help = "case-insensitive matching (-i)")]
         ignore_case: bool,
@@ -349,7 +350,7 @@ enum Cmd {
     Glob {
         /// glob over document PATHS, e.g. *.pdf or *Safety* (not a content search)
         pattern: String,
-        /// knowledge-base directory (default: nearest indexed root / current dir)
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
     },
     /// Run the MCP server (stdio for a local subprocess, or streamable-http for the network), or an
@@ -357,6 +358,7 @@ enum Cmd {
     Mcp {
         #[command(subcommand)]
         action: Option<McpAction>,
+        /// Knowledge-base directory to serve (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// Tool profile: reader | editor | full.
         #[arg(short = 'p', long, default_value = "editor")]
@@ -478,12 +480,16 @@ enum McpAction {
 #[derive(Subcommand)]
 enum GraphAction {
     /// Print node/edge counts.
-    Stats { path: Option<PathBuf> },
+    Stats {
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
+        path: Option<PathBuf>,
+    },
     /// Find graph nodes by concept (the `glossary` tool) — prints `id [type] label` + edges.
     #[command(visible_aliases = ["search", "find"])]
     Glossary {
         /// concept in your own words, e.g. "connection loss"
         query: String,
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// Show the graph as it was valid on this date (ISO-8601); a matched node outside its
         /// validity interval is hidden. Timeless nodes are always shown.
@@ -498,10 +504,12 @@ enum GraphAction {
         /// a SELECT over nodes/edges/node_validity/edges_labeled; empty = show schema
         #[arg(default_value = "")]
         sql: String,
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
     },
     /// Browse graph nodes: a per-type count, or `--type T` to list that type.
     Ls {
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// list nodes of this type, e.g. Symptom (omit for a per-type summary)
         #[arg(short = 't', long = "type")]
@@ -520,6 +528,7 @@ enum GraphAction {
     /// and centrality (written as derived `auto-generalized` edges + `node_meta`). With `--merge`,
     /// also COLLAPSE near-duplicate nodes (mutates/deletes agent nodes); without it, report only.
     Generalize {
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         #[arg(
             short = 'm',
@@ -530,6 +539,7 @@ enum GraphAction {
     },
     /// Diagnose graph health: ungrounded / stale / incomplete nodes.
     Doctor {
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// Delete off-spine (incomplete/degenerate) nodes.
         #[arg(long = "prune-incomplete")]
@@ -558,6 +568,7 @@ enum GraphAction {
     #[command(visible_alias = "neighbors")]
     Near {
         node_id: String,
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         #[arg(short = 'd', long, default_value_t = 1)]
         depth: usize,
@@ -577,6 +588,7 @@ enum GraphAction {
     /// Show a node: type, label, provenance, and its outgoing edges.
     Node {
         node_id: String,
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// Show the graph as it was valid on this date (ISO-8601); the node is treated as not
         /// found when outside its validity interval. Timeless nodes are always shown.
@@ -602,6 +614,7 @@ enum GraphAction {
         /// end: node id to verify a connection to; omit for discovery
         #[arg(long)]
         to: Option<String>,
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// Disable the cross-document bridge (graph-only, in-document connectivity only).
         #[arg(long = "no-bridge")]
@@ -614,7 +627,7 @@ enum GraphAction {
     },
     /// Dump all nodes (optionally filtered by type) with their outgoing edges.
     Dump {
-        /// corpus directory (default: current directory)
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// only show nodes of this type, e.g. Symptom or Resolution (omit for all)
         #[arg(short = 't', long = "type")]
@@ -635,6 +648,7 @@ enum GraphAction {
     /// the file as source of truth for its types (prunes them first).
     Import {
         file: PathBuf,
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: PathBuf,
         #[arg(short = 'f', long)]
         format: Option<String>,
@@ -644,6 +658,7 @@ enum GraphAction {
     },
     /// Delete all nodes of the given type (and edges touching them) — clean-slate a semantic layer.
     Prune {
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: PathBuf,
         /// node type to delete, e.g. Symptom (repeatable)
         #[arg(short = 't', long = "type", required = true)]
@@ -659,6 +674,7 @@ enum GraphAction {
     /// Compile a document's `.csp` limit tables (notebook notes) into the constraint graph.
     #[cfg(feature = "constraint")]
     Build {
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// Owner document (`Field.source_path`), corpus-relative.
         #[arg(long)]
@@ -682,6 +698,7 @@ enum OntologyAction {
     Show { name: String },
     /// Materialize a preset to <path>/.glossa/ontology.toml (no indexing).
     Init {
+        /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         #[arg(short = 't', long = "template")]
         template: String,
