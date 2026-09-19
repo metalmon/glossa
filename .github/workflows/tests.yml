@@ -45,10 +45,14 @@ jobs:
       - name: cargo test (glossa, no default features — release config)
         run: cargo test -p glossa --release --locked --no-default-features
 
-      # Full build — every feature (notebook + lingua + constraint + tls). Covers the `tls`
-      # feature's handshake/mTLS/reload tests on both matrix OSes (§3b).
-      - name: cargo test (glossa, all features)
-        run: cargo test -p glossa --release --locked --all-features
+      # Full build — every feature EXCEPT the mutually-exclusive burn engine. `--all-features` is
+      # no longer usable here: glossa now has two mutually-exclusive NLI engines (`nli`/`nli-dynamic`
+      # = ONNX Runtime, XOR `nli-burn` = burn/wgpu), and `--all-features` would enable BOTH → a
+      # glossa-nli `compile_error!`. This explicit set is the old `--all-features` minus `nli-burn`
+      # (ORT engine + notebook + e2e + lingua + constraint + tls); the burn engine is covered by its
+      # own job below. Covers the `tls` handshake/mTLS/reload tests on both matrix OSes (§3b).
+      - name: cargo test (glossa, all features except burn engine)
+        run: cargo test -p glossa --release --locked --features "notebook e2e lingua constraint nli nli-dynamic tls"
 
       - name: cargo test (kb-eval)
         run: cargo test -p kb-eval --release --locked
@@ -56,3 +60,16 @@ jobs:
       # kb-eval's opt-in `constraint` feature (CSP / marking-schema tooling + kb-eval-constraint bin).
       - name: cargo test (kb-eval, constraint feature)
         run: cargo test -p kb-eval --release --locked --features constraint
+
+      # burn/wgpu NLI engine (Plan 4). Mutually exclusive with the ORT engine, so it gets its own
+      # jobs on the NdArray CPU backend (no GPU runner — the GPU/Vulkan path is validated locally on
+      # real hardware). Lints + tests the burn engine, then verifies the full glossa/kb-eval wiring
+      # (adapter + resolve_scorer + eval passthrough) compiles under the burn engine.
+      - name: cargo clippy (burn engine, CPU backend)
+        run: cargo clippy -p glossa-nli --no-default-features --features nli-burn-cpu --all-targets --locked -- -D warnings
+
+      - name: cargo test (glossa-nli, burn engine, CPU backend)
+        run: cargo test -p glossa-nli --release --locked --no-default-features --features nli-burn-cpu
+
+      - name: cargo build (kb-eval, burn engine wiring, CPU backend)
+        run: cargo build -p kb-eval --release --locked --features nli-burn-cpu
