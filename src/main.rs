@@ -1602,17 +1602,22 @@ fn main() -> anyhow::Result<()> {
                     file_type.as_deref(),
                     scope.as_deref(),
                 )? {
+                    // Lead with the copy-ready `path#ord` token (same ref the MCP tools + `kb read`
+                    // consume), then the human location label + snippet.
                     rg_lines.push(format!(
-                        "{}:{}: {}  [{:.3}]",
-                        h.path, h.location, h.snippet, h.score
+                        "{}#{}  {}: {}  [{:.3}]",
+                        h.path, h.ord, h.location, h.snippet, h.score
                     ));
                     display.push(glossa::cli_fmt::DisplayHit {
                         file: glossa::cli_fmt::rel_file(&rr.root, &h.path),
                         location: h.location.clone(),
                         snippet: h.snippet.clone(),
                         score: Some(h.score),
+                        ord: Some(h.ord),
                     });
-                    records.push((h.path.clone(), h.location.clone()));
+                    // Persist the chunk ORDINAL so `kb read <#>` resolves it through the same core as
+                    // the MCP `read` tool (`path#ord`), not a heading/`p.N` substring.
+                    records.push((h.path.clone(), h.ord.to_string()));
                 }
             } else {
                 let opts = QueryOpts {
@@ -1631,6 +1636,8 @@ fn main() -> anyhow::Result<()> {
                         location: h.location.clone(),
                         snippet: h.snippet.clone(),
                         score: None,
+                        // Raw-file scan has no chunk ordinal — its `read <#>` stays location-based.
+                        ord: None,
                     });
                     records.push((p, h.location.clone()));
                 }
@@ -1687,6 +1694,37 @@ fn main() -> anyhow::Result<()> {
                 let rec = glossa::cli_fmt::read_last_search(&rr.state_base)
                     .and_then(|c| glossa::cli_fmt::nth_record(&c, k));
                 match rec {
+                    // Index search recorded the chunk ORDINAL → resolve `path#ord` through the same
+                    // core as the MCP `read` tool (identical output, incl. the `── path#ord ──` head).
+                    Some((p, loc)) if loc.parse::<u64>().is_ok() => {
+                        let ord = loc.parse::<u64>().unwrap();
+                        glossa::index::store::ensure_fresh_at(&rr.roots, &rr.state_base)?;
+                        let idx = glossa::index::store::DocIndex::open_or_create_at(
+                            &rr.roots,
+                            &rr.state_base,
+                        )?;
+                        let graph = glossa::graph::store::GraphStore::open(&rr.state_base).ok();
+                        let root = rr
+                            .roots
+                            .first()
+                            .map(|r| r.path.as_path())
+                            .unwrap_or(rr.state_base.as_path());
+                        let out = glossa::tools::read(
+                            root,
+                            &idx,
+                            graph.as_ref(),
+                            &p,
+                            ord,
+                            false,
+                            &glossa::trace::TraceLog::disabled(),
+                        );
+                        print!("{}", out.text);
+                        if !out.text.ends_with('\n') {
+                            println!();
+                        }
+                    }
+                    // `--scan` result: no chunk ordinal, only a location label — read by that label
+                    // (the legacy path; a raw-file scan has no `path#ord` to hand the MCP core).
                     Some((p, loc)) => {
                         let loc_opt = if loc.is_empty() || loc == "(no-text)" {
                             None
