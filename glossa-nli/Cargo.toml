@@ -12,7 +12,14 @@ default = ["nli-ort-bundled"]                 # standalone/tests/CI => self-cont
 # EXACTLY ONE engine per build. nli-burn-wgpu is a FUTURE alternative; enabling both is a compile
 # error (see lib.rs). Only nli-ort is implemented in this plan.
 nli-ort = ["dep:ort", "dep:tokenizers"]       # engine CODE only, NO linking strategy
-nli-burn-wgpu = []  # placeholder; not implemented (kept so the XOR guard has something to guard)
+# Pure-Rust burn/wgpu engine (Plan 4): hand-written RuBERT-base forward on the GPU via Vulkan/SPIR-V.
+# `nli-burn-wgpu` is the engine code; it needs a backend — EXACTLY ONE of `nli-burn-vulkan` (GPU,
+# production) or `nli-burn-cpu` (NdArray, CI parity tests, no GPU runner). burn crates are pure Rust
+# (no external build/runtime deps beyond the Vulkan loader at runtime), so there is no bundled/
+# load-dynamic split like ORT.
+nli-burn-wgpu = ["dep:burn", "dep:burn-store", "dep:tokenizers"]
+nli-burn-vulkan = ["nli-burn-wgpu", "burn/vulkan", "burn/autotune", "burn/fusion"]  # GPU (SPIR-V)
+nli-burn-cpu = ["nli-burn-wgpu", "burn/ndarray"]                                    # tests/CI
 # Linking strategy — EXACTLY ONE (XOR, enforced by compile_error! in lib.rs). `nli-ort` (above) is
 # just the engine code; it does NOT choose how `ort-sys` links against ONNX Runtime. These two
 # features make that choice:
@@ -65,7 +72,14 @@ ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, fea
 # download support, not needed — Task 2 loads `tokenizer.json` from the local model_dir); `onig`
 # is the default regex backend used for pre-tokenization patterns.
 tokenizers = { version = "=0.23.2", optional = true, default-features = false, features = ["onig"] }
+# Plan 4 burn/wgpu engine deps (optional, pulled only by `nli-burn-wgpu`). `default-features = false`
+# + `std`: backends are added à la carte via the `nli-burn-vulkan`/`nli-burn-cpu` features
+# (`burn/vulkan` / `burn/ndarray`). burn-store loads the safetensors weights into the module.
+burn = { version = "0.21", optional = true, default-features = false, features = ["std"] }
+burn-store = { version = "0.21", optional = true, features = ["safetensors"] }
 
 [dev-dependencies]
 # Temp dirs for `resolve_model_file`'s unit tests (pure filesystem resolution, no model/session).
 tempfile = "3"
+# Reads the burn-engine parity fixtures (inputs.json + reference_logits.json) in tests/burn_parity.rs.
+serde_json = "1"

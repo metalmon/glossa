@@ -109,6 +109,15 @@ nli = ["dep:glossa-nli", "glossa-nli/nli-ort-bundled"]
 # cuda/rocm) on the ONE shared glossa-nli instance — the CI invariant this feature is designed to
 # preserve.
 nli-dynamic = ["dep:glossa-nli", "glossa-nli/nli-ort"]
+# Pure-Rust burn/wgpu NLI engine (Plan 4) — MUTUALLY EXCLUSIVE with `nli`/`nli-dynamic` (glossa-nli
+# enforces `nli-ort` XOR `nli-burn-wgpu` via compile_error). This pulls glossa-nli's burn engine
+# CODE (the `impl NliScorer for InProcessBurnNli` adapter + `resolve_scorer` burn branch live here,
+# gated on this feature); it does NOT pick a backend — the top crate supplies exactly one of
+# `glossa-nli/nli-burn-vulkan` (GPU) or `nli-burn-cpu` (tests) on the shared glossa-nli instance
+# (see eval/Cargo.toml's `nli-burn`/`nli-burn-cpu`). Because the two engines can't coexist,
+# `cargo test -p glossa --all-features` is NOT used in CI (it would trip the XOR); the test matrix
+# enables an explicit ORT feature set and this burn engine in separate jobs (see .github/tests.yml).
+nli-burn = ["dep:glossa-nli", "glossa-nli/nli-burn-wgpu"]
 # Native TLS + mTLS on the streamable-http listener (§3b). OFF by default: the default build
 # stays plaintext with no crypto surface (`kb mcp --transport streamable-http` behind a
 # reverse-proxy/TLS-terminator remains the default-supported deployment).

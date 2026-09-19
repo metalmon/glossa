@@ -67,6 +67,13 @@ nli-coreml = ["nli", "dep:glossa-nli", "glossa-nli/nli-coreml"]
 # `ORT_DYLIB_PATH` at runtime).
 nli-cuda = ["glossa/nli-dynamic", "dep:glossa-nli", "glossa-nli/nli-cuda"]
 nli-rocm = ["glossa/nli-dynamic", "dep:glossa-nli", "glossa-nli/nli-rocm"]
+# Pure-Rust burn/wgpu engine (Plan 4) — a DIFFERENT engine, mutually exclusive with the ORT features
+# above. Pulls `glossa/nli-burn` (the burn adapter + resolve_scorer branch, no backend) and supplies
+# the backend on the shared glossa-nli instance: `nli-burn` = Vulkan/SPIR-V GPU (production, run with
+# only a Vulkan driver present); `nli-burn-cpu` = NdArray (CI/tests, no GPU). Do NOT combine with
+# `nli`/`nli-cuda`/... (the ORT XOR burn `compile_error!` in glossa-nli would fire).
+nli-burn = ["glossa/nli-burn", "dep:glossa-nli", "glossa-nli/nli-burn-vulkan"]
+nli-burn-cpu = ["glossa/nli-burn", "dep:glossa-nli", "glossa-nli/nli-burn-cpu"]
 
 [dependencies]
 glossa = { path = ".." }

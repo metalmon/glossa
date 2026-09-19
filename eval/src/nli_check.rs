@@ -98,7 +98,7 @@ pub fn nli_verdict(f: &NliFacts) -> (bool, String) {
     if !f.model_dir_exists {
         return (
             false,
-            "not ready: model_dir missing model.onnx and/or tokenizer.json (run `kbx nli \
+            "not ready: model_dir missing model weights and/or tokenizer.json (run `kbx nli \
              download`)"
                 .to_string(),
         );
@@ -128,6 +128,45 @@ pub fn nli_verdict(f: &NliFacts) -> (bool, String) {
     }
 }
 
+/// Whether `dir` holds the model weights THIS engine needs: the burn engine loads a
+/// `.safetensors` file (Plan 4), the ORT engine loads `model.onnx`. `tokenizer.json` is checked
+/// separately by the caller (both engines need it).
+#[cfg(any(feature = "nli-burn", feature = "nli-burn-cpu"))]
+fn model_weights_present(dir: &Path) -> bool {
+    if dir.join("model.safetensors").is_file() {
+        return true;
+    }
+    std::fs::read_dir(dir).is_ok_and(|rd| {
+        rd.filter_map(|e| e.ok()).any(|e| {
+            e.path()
+                .extension()
+                .and_then(|x| x.to_str())
+                .is_some_and(|x| x.eq_ignore_ascii_case("safetensors"))
+        })
+    })
+}
+
+#[cfg(not(any(feature = "nli-burn", feature = "nli-burn-cpu")))]
+fn model_weights_present(dir: &Path) -> bool {
+    dir.join("model.onnx").is_file()
+}
+
+/// Human label for the compiled inference engine, shown in the `check` report.
+fn engine_label() -> &'static str {
+    #[cfg(feature = "nli-burn")]
+    {
+        "burn-wgpu (vulkan)"
+    }
+    #[cfg(all(feature = "nli-burn-cpu", not(feature = "nli-burn")))]
+    {
+        "burn (ndarray/cpu)"
+    }
+    #[cfg(not(any(feature = "nli-burn", feature = "nli-burn-cpu")))]
+    {
+        "ort"
+    }
+}
+
 /// `kbx nli check <path>`: resolve the corpus's `[verify.nli]` config the same way the runtime gate
 /// does, gather [`NliFacts`], print a readable block, then the verdict from [`nli_verdict`].
 /// Printing the diagnosis IS the deliverable — a non-ready verdict is not a process error, so this
@@ -147,7 +186,7 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
     let model_dir_exists = cfg
         .model_dir
         .as_ref()
-        .is_some_and(|d| d.join("model.onnx").is_file() && d.join("tokenizer.json").is_file());
+        .is_some_and(|d| model_weights_present(d) && d.join("tokenizer.json").is_file());
 
     let dylib_path = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from);
     let dylib_set = dylib_path.as_ref().is_some_and(|p| p.exists());
@@ -185,6 +224,8 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
             feature = "nli-directml",
             feature = "nli-coreml",
             feature = "nli-rocm",
+            feature = "nli-burn",
+            feature = "nli-burn-cpu",
         )),
         scorer: cfg.scorer.clone(),
         model_dir: cfg.model_dir.clone(),
@@ -195,6 +236,7 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
     };
 
     println!("mode           = {}", facts.mode);
+    println!("engine         = {}", engine_label());
     println!(
         "feature nli    = {}",
         if facts.feature_built {
@@ -212,9 +254,9 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
             "model_dir      = {} (exists: {})",
             d.display(),
             if facts.model_dir_exists {
-                "model.onnx, tokenizer.json"
+                "weights + tokenizer.json present"
             } else {
-                "NO — missing model.onnx and/or tokenizer.json"
+                "NO — missing model weights and/or tokenizer.json"
             }
         ),
         None => println!("model_dir      = (unset)"),

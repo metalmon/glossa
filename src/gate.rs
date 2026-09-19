@@ -3,7 +3,7 @@ pub mod config;
 pub mod df;
 pub mod df_cache;
 pub mod nli;
-#[cfg(any(feature = "nli", feature = "nli-dynamic"))]
+#[cfg(any(feature = "nli", feature = "nli-dynamic", feature = "nli-burn"))]
 pub mod nli_engine;
 pub mod score;
 pub mod token;
@@ -56,7 +56,10 @@ pub fn verify_outcome(
 /// falls back to AC-only. With neither the `nli` nor `nli-dynamic` feature on this is the stub
 /// below, so `verify_outcome`'s behaviour is byte-for-byte unchanged from before this scorer
 /// existed.
-#[cfg(any(feature = "nli", feature = "nli-dynamic"))]
+#[cfg(all(
+    any(feature = "nli", feature = "nli-dynamic"),
+    not(feature = "nli-burn")
+))]
 pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
     if cfg.scorer.as_deref() != Some("in_process") {
         return None;
@@ -71,9 +74,28 @@ pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
     }
 }
 
-/// Neither `nli` nor `nli-dynamic` feature on => no in-process scorer is even compiled; always
-/// `None` (AC-only).
-#[cfg(not(any(feature = "nli", feature = "nli-dynamic")))]
+/// burn/wgpu engine (Plan 4): `scorer = "in_process"` + `model_dir` set => a real
+/// `InProcessBurnNli` (loads `tokenizer.json` + a `.safetensors` weights file; the GPU vs CPU
+/// backend is the compiled `nli-burn-vulkan`/`nli-burn-cpu` feature). Execution-provider config is
+/// ignored — the burn backend selects its own device. Same fail-open contract: any load error
+/// downgrades to `None` (AC-only), never propagated.
+#[cfg(feature = "nli-burn")]
+pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
+    if cfg.scorer.as_deref() != Some("in_process") {
+        return None;
+    }
+    let dir = cfg.model_dir.as_ref()?;
+    match glossa_nli::InProcessBurnNli::load(dir, cfg.entail_index) {
+        Ok(s) => Some(Box::new(s)),
+        Err(e) => {
+            eprintln!("nli (burn) scorer load failed ({}): {e}", dir.display());
+            None
+        }
+    }
+}
+
+/// No engine feature on => no in-process scorer is even compiled; always `None` (AC-only).
+#[cfg(not(any(feature = "nli", feature = "nli-dynamic", feature = "nli-burn")))]
 pub fn resolve_scorer(_cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
     None
 }
