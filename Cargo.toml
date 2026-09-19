@@ -118,6 +118,16 @@ nli-dynamic = ["dep:glossa-nli", "glossa-nli/nli-ort"]
 # `cargo test -p glossa --all-features` is NOT used in CI (it would trip the XOR); the test matrix
 # enables an explicit ORT feature set and this burn engine in separate jobs (see .github/tests.yml).
 nli-burn = ["dep:glossa-nli", "glossa-nli/nli-burn-wgpu"]
+# GPU execution providers for the ORT engine, so `kb` (the live MCP `verify` gate) can run NLI on
+# the GPU — mirrors kb-eval's passthroughs. Opt-in only: NONE of these is in the CI feature set
+# (.github/tests.yml uses an explicit `nli nli-dynamic …` set, no `--all-features` job), because
+# DirectML/CoreML are OS-specific and CUDA/ROCm need load-dynamic + a runtime dll. DirectML/CoreML
+# ride the self-contained bundled linking; CUDA/ROCm go through `nli-dynamic` (load-dynamic) exactly
+# like kb-eval, so `-p glossa`'s CI stays download-binaries only.
+nli-directml = ["nli", "glossa-nli/nli-directml"]      # Windows all-vendor; self-contained
+nli-coreml   = ["nli", "glossa-nli/nli-coreml"]        # macOS; self-contained
+nli-cuda     = ["nli-dynamic", "glossa-nli/nli-cuda"]  # NVIDIA; load-dynamic + onnxruntime-gpu dll
+nli-rocm     = ["nli-dynamic", "glossa-nli/nli-rocm"]  # AMD/Linux; load-dynamic + onnxruntime-gpu dll
 # Native TLS + mTLS on the streamable-http listener (§3b). OFF by default: the default build
 # stays plaintext with no crypto surface (`kb mcp --transport streamable-http` behind a
 # reverse-proxy/TLS-terminator remains the default-supported deployment).
