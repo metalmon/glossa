@@ -17,31 +17,6 @@ pub struct HopConn {
 
 const RANK_WINDOW: usize = 200;
 
-/// Extract every run of ASCII digits in `s`, parsed as `u32` — the integer tokens of a page/range
-/// string like `"p.224"` or `"5-10"`.
-fn digit_tokens(s: &str) -> Vec<u32> {
-    s.split(|c: char| !c.is_ascii_digit())
-        .filter(|t| !t.is_empty())
-        .filter_map(|t| t.parse::<u32>().ok())
-        .collect()
-}
-
-/// True when a Section's `range` string covers `target` page. Exact match against any integer
-/// token in `range`; when `range` yields exactly two tokens (a "5-10"-style span) also accept
-/// `target` falling inclusively between them. A plain substring check would false-positive (page
-/// "1" matching a range of "10"), so this compares parsed integers, never raw digit strings.
-fn range_matches_page(range: &str, target: u32) -> bool {
-    let nums = digit_tokens(range);
-    if nums.contains(&target) {
-        return true;
-    }
-    if let [a, b] = nums[..] {
-        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-        return target >= lo && target <= hi;
-    }
-    false
-}
-
 /// Map "<doc>#p.<N>" -> the reasoning nodes that MENTIONS a Section grounded at that doc+page.
 fn answer_nodes(g: &GraphStore, source: &str) -> anyhow::Result<Vec<String>> {
     let (doc, page) = match source.split_once('#') {
@@ -63,7 +38,7 @@ fn answer_nodes(g: &GraphStore, source: &str) -> anyhow::Result<Vec<String>> {
     )?;
     let mut out = Vec::new();
     for row in rows {
-        let (id, sp, rng) = (&row[0], &row[1], row.get(2).cloned().unwrap_or_default());
+        let (id, sp) = (&row[0], &row[1]);
         let sp_base = std::path::Path::new(sp)
             .file_name()
             .and_then(|s| s.to_str())
@@ -72,7 +47,10 @@ fn answer_nodes(g: &GraphStore, source: &str) -> anyhow::Result<Vec<String>> {
             continue;
         }
         if let Some(target) = page {
-            if !range_matches_page(&rng, target) {
+            // Section id is `path#ord` (ord == page for PDFs). Post-refactor `range` is empty
+            // for PDF/split-text chunks, so match the gold page against the id suffix instead.
+            let sec_ord = id.rsplit_once('#').and_then(|(_, o)| o.parse::<u32>().ok());
+            if sec_ord != Some(target) {
                 continue;
             }
         }
@@ -177,31 +155,13 @@ mod tests {
     }
 
     #[test]
-    fn page_match_is_exact_not_substring() {
-        // Page "1" must NOT match a section ranged "p.10" (a raw substring check would false-
-        // positive here since "1" is a substring of "10").
-        assert!(!range_matches_page("p.10", 1));
-        // The real page still matches exactly.
-        assert!(range_matches_page("p.10", 10));
-        assert!(range_matches_page("p.5", 5));
-        assert!(!range_matches_page("p.5", 50));
-        // A "5-10"-style span matches any page inside it, inclusive of the endpoints.
-        assert!(range_matches_page("5-10", 7));
-        assert!(range_matches_page("5-10", 5));
-        assert!(range_matches_page("5-10", 10));
-        assert!(!range_matches_page("5-10", 11));
-        // No digits at all -> no match.
-        assert!(!range_matches_page("appendix", 1));
-    }
-
-    #[test]
     fn reachability_reports_rank_for_a_two_hop_answer() {
         let d = tempfile::tempdir().unwrap();
         let g = GraphStore::open(d.path()).unwrap();
 
-        // Section grounded at doc "man.pdf" p.5.
+        // Section grounded at doc "man.pdf" p.5. Id encodes `path#ord` (ord == page).
         let sec = Node {
-            id: "sec:5".into(),
+            id: "man.pdf#5".into(),
             node_type: "Section".into(),
             label: "Section 5".into(),
             aliases: vec![],
@@ -223,7 +183,7 @@ mod tests {
         g.put_node(&res).unwrap();
         let mentions = Edge {
             from: "res:ans".into(),
-            to: "sec:5".into(),
+            to: "man.pdf#5".into(),
             edge_type: "MENTIONS".into(),
             prov: prov("man.pdf", None),
         };
@@ -265,6 +225,46 @@ mod tests {
             mh.median_rank.is_some(),
             "answer node was located in the ranking"
         );
+    }
+
+    #[test]
+    fn answer_nodes_matches_section_ord_when_range_is_empty() {
+        // PDF/split-text chunks now ground with an empty `range`; the Section id's `#ord`
+        // suffix (== page for PDFs) is the only thing left to match the gold page against.
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+
+        let sec = Node {
+            id: "d.pdf#14".into(),
+            node_type: "Section".into(),
+            label: "Section 14".into(),
+            aliases: vec![],
+            prov: prov("d.pdf", None),
+        };
+        g.put_node(&sec).unwrap();
+
+        let res = Node {
+            id: "res:ans".into(),
+            node_type: "Resolution".into(),
+            label: "the answer text".into(),
+            aliases: vec![],
+            prov: prov("d.pdf", None),
+        };
+        g.put_node(&res).unwrap();
+        let mentions = Edge {
+            from: "res:ans".into(),
+            to: "d.pdf#14".into(),
+            edge_type: "MENTIONS".into(),
+            prov: prov("d.pdf", None),
+        };
+        g.put_edge(&mentions).unwrap();
+
+        let out = answer_nodes(&g, "d.pdf#14").unwrap();
+        assert_eq!(out, vec!["res:ans".to_string()]);
+
+        // The `#p.<N>` gold spelling parses to the same page and must match identically.
+        let out2 = answer_nodes(&g, "d.pdf#p.14").unwrap();
+        assert_eq!(out2, vec!["res:ans".to_string()]);
     }
 
     #[test]
