@@ -281,15 +281,23 @@ impl DocIndex {
             for path_str in &distinct_paths {
                 writer.delete_term(tantivy::Term::from_field_text(self.fields.path, path_str));
             }
-            for (i, c) in chunks.iter().enumerate() {
-                let ord = chunk_ord(&c.file_type, &c.location, (i + 1) as u64);
+            // ord is the 1-based sequence position of the chunk WITHIN ITS OWN DOCUMENT, not
+            // its position in this batch — callers may pass chunks for several documents in
+            // one call (see `distinct_paths` above), so the counter is tracked per doc_path.
+            let mut seq_by_path: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::new();
+            for c in chunks.iter() {
+                let path_str = c.doc_path.to_string_lossy().to_string();
+                let seq = seq_by_path.entry(path_str.clone()).or_insert(0);
+                *seq += 1;
+                let ord = *seq;
                 // The section id is always the ordinal ("<path>#<ord>") regardless of whether
                 // the chunk has a heading; the stored `location` is display-only and a
                 // heading-less chunk simply has none (see RankedHit::display_line).
                 writer.add_document(doc!(
                     self.fields.body => c.text.clone(),
                     self.fields.body_trigrams => c.text.clone(),
-                    self.fields.path => c.doc_path.to_string_lossy().to_string(),
+                    self.fields.path => path_str,
                     self.fields.location => c.location.clone(),
                     self.fields.file_type => c.file_type.clone(),
                     self.fields.ord => ord,
@@ -780,20 +788,6 @@ pub(crate) fn strip_section_anchor(input: &str) -> String {
         }
         _ => input.to_string(),
     }
-}
-
-/// The chunk's single canonical number within its document: the page number for PDFs
-/// (parsed from the `p.N` location), otherwise the 1-based sequence position `seq`.
-pub fn chunk_ord(file_type: &str, location: &str, seq: u64) -> u64 {
-    if file_type == "pdf" {
-        if let Some(n) = location
-            .strip_prefix("p.")
-            .and_then(|d| d.parse::<u64>().ok())
-        {
-            return n;
-        }
-    }
-    seq
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -1653,20 +1647,18 @@ pub fn index_file_into(
     writer.delete_term(tantivy::Term::from_field_text(idx.fields.path, doc_key));
     graph.delete_auto_by_source(doc_key)?;
     let mut doc_written = false;
-    let mut seq = 0u64;
     let mut prev_sec: Option<String> = None;
     let mut file_links: Vec<String> = Vec::new();
     let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     // Index/graph write errors are intentionally not propagated here: one bad chunk must not
     // abort the whole run (matches the prior per-file behavior). The file is still recorded
     // in the manifest; a failed write is corrected on the next `reindex`.
-    for c in chunks {
+    for (i, c) in chunks.into_iter().enumerate() {
         if !doc_written {
             let _ = crate::graph::build::build_document(graph, doc_key, sig);
             doc_written = true;
         }
-        seq += 1;
-        let ord = crate::index::store::chunk_ord(&c.file_type, &c.location, seq);
+        let ord = (i + 1) as u64;
         // Section ids are always the ordinal now (see build_section), so `path#n`
         // from resolve_section_ref/neighbors always matches. A heading-less chunk
         // simply has an empty location — display-only, and RankedHit::display_line
@@ -4246,7 +4238,7 @@ mod incremental_tests {
     /// Finding-3 regression guard: `index_file_into` stores the labeled `doc_key` it was PASSED,
     /// never a bare relpath re-derived internally. Deviation from the task brief: the brief's
     /// snippet checks ordinal `0`, but `index_file_into`'s per-chunk ordinal starts at `1` (see
-    /// `chunk_ord`/`read_chunk_by_ord_returns_body_and_neighbors`) — ordinal `0` never exists for
+    /// `read_chunk_by_ord_returns_body_and_neighbors`) — ordinal `0` never exists for
     /// any key, labeled or bare, so it can't discriminate the bug this test guards against. Using
     /// the real first ordinal (`1`) keeps the same intent while actually being able to fail.
     #[test]
@@ -4394,26 +4386,31 @@ mod search_tests {
     }
 
     #[test]
-    fn chunk_ord_uses_page_for_pdf_else_sequence() {
-        assert_eq!(chunk_ord("pdf", "p.21", 5), 21);
-        assert_eq!(chunk_ord("pdf", "p.350", 1), 350);
-        assert_eq!(chunk_ord("md", "Introduction", 3), 3); // non-pdf -> sequence
-        assert_eq!(chunk_ord("pdf", "weird", 7), 7); // unparseable page -> sequence fallback
-    }
-
-    #[test]
-    fn search_hit_carries_ord() {
+    fn search_hit_ord_is_the_write_sequence_for_pdf() {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        idx.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("d.pdf"),
-            location: "p.7".into(),
-            file_type: "pdf".into(),
-            text: "hot cpu swap".into(),
-        }])
+        // A PDF extractor emits one chunk per page in order, so seq == page; ord is that
+        // sequence position directly now, with no p.N parse involved.
+        idx.write_chunks(&[
+            Chunk {
+                doc_path: PathBuf::from("d.pdf"),
+                location: "p.7".into(),
+                file_type: "pdf".into(),
+                text: "irrelevant first page".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("d.pdf"),
+                location: "p.7".into(),
+                file_type: "pdf".into(),
+                text: "hot cpu swap".into(),
+            },
+        ])
         .unwrap();
         let hits = idx.search("swap", 10).unwrap();
-        assert_eq!(hits[0].ord, 7);
+        assert_eq!(
+            hits[0].ord, 2,
+            "ord is the 1-based write sequence, not a parsed page"
+        );
     }
 
     #[test]
