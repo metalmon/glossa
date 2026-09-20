@@ -263,12 +263,12 @@ fn drop_oldest_round(messages: &mut Vec<Value>) -> bool {
 }
 
 /// Unproductive-streak threshold: this many consecutive REAL (non-deduped) tool calls in a row
-/// that each surface zero new identifiers trips the steer. Named so the TDD tests and the loop
-/// agree on one number instead of a magic literal in two places. `pub(crate)` so callers outside
-/// this module (e.g. `build::extract`'s regression test for the graph_upsert ids fix, and
-/// `openai.rs`'s re-export for its own not-moved tests) can size their fixtures off the real
-/// threshold instead of duplicating the literal.
-pub(crate) const UNPRODUCTIVE_STREAK_K: usize = 3;
+/// that each surface zero new identifiers trips the steer. Aliases the single source of truth in
+/// core (`ReaderSignals::STREAK_K`) so the eval loop and the MCP server can never drift on the
+/// number. `pub(crate)` so callers outside this module (e.g. `build::extract`'s regression test and
+/// `openai.rs`'s re-export) can size their fixtures off the real threshold.
+pub(crate) const UNPRODUCTIVE_STREAK_K: usize =
+    glossa::tools::retrieval_progress::ReaderSignals::STREAK_K;
 
 /// Drive a tool-calling chat to a final textual answer, generic over any `ChatTransport`.
 ///

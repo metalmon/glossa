@@ -96,6 +96,10 @@ pub struct GlossaServer {
     /// `serve_streamable_http`) must give each NEW session its own fresh tracker rather than
     /// sharing this `Arc` via `clone()` — see the factory closure's override there.
     pub signals: Arc<Mutex<crate::tools::retrieval_progress::ReaderSignals>>,
+    /// Whether the anti-loop dedup is active for this server (`--dedup`). When false (the default),
+    /// `apply_signals` is a pure pass-through and the `signals` tracker is never consulted. A
+    /// per-call `raw` arg bypasses even when this is true (display/programmatic fetches).
+    pub dedup_enabled: bool,
     /// The shared retrieval snapshot ([`crate::graph::handle::GraphHandle`]): the graph store, doc
     /// index, and pre-warmed CSR, built once and swapped on a corpus change (RCU). Every read tool
     /// loads it lock-free instead of re-opening per call. An `Arc` around the `ArcSwapOption` is
@@ -164,6 +168,9 @@ pub struct ServerFlags {
     pub no_image: bool,
     /// Withhold `get_source_file` (original-file delivery is opt-in via `--source-file`).
     pub no_source_file: bool,
+    /// Enable the retrieval anti-loop dedup (`--dedup`, env `GLOSSA_MCP_DEDUP`). Off by default —
+    /// see `config::defaults::DEDUP`. When off, `apply_signals` is a pure pass-through.
+    pub dedup: bool,
 }
 
 impl GlossaServer {
@@ -255,6 +262,7 @@ impl GlossaServer {
             signals: Arc::new(Mutex::new(
                 crate::tools::retrieval_progress::ReaderSignals::new(),
             )),
+            dedup_enabled: flags.dedup,
             cell: Arc::new(arc_swap::ArcSwapOption::empty()),
             build_lock: Arc::new(Mutex::new(())),
             ontology_cache: Arc::new(arc_swap::ArcSwapOption::empty()),
@@ -391,13 +399,58 @@ impl GlossaServer {
     /// re-render is only wired for `search`, which has per-hit ids to filter by — see `search`'s
     /// handler; every other retrieval tool renders a single opaque string with no clean
     /// per-id split, so it falls back to appending here too).
-    fn apply_signals(&self, tool: &str, key: &str, ids: Vec<String>, body: String) -> String {
-        use crate::tools::retrieval_progress::ResultRender;
+    fn apply_signals(
+        &self,
+        tool: &str,
+        key: &str,
+        ids: Vec<String>,
+        raw: bool,
+        nba_term: Option<&str>,
+        body: String,
+    ) -> String {
+        use crate::tools::retrieval_progress::{ResultRender, SignalKind};
+        // Dedup off (the default) or an explicit `raw`/display call: pure pass-through, the tracker
+        // is untouched in both directions (it neither reads nor writes state). See the dedup design
+        // spec §4.2/§4.4 — `raw` bypasses even when dedup is enabled.
+        if !self.dedup_enabled || raw {
+            return body;
+        }
         let outcome = self.signals.lock().observe(tool, key, &ids);
         match outcome.render {
             ResultRender::Full => body,
-            ResultRender::ReplaceWith { marker } => marker,
             ResultRender::OnlyNew { marker, .. } => format!("{body}{marker}"),
+            // A dropped body is where a GOVERNED reader gets a recovery response instead of the bare
+            // (already-seen) body. Repeat → next-best-action fan-out; Streak → the unproductive
+            // steer; a drained Plateau stays the neutral observation marker. Both surfaces call the
+            // same `crate::tools::recovery`, so a reader sees identical feedback in eval and prod.
+            ResultRender::ReplaceWith { marker } => match outcome.kind {
+                Some(SignalKind::Repeat) => self.repeat_recovery(tool, nba_term),
+                Some(SignalKind::Streak) => crate::tools::recovery::unproductive_steer(tool),
+                _ => marker,
+            },
+        }
+    }
+
+    /// Next-best-action response for a repeated governed call: fan the fixated `term` across the
+    /// complementary tools using the live index/graph/spec. Falls back to the neutral nudge when
+    /// there is no fan-out term (an id/path/SQL repeat) or the snapshot is unavailable.
+    fn repeat_recovery(&self, tool: &str, nba_term: Option<&str>) -> String {
+        match nba_term {
+            Some(term) => match self.handle() {
+                Ok(h) => {
+                    let spec = crate::tools::ChainSpec::from_ontology(&self.ontology());
+                    crate::tools::recovery::next_best_action(
+                        tool,
+                        term,
+                        &h.idx(),
+                        Some(&h.graph),
+                        &spec,
+                        &self.trace,
+                    )
+                }
+                Err(_) => crate::tools::recovery::repeat_nudge(tool),
+            },
+            None => crate::tools::recovery::repeat_nudge(tool),
         }
     }
 
@@ -714,6 +767,12 @@ pub(crate) struct SearchArgs {
         description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus."
     )]
     scope: Option<String>,
+    // Display/programmatic carve-out: skip the anti-loop for this call entirely (Full body, no
+    // marker, tracker untouched). NOT advertised (schemars skip) — set by the host app for display
+    // fetches, never by the model. See docs/superpowers/specs/2026-09-20-dedup-unification-…
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[schemars(skip)]
+    raw: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -800,6 +859,12 @@ pub(crate) struct ReadArgs {
         description = "PDF only: return a raster of page `n` as JPEG (200 DPI) instead of text/embeds. Use when tables or layout are hard to read as text. Requires the server to be started with --vision."
     )]
     page_image: Option<bool>,
+    // Display/programmatic carve-out: skip the anti-loop for this call entirely (Full body, no
+    // marker, tracker untouched). NOT advertised (schemars skip) — set by the host app for display
+    // fetches (e.g. the grounding canvas re-reading refs), never by the model.
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[schemars(skip)]
+    raw: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -863,6 +928,11 @@ pub(crate) struct RelatedArgs {
         description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus."
     )]
     scope: Option<String>,
+    // Display/programmatic carve-out: skip the anti-loop for this call entirely (Full body, no
+    // marker, tracker untouched). NOT advertised (schemars skip) — set by the host app, not the model.
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[schemars(skip)]
+    raw: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -905,6 +975,11 @@ pub(crate) struct NeighborsArgs {
         description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus."
     )]
     scope: Option<String>,
+    // Display/programmatic carve-out: skip the anti-loop for this call entirely (Full body, no
+    // marker, tracker untouched). NOT advertised (schemars skip) — set by the host app, not the model.
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[schemars(skip)]
+    raw: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -928,6 +1003,11 @@ pub(crate) struct GlossaryArgs {
         description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus."
     )]
     scope: Option<String>,
+    // Display/programmatic carve-out: skip the anti-loop for this call entirely (Full body, no
+    // marker, tracker untouched). NOT advertised (schemars skip) — set by the host app, not the model.
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[schemars(skip)]
+    raw: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1001,6 +1081,11 @@ pub(crate) struct ReachArgs {
         description = "Restrict results to one document or path-glob (e.g. `manual.pdf` or `guides/**`). A bare path matches that document; glob metacharacters pass through. Omit to search the whole corpus."
     )]
     scope: Option<String>,
+    // Display/programmatic carve-out: skip the anti-loop for this call entirely (Full body, no
+    // marker, tracker untouched). NOT advertised (schemars skip) — set by the host app, not the model.
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[schemars(skip)]
+    raw: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1037,6 +1122,11 @@ pub(crate) struct GraphQueryArgs {
         description = "read-only SQL SELECT over the reasoning graph; empty (or omitted) returns the schema instead of running a query"
     )]
     sql: String,
+    // Display/programmatic carve-out: skip the anti-loop for this call entirely (Full body, no
+    // marker, tracker untouched). NOT advertised (schemars skip) — set by the host app, not the model.
+    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[schemars(skip)]
+    raw: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1428,7 +1518,14 @@ impl GlossaServer {
             a.scope.as_deref(),
         );
         let ids: Vec<String> = hits.iter().map(|h| h.location.clone()).collect();
-        let body = self.apply_signals("search", &key, ids, body);
+        let body = self.apply_signals(
+            "search",
+            &key,
+            ids,
+            a.raw.unwrap_or(false),
+            Some(a.query.as_str()),
+            body,
+        );
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
@@ -1442,6 +1539,16 @@ impl GlossaServer {
         let h = self.handle().map_err(internal)?;
         let page_image = !self.no_image && a.page_image.unwrap_or(false);
         let include_images = !self.no_image && a.include_images.unwrap_or(true);
+        let raw = a.raw.unwrap_or(false);
+        // Tracked id = what was actually read, so distinct chunks/nodes are distinct: `path#n` for a
+        // chunk (a bare `path` gets the `#n` appended); a node handle in `path` collapses to itself.
+        // This is what keeps `read(doc#2)` and `read(doc#6)` from folding into one id under dedup.
+        // A display/canvas call passes `raw:true`, which bypasses the tracker entirely (spec §4.3).
+        let key = if a.path.contains('#') {
+            a.path.clone()
+        } else {
+            format!("{}#{}", a.path, a.n)
+        };
         Ok(read_common(
             &self.state_base,
             &h.idx(),
@@ -1451,13 +1558,10 @@ impl GlossaServer {
             page_image,
             include_images,
             &self.trace,
-            // An explicit read(path, n) is a targeted fetch-by-exact-id — always return
-            // the requested chunk. It is deliberately NOT routed through the anti-loop
-            // tracker (`apply_signals`), which exists to detect open-ended SEARCH spirals:
-            // gating a by-id read would blank the very chunk the caller asked for, and
-            // which chunk blanks would shift per session (window/seen state), so a client
-            // re-reading the same refs (e.g. the grounding canvas) sees random dropouts.
-            |body| body,
+            // Governed like the other retrieval tools: an agent re-reading identical refs trips the
+            // anti-loop, but a `raw` display fetch (and every call when dedup is off) passes straight
+            // through — `apply_signals` short-circuits on `raw`/`!dedup_enabled`.
+            |body| self.apply_signals("read", &key, vec![key.clone()], raw, None, body),
         ))
     }
 
@@ -1534,7 +1638,14 @@ impl GlossaServer {
             a.scope.as_deref(),
         );
         let ids = crate::tools::retrieval_progress::extract_node_ids(&body);
-        let body = self.apply_signals("glossary", &key, ids, body);
+        let body = self.apply_signals(
+            "glossary",
+            &key,
+            ids,
+            a.raw.unwrap_or(false),
+            Some(a.name.as_str()),
+            body,
+        );
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
@@ -1561,7 +1672,7 @@ impl GlossaServer {
             a.scope.as_deref(),
         );
         let ids = crate::tools::retrieval_progress::extract_node_ids(&body);
-        let body = self.apply_signals("related", &key, ids, body);
+        let body = self.apply_signals("related", &key, ids, a.raw.unwrap_or(false), None, body);
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
@@ -1591,7 +1702,7 @@ impl GlossaServer {
             a.scope.as_deref(),
         );
         let ids = crate::tools::retrieval_progress::extract_node_ids(&body);
-        let body = self.apply_signals("neighbors", &key, ids, body);
+        let body = self.apply_signals("neighbors", &key, ids, a.raw.unwrap_or(false), None, body);
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
@@ -1624,7 +1735,7 @@ impl GlossaServer {
             a.scope.as_deref(),
         );
         let ids = crate::tools::retrieval_progress::extract_node_ids(&body);
-        let body = self.apply_signals("reach", &key, ids, body);
+        let body = self.apply_signals("reach", &key, ids, a.raw.unwrap_or(false), None, body);
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
@@ -2040,7 +2151,7 @@ impl GlossaServer {
         let key = format!("sql:{a:?}");
         let body = crate::tools::sql(&idx, &g, &a.sql, &self.trace);
         let ids = crate::tools::retrieval_progress::extract_node_ids(&body);
-        let body = self.apply_signals("sql", &key, ids, body);
+        let body = self.apply_signals("sql", &key, ids, a.raw.unwrap_or(false), None, body);
         Ok(CallToolResult::success(vec![Content::text(body)]))
     }
 
@@ -3088,6 +3199,7 @@ mod tests {
                 n: 1,
                 page_image: None,
                 include_images: None,
+                raw: None,
             }))
             .await;
         // Now it is searchable.
@@ -3098,6 +3210,7 @@ mod tests {
                 glob: None,
                 file_type: None,
                 scope: None,
+                raw: None,
             }))
             .await
             .unwrap();
@@ -3146,6 +3259,7 @@ mod tests {
                 n: 1,
                 page_image: None,
                 include_images: None,
+                raw: None,
             }))
             .await;
         let out = srv
@@ -3155,6 +3269,7 @@ mod tests {
                 glob: None,
                 file_type: None,
                 scope: None,
+                raw: None,
             }))
             .await
             .unwrap();
@@ -3204,6 +3319,7 @@ mod tests {
                 n: 1,
                 page_image: None,
                 include_images: None,
+                raw: None,
             }))
             .await;
         let out = srv
@@ -3213,6 +3329,7 @@ mod tests {
                 glob: None,
                 file_type: None,
                 scope: None,
+                raw: None,
             }))
             .await
             .unwrap();
@@ -3233,7 +3350,10 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            ServerFlags::default(),
+            ServerFlags {
+                dedup: true,
+                ..Default::default()
+            },
         );
         let mk = || SearchArgs {
             query: "alpha".into(),
@@ -3241,6 +3361,7 @@ mod tests {
             glob: None,
             file_type: None,
             scope: None,
+            raw: None,
         };
         let out1 = srv.search(Parameters(mk())).await.unwrap();
         let text1 = format!("{out1:?}");
@@ -3249,14 +3370,15 @@ mod tests {
             "first call should surface the real hit, not a marker: {text1}"
         );
 
-        // MCP has no built-in loop dedup — the tracker must catch an exact-repeat (same
-        // tool+args) call and collapse it to the neutral repeat marker (ResultRender::ReplaceWith),
-        // dropping the redundant re-dump of the same body.
+        // A governed exact-repeat gets the shared recovery response (same as the eval loop): a
+        // next-best-action fan-out across the complementary tools, or — when nothing complementary
+        // comes back on this tiny corpus — the neutral repeat nudge. Either way the redundant body
+        // is dropped and the reader is pushed off the dead query.
         let out2 = srv.search(Parameters(mk())).await.unwrap();
         let text2 = format!("{out2:?}");
         assert!(
-            text2.contains("identical query already run this session"),
-            "an exact-repeat search must return the neutral repeat marker: {text2}"
+            text2.contains("already called") && !text2.contains("alpha content here"),
+            "an exact-repeat search must return the recovery response, not the re-dumped body: {text2}"
         );
     }
 
@@ -3269,7 +3391,10 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            ServerFlags::default(),
+            ServerFlags {
+                dedup: true,
+                ..Default::default()
+            },
         );
         let mk = |q: &str| SearchArgs {
             query: q.to_string(),
@@ -3277,6 +3402,7 @@ mod tests {
             glob: None,
             file_type: None,
             scope: None,
+            raw: None,
         };
         // Three DISTINCT queries, each surfacing zero hits (zero ids): `ReaderSignals::STREAK_K`
         // (3) consecutive varied zero-new calls must fire the streak signal on the third.
@@ -3285,8 +3411,8 @@ mod tests {
         let out3 = srv.search(Parameters(mk("nomatch-three"))).await.unwrap();
         let text3 = format!("{out3:?}");
         assert!(
-            text3.contains("surfaced no new information"),
-            "the third consecutive zero-new varied search must carry the streak marker: {text3}"
+            text3.contains("no new information"),
+            "the third consecutive zero-new varied search must carry the shared streak steer: {text3}"
         );
     }
 
@@ -3302,7 +3428,10 @@ mod tests {
             dir.path().to_path_buf(),
             Profile::Editor,
             false,
-            ServerFlags::default(),
+            ServerFlags {
+                dedup: true,
+                ..Default::default()
+            },
         );
         let mk = || SearchArgs {
             query: "alpha".into(),
@@ -3310,6 +3439,7 @@ mod tests {
             glob: None,
             file_type: None,
             scope: None,
+            raw: None,
         };
 
         // Put `base`'s tracker into a "just saw this exact call" state.
@@ -3335,9 +3465,153 @@ mod tests {
         // Meanwhile the ORIGINAL session's own repeat detection is untouched by session2's call.
         let out_base_repeat = base.search(Parameters(mk())).await.unwrap();
         assert!(
-            format!("{out_base_repeat:?}").contains("identical query already run this session"),
+            format!("{out_base_repeat:?}").contains("already called"),
             "the original session's own repeat detection must still work: {out_base_repeat:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn dedup_off_by_default_no_marker_on_repeat() {
+        // ServerFlags::default() has dedup=false, so even an exact repeat renders Full.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nalpha content here\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new_for_test(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        );
+        let mk = || SearchArgs {
+            query: "alpha".into(),
+            limit: None,
+            glob: None,
+            file_type: None,
+            scope: None,
+            raw: None,
+        };
+        let _ = srv.search(Parameters(mk())).await.unwrap();
+        let out2 = srv.search(Parameters(mk())).await.unwrap();
+        let t = format!("{out2:?}");
+        assert!(
+            t.contains("a.md") && !t.contains("already called"),
+            "dedup off by default: an exact repeat must render Full (no recovery response): {t}"
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_true_bypasses_dedup_even_when_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), b"# A\nalpha content here\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new_for_test(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags {
+                dedup: true,
+                ..Default::default()
+            },
+        );
+        let mk = || SearchArgs {
+            query: "alpha".into(),
+            limit: None,
+            glob: None,
+            file_type: None,
+            scope: None,
+            raw: Some(true),
+        };
+        let _ = srv.search(Parameters(mk())).await.unwrap();
+        let out2 = srv.search(Parameters(mk())).await.unwrap();
+        let t = format!("{out2:?}");
+        assert!(
+            t.contains("a.md") && !t.contains("already called"),
+            "raw:true must never trigger the anti-loop, even under dedup=true: {t}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_governed_repeat_and_raw_bypass_and_distinct_chunk_id() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("d.md"),
+            b"# H1\nfirst chunk body\n\n# H2\nsecond chunk body\n",
+        )
+        .unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let srv = GlossaServer::new_for_test(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags {
+                dedup: true,
+                ..Default::default()
+            },
+        );
+        let rd = |n: u32, raw: Option<bool>| ReadArgs {
+            path: "d.md".into(),
+            n,
+            include_images: None,
+            page_image: None,
+            raw,
+        };
+        // First read of #1: Full body.
+        let _ = srv.read(Parameters(rd(1, None))).await.unwrap();
+        // Adjacent identical read of #1 under dedup: governed → recovery response (body dropped).
+        // `read` has no fan-out term, so this is the neutral repeat nudge ("already called").
+        let out2 = srv.read(Parameters(rd(1, None))).await.unwrap();
+        assert!(
+            format!("{out2:?}").contains("already called"),
+            "a governed exact-repeat read must return the recovery response: {out2:?}"
+        );
+        // Reading #2 (a DIFFERENT chunk id `d.md#2`) is not the same key → not a repeat, returns body.
+        let out3 = srv.read(Parameters(rd(2, None))).await.unwrap();
+        assert!(
+            !format!("{out3:?}").contains("already called"),
+            "a distinct chunk id must NOT be treated as a repeat (path#n id fix): {out3:?}"
+        );
+        // A raw read never triggers the anti-loop, even under dedup, and never touches tracker state.
+        let out_raw = srv.read(Parameters(rd(1, Some(true)))).await.unwrap();
+        let tr = format!("{out_raw:?}");
+        assert!(
+            tr.contains("first chunk body") && !tr.contains("already called"),
+            "raw read returns content with no recovery response: {tr}"
+        );
+    }
+
+    #[test]
+    fn search_args_raw_loose_deser() {
+        // `raw` is accepted (loose-deser, string "true" too) even though it is not advertised.
+        let a: SearchArgs = serde_json::from_str(r#"{"query":"q","raw":"true"}"#).unwrap();
+        assert_eq!(a.raw, Some(true));
+        let b: SearchArgs = serde_json::from_str(r#"{"query":"q"}"#).unwrap();
+        assert_eq!(b.raw, None);
+    }
+
+    #[test]
+    fn raw_field_is_not_advertised_on_retrieval_tools() {
+        // The per-call anti-loop carve-out `raw` must never surface in tools/list — else a governed
+        // reader could set it and escape the anti-loop. (`get_source_file` has its OWN, intentional,
+        // advertised `raw` for original-file delivery, so scope this to the retrieval tools.)
+        let dir = tempfile::tempdir().unwrap();
+        let srv = GlossaServer::new_for_test(
+            dir.path().to_path_buf(),
+            Profile::Full,
+            false,
+            ServerFlags::default(),
+        );
+        let retrieval = ["search", "read", "glossary", "related", "neighbors", "reach", "sql"];
+        for t in srv.tool_specs() {
+            if !retrieval.contains(&t.name.as_ref()) {
+                continue;
+            }
+            let schema = serde_json::to_string(&t.input_schema).unwrap();
+            assert!(
+                !schema.contains("\"raw\""),
+                "retrieval tool {} must not advertise `raw`: {schema}",
+                t.name
+            );
+        }
     }
 
     #[test]
@@ -3412,6 +3686,7 @@ mod tests {
                 n: 1,
                 include_images: Some(false),
                 page_image: None,
+                raw: None,
             }))
             .await
             .unwrap();
@@ -3861,6 +4136,7 @@ mod tests {
                 glob: None,
                 file_type: None,
                 scope: None,
+                raw: None,
             }))
             .await
             .unwrap();
@@ -3896,6 +4172,7 @@ mod tests {
                 glob: None,
                 file_type: None,
                 scope: None,
+                raw: None,
             }))
             .await
             .unwrap();
@@ -4214,6 +4491,7 @@ mod tests {
                 n: 1,
                 include_images: None,
                 page_image: None,
+                raw: None,
             }))
             .await
             .unwrap();

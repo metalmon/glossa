@@ -227,9 +227,9 @@ pub struct ReaderSignals {
 }
 
 impl ReaderSignals {
-    /// Consecutive zero-new-id (varied-key) calls before the streak signal fires. This mirrors
-    /// `agent_loop::UNPRODUCTIVE_STREAK_K` (K=3); core cannot depend on the eval crate, so the
-    /// number is redefined here — keep the two in sync by hand if either changes.
+    /// Consecutive zero-new-id (varied-key) calls before the streak signal fires. This is the
+    /// single source of truth: the eval loop's `agent_loop::UNPRODUCTIVE_STREAK_K` aliases this
+    /// const, so the two can never drift.
     pub const STREAK_K: usize = 3;
     /// Sliding-window size — reused verbatim from [`RetrievalProgress::W`].
     pub const W: usize = RetrievalProgress::W;

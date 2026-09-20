@@ -385,6 +385,12 @@ enum Cmd {
         /// resource, and it is dead weight where nothing consumes it. Opt in when the client does.
         #[arg(long = "source-file", env = "GLOSSA_SOURCE_FILE")]
         source_file: bool,
+        /// Enable the retrieval anti-loop dedup (repeat/streak/plateau markers on the retrieval
+        /// tools). OFF by default (`config::defaults::DEDUP`) — it is a guard for a weak reasoning
+        /// reader; a general/display client should leave it off, or use a per-call `raw` carve-out.
+        /// Env `GLOSSA_MCP_DEDUP`.
+        #[arg(long = "dedup", env = "GLOSSA_MCP_DEDUP")]
+        dedup: Option<bool>,
         /// Transport: stdio (local subprocess) or streamable-http (network endpoint at <bind>/mcp).
         /// `Option` with NO `default_value`: the built-in default now lives in `config::defaults`
         /// (Plan E merges CLI > env > config-file > default), resolved at the wiring layer.
@@ -761,6 +767,8 @@ pub(crate) struct ServeParams {
     pub no_graph: bool,
     pub no_image: bool,
     pub no_source_file: bool,
+    /// Enable the retrieval anti-loop dedup (`--dedup`); default `config::defaults::DEDUP` (off).
+    pub dedup: bool,
     pub transport: McpTransport,
     pub bind: String,
     pub allowed_hosts: Vec<String>,
@@ -798,6 +806,7 @@ pub(crate) fn run_serve(
             no_graph: p.no_graph,
             no_image: p.no_image,
             no_source_file: p.no_source_file,
+            dedup: p.dedup,
         },
     );
     // Freshness runs on EVERY instance (readers stay current). The heavy generalize loop runs ONLY on
@@ -2051,6 +2060,7 @@ fn main() -> anyhow::Result<()> {
             no_image,
             vision,
             source_file,
+            dedup,
             transport,
             bind,
             allowed_hosts,
@@ -2134,6 +2144,9 @@ fn main() -> anyhow::Result<()> {
                     no_image: no_image || !vision,
                     // get_source_file is opt-in via --source-file (off by default).
                     no_source_file: !source_file,
+                    // Anti-loop dedup is opt-in via --dedup; default from config::defaults::DEDUP
+                    // (the same const the eval harness reads, so eval and prod can't diverge).
+                    dedup: dedup.unwrap_or(glossa::config::defaults::DEDUP),
                     transport,
                     bind,
                     allowed_hosts,

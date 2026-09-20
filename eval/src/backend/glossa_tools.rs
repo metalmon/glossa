@@ -595,10 +595,8 @@ pub fn exec(
 /// The default next-best-action: a plain nudge. Used when no text intent can be fanned out — the
 /// model is told the repeat is a dead end and to switch tool or query.
 pub fn repeat_nudge(name: &str, _args: &Value) -> String {
-    format!(
-        "(skipped) You already called `{name}` with these exact arguments — its result is above and \
-         rerunning returns the same thing. Try a DIFFERENT tool, or change the arguments/query."
-    )
+    // One definition, in core — shared with the MCP server so a repeat reads identically.
+    glossa::tools::recovery::repeat_nudge(name)
 }
 
 /// Steer fed back when the reader has strung together `UNPRODUCTIVE_STREAK_K` calls that each
@@ -607,97 +605,32 @@ pub fn repeat_nudge(name: &str, _args: &Value) -> String {
 /// there's no identical repeat to dedup, just many different probes landing on the same already-seen
 /// ground, headed for the round cap and a garbage final answer. Fires once per streak (the caller
 /// resets its counter after using this), not on every call past the threshold.
-pub fn unproductive_steer(_name: &str) -> String {
-    "(no new information) Your last few calls surfaced nothing new — more searching the same way \
-     won't help. Commit your best SPECIFIC answer from what you've already found, or change \
-     approach fundamentally (a different entity or relation) — do not just rephrase the same query."
-        .to_string()
+pub fn unproductive_steer(name: &str) -> String {
+    // One definition, in core — shared with the MCP server so a streak reads identically.
+    glossa::tools::recovery::unproductive_steer(name)
 }
 
-/// Next-best-action on a stuck (repeated) call: the model re-issued `name(args)`, so re-running is a
-/// dead end. Take the text it fixated on and fan it across the COMPLEMENTARY tools (the ones it did
-/// NOT just call), returning their non-empty results fused — concrete alternatives instead of the
-/// same dead result. Bounded fan-out; no query reformulation yet (that is the systemic version).
-/// Falls back to [`repeat_nudge`] when no text intent exists or nothing complementary comes back.
+/// Next-best-action on a stuck (repeated) call — thin wrapper over the shared core
+/// [`glossa::tools::recovery::next_best_action`] so the eval reader sees the SAME fan-out a
+/// governed MCP client does (spec: dedup unification). `root` is no longer needed (the fan-out
+/// candidates are search/glossary/sql, none of which read notebook files); kept in the signature so
+/// the caller (`backend::openai`'s `nba` closure) is unchanged.
 #[allow(clippy::too_many_arguments)]
 pub fn next_best_action(
     name: &str,
     args: &Value,
-    root: &std::path::Path,
+    _root: &std::path::Path,
     idx: &DocIndex,
     graph: Option<&glossa::graph::store::GraphStore>,
     spec: &glossa::tools::ChainSpec,
     trace: &TraceLog,
 ) -> String {
-    let Some(term) = repeated_term(name, args) else {
-        return repeat_nudge(name, args);
-    };
-    // Complementary tools to fan the fixated term across; skip the one just called. glossary +
-    // search are the two text lookups; sql turns the term into a relation probe.
-    let mut candidates: Vec<(&str, Value)> = Vec::new();
-    if name != "search" {
-        candidates.push(("search", json!({ "query": term })));
-    }
-    if name != "glossary" {
-        candidates.push(("glossary", json!({ "name": term })));
-    }
-    if graph.is_some() && name != "sql" {
-        let t = term.replace('\'', " ");
-        candidates.push((
-            "sql",
-            json!({
-                "sql": format!(
-                    "SELECT src_label, edge_type, dst_label FROM edges_labeled \
-                     WHERE src_label LIKE '%{t}%' OR dst_label LIKE '%{t}%' LIMIT 12"
-                )
-            }),
-        ));
-    }
-
-    let mut out = format!(
-        "(skipped) You already called `{name}` twice with the same arguments — that is a dead end. \
-         Here is what the OTHER tools return for \"{term}\"; use one of these or change your query:\n"
-    );
-    let mut any = false;
-    for (tool, a) in &candidates {
-        let (body, _, _) = exec(tool, a, root, idx, graph, spec, trace);
-        let body = body.trim();
-        if body.is_empty() || looks_empty(body) {
-            continue;
+    match glossa::tools::recovery::repeated_term(name, args) {
+        Some(term) => {
+            glossa::tools::recovery::next_best_action(name, &term, idx, graph, spec, trace)
         }
-        any = true;
-        let snip: String = body.chars().take(600).collect();
-        out.push_str(&format!("\n[{tool}]\n{snip}\n"));
+        None => glossa::tools::recovery::repeat_nudge(name),
     }
-    if any {
-        out
-    } else {
-        repeat_nudge(name, args)
-    }
-}
-
-/// The free-text intent a repeated call fixated on. Ids/paths/SQL give no clean term to fan out, so
-/// those fall back to the nudge.
-fn repeated_term(name: &str, args: &Value) -> Option<String> {
-    let key = match name {
-        "glossary" => "name",
-        "search" => "query",
-        _ => return None,
-    };
-    let t = args.get(key)?.as_str()?.trim();
-    (!t.is_empty()).then(|| t.to_string())
-}
-
-/// A tool body that carries no usable result — a miss. Cheap heuristic for v1 (real relevance
-/// scoring is the systemic next-best-action's job).
-fn looks_empty(body: &str) -> bool {
-    let b = body.trim().to_lowercase();
-    b.len() < 8
-        || b.contains("no matches")
-        || b.contains("not found")
-        || b.contains("no results")
-        || b.contains("(none")
-        || b.contains("unavailable")
 }
 
 #[cfg(test)]
@@ -708,30 +641,8 @@ mod tests {
     use glossa::trace::TraceLog;
     use std::path::PathBuf;
 
-    #[test]
-    fn repeated_term_extracts_text_intent_only() {
-        assert_eq!(
-            repeated_term("glossary", &json!({"name":"Acme"})).as_deref(),
-            Some("Acme")
-        );
-        assert_eq!(
-            repeated_term("search", &json!({"query":"blue widget"})).as_deref(),
-            Some("blue widget")
-        );
-        assert_eq!(repeated_term("read", &json!({"path":"x.md","n":1})), None);
-        assert_eq!(repeated_term("sql", &json!({"sql":"SELECT 1"})), None);
-        assert_eq!(repeated_term("glossary", &json!({"name":"   "})), None);
-    }
-
-    #[test]
-    fn looks_empty_flags_misses_not_hits() {
-        assert!(looks_empty("no matches"));
-        assert!(looks_empty("(graph unavailable)"));
-        assert!(looks_empty(""));
-        assert!(!looks_empty(
-            "a fully grounded fact statement with real content here"
-        ));
-    }
+    // `repeated_term`/`looks_empty` moved to `glossa::tools::recovery` (shared with the MCP server);
+    // their unit tests live there now.
 
     #[test]
     fn read_accepts_integer_or_digit_string_and_returns_chunk() {

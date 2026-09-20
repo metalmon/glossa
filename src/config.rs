@@ -212,6 +212,11 @@ pub mod defaults {
     pub const FRESHEN_DEADLINE_MS: u64 = 3000;
     /// src/index/store.rs (`GLOSSA_MIN_RESCAN_MS`).
     pub const MIN_RESCAN_MS: u64 = 2000;
+    /// src/main.rs (`--dedup`, env `GLOSSA_MCP_DEDUP`). Retrieval anti-loop dedup — OFF by
+    /// default: it is a guard for a weak reasoning reader, not something a general/display MCP
+    /// client wants mangling its output (a per-call `raw` carve-out exists for display fetches).
+    /// The eval harness reads this same const as its default so eval and prod cannot diverge.
+    pub const DEDUP: bool = false;
 }
 
 #[cfg(test)]
