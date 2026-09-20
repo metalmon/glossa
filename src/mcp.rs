@@ -770,7 +770,10 @@ pub(crate) struct SearchArgs {
     // Display/programmatic carve-out: skip the anti-loop for this call entirely (Full body, no
     // marker, tracker untouched). NOT advertised (schemars skip) — set by the host app for display
     // fetches, never by the model. See docs/superpowers/specs/2026-09-20-dedup-unification-…
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
     #[schemars(skip)]
     raw: Option<bool>,
 }
@@ -862,7 +865,10 @@ pub(crate) struct ReadArgs {
     // Display/programmatic carve-out: skip the anti-loop for this call entirely (Full body, no
     // marker, tracker untouched). NOT advertised (schemars skip) — set by the host app for display
     // fetches (e.g. the grounding canvas re-reading refs), never by the model.
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
     #[schemars(skip)]
     raw: Option<bool>,
 }
@@ -930,7 +936,10 @@ pub(crate) struct RelatedArgs {
     scope: Option<String>,
     // Display/programmatic carve-out: skip the anti-loop for this call entirely (Full body, no
     // marker, tracker untouched). NOT advertised (schemars skip) — set by the host app, not the model.
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
     #[schemars(skip)]
     raw: Option<bool>,
 }
@@ -977,7 +986,10 @@ pub(crate) struct NeighborsArgs {
     scope: Option<String>,
     // Display/programmatic carve-out: skip the anti-loop for this call entirely (Full body, no
     // marker, tracker untouched). NOT advertised (schemars skip) — set by the host app, not the model.
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
     #[schemars(skip)]
     raw: Option<bool>,
 }
@@ -1005,7 +1017,10 @@ pub(crate) struct GlossaryArgs {
     scope: Option<String>,
     // Display/programmatic carve-out: skip the anti-loop for this call entirely (Full body, no
     // marker, tracker untouched). NOT advertised (schemars skip) — set by the host app, not the model.
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
     #[schemars(skip)]
     raw: Option<bool>,
 }
@@ -1083,7 +1098,10 @@ pub(crate) struct ReachArgs {
     scope: Option<String>,
     // Display/programmatic carve-out: skip the anti-loop for this call entirely (Full body, no
     // marker, tracker untouched). NOT advertised (schemars skip) — set by the host app, not the model.
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
     #[schemars(skip)]
     raw: Option<bool>,
 }
@@ -1124,7 +1142,10 @@ pub(crate) struct GraphQueryArgs {
     sql: String,
     // Display/programmatic carve-out: skip the anti-loop for this call entirely (Full body, no
     // marker, tracker untouched). NOT advertised (schemars skip) — set by the host app, not the model.
-    #[serde(default, deserialize_with = "crate::json_util::deserialize_opt_bool_loose")]
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
     #[schemars(skip)]
     raw: Option<bool>,
 }
@@ -3600,7 +3621,15 @@ mod tests {
             false,
             ServerFlags::default(),
         );
-        let retrieval = ["search", "read", "glossary", "related", "neighbors", "reach", "sql"];
+        let retrieval = [
+            "search",
+            "read",
+            "glossary",
+            "related",
+            "neighbors",
+            "reach",
+            "sql",
+        ];
         for t in srv.tool_specs() {
             if !retrieval.contains(&t.name.as_ref()) {
                 continue;
