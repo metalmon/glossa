@@ -52,8 +52,9 @@ pub fn decode_all(bytes: &[u8]) -> Option<String> {
 const MAX_LINES: usize = 100;
 const MAX_CHARS: usize = 4000;
 
-/// Accumulates lines into windowed chunks. Holds at most one finished window so it can label a
-/// single-window file with an empty location and multi-window files with `part.N`.
+/// Accumulates lines into windowed chunks. Holds at most one finished window so it can flush it
+/// once the next window (or EOF) confirms it is complete. `location` is always empty; window
+/// order (and `self.emitted`, which drives `ord` downstream) is the sole position signal.
 pub struct Windower {
     path: PathBuf,
     file_type: String,
@@ -82,7 +83,7 @@ impl Windower {
             self.emitted += 1;
             sink(Chunk {
                 doc_path: self.path.clone(),
-                location: format!("part.{}", self.emitted),
+                location: String::new(),
                 file_type: self.file_type.clone(),
                 text,
             });
@@ -116,7 +117,7 @@ impl Windower {
         if !self.buf.trim().is_empty() {
             self.close_window(sink);
         }
-        // Now emit the last pending window: location "" if it is the only one, else part.N.
+        // Now emit the last pending window; location is always empty, ord order carries position.
         if let Some(text) = self.pending.take() {
             if self.emitted == 0 {
                 sink(Chunk {
@@ -129,7 +130,7 @@ impl Windower {
                 self.emitted += 1;
                 sink(Chunk {
                     doc_path: self.path,
-                    location: format!("part.{}", self.emitted),
+                    location: String::new(),
                     file_type: self.file_type,
                     text,
                 });
@@ -282,11 +283,9 @@ mod window_tests {
         let many: Vec<&str> = (0..250).map(|_| "x").collect();
         let out = run(&many);
         assert_eq!(out.len(), 3); // 100 + 100 + 50 lines
-        assert_eq!(out[0].location, "part.1");
-        assert_eq!(out[1].location, "part.2");
-        assert_eq!(out[2].location, "part.3");
+        assert!(out.iter().all(|c| c.location.is_empty()), "no part.N label");
         let total_lines: usize = out.iter().map(|c| c.text.lines().count()).sum();
-        assert_eq!(total_lines, 250); // every line preserved
+        assert_eq!(total_lines, 250); // every line preserved, order = ord order
     }
 }
 
@@ -338,7 +337,7 @@ mod stream_tests {
         assert!(out.len() >= 3);
         let total: usize = out.iter().map(|c| c.text.lines().count()).sum();
         assert_eq!(total, 250);
-        assert_eq!(out[0].location, "part.1");
+        assert!(out[0].location.is_empty(), "no part.N label");
     }
 
     #[test]
