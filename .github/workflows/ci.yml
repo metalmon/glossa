@@ -67,10 +67,14 @@ jobs:
       - name: cargo test (glossa, no default features — release config)
         run: cargo test -p glossa --release --locked --no-default-features
 
-      # Full build — every feature (notebook + lingua + constraint + tls). Covers the `tls`
-      # feature's handshake/mTLS/reload tests on both matrix OSes (§3b).
-      - name: cargo test (glossa, all features)
-        run: cargo test -p glossa --release --locked --all-features
+      # Full build — every feature EXCEPT the mutually-exclusive burn engine. `--all-features` is
+      # NOT usable here: glossa-nli enforces exactly one NLI engine (`nli`/`nli-dynamic` = ONNX
+      # Runtime, XOR `nli-burn` = burn/wgpu), and `--all-features` would enable BOTH → a glossa-nli
+      # `compile_error!`. This explicit set is the old `--all-features` minus `nli-burn` (mirrors
+      # .github/workflows/tests.yml); the burn engine is covered by glossa-nli's own CPU-backend job.
+      # Covers the `tls` feature's handshake/mTLS/reload tests on both matrix OSes (§3b).
+      - name: cargo test (glossa, all features except burn engine)
+        run: cargo test -p glossa --release --locked --features "notebook e2e lingua constraint nli nli-dynamic tls"
 
       - name: cargo test (kb-eval)
         run: cargo test -p kb-eval --release --locked
