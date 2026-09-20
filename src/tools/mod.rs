@@ -644,7 +644,7 @@ pub fn graph_build(
 /// node id's `#`-suffix (`None` if the id has no parseable `#ord` suffix).
 /// Document → `"path  (document)"`.
 /// Other    → `None` (caller decides whether to skip or fall back to the raw id).
-fn node_ref(_idx: &DocIndex, node: &crate::graph::store::Node) -> Option<String> {
+fn node_ref(node: &crate::graph::store::Node) -> Option<String> {
     let tp = node.prov.source_path.as_str();
     match node.node_type.as_str() {
         "Section" => {
@@ -760,9 +760,9 @@ impl Default for ChainSpec {
 
 /// Render the far node of an edge: its `(path#ord)` anchor for a section/document, else
 /// `id  [type]  label`. Used by `related` to show related cases.
-fn endpoint_ref(idx: &DocIndex, g: &crate::graph::store::GraphStore, nid: &str) -> String {
+fn endpoint_ref(_idx: &DocIndex, g: &crate::graph::store::GraphStore, nid: &str) -> String {
     match g.get_node(nid) {
-        Ok(Some(node)) => match node_ref(idx, &node) {
+        Ok(Some(node)) => match node_ref(&node) {
             Some(r) => r,
             None => format!("{}  [{}]  {}", node.id, node.node_type, node.label),
         },
@@ -773,13 +773,17 @@ fn endpoint_ref(idx: &DocIndex, g: &crate::graph::store::GraphStore, nid: &str) 
 /// The read anchor for a reasoning node: follow its `MENTIONS` edge (the fixed evidence contract)
 /// to a Section and render the section's `(path#ord · label)`, so the agent can `read(path, ord)`
 /// for the detail behind the node. Empty string when the node mentions no indexed section.
-pub(crate) fn read_anchor(idx: &DocIndex, g: &crate::graph::store::GraphStore, id: &str) -> String {
+pub(crate) fn read_anchor(
+    _idx: &DocIndex,
+    g: &crate::graph::store::GraphStore,
+    id: &str,
+) -> String {
     for e in g.outgoing(id).unwrap_or_default() {
         if e.edge_type != crate::graph::MENTIONS {
             continue;
         }
         if let Ok(Some(sec)) = g.get_node(&e.to) {
-            if let Some(r) = node_ref(idx, &sec) {
+            if let Some(r) = node_ref(&sec) {
                 return format!("   — read {r}");
             }
         }
@@ -1015,7 +1019,7 @@ fn glossary_with_query_inner(
                 .map(|id| match g.get_node(id) {
                     Ok(Some(node)) => {
                         let base = format!("{}  [{}]  {}", node.id, node.node_type, node.label);
-                        match node_ref(idx, &node) {
+                        match node_ref(&node) {
                             // Structural node (Section/Document): show its anchor. A common entity
                             // whose name exactly matches a section title short-circuits `resolve` to
                             // this stub alone (the exact-label fast path never reaches BM25), so ALSO
@@ -1030,7 +1034,7 @@ fn glossary_with_query_inner(
                                     .into_iter()
                                     .filter(|e| e.edge_type == crate::graph::MENTIONS)
                                     .filter_map(|e| g.get_node(&e.from).ok().flatten())
-                                    .filter(|n| node_ref(idx, n).is_none()) // reasoning nodes only
+                                    .filter(|n| node_ref(n).is_none()) // reasoning nodes only
                                     .take(8)
                                     .map(|n| {
                                         let line = format!(
@@ -4601,16 +4605,14 @@ strict = true
 
     #[test]
     fn node_ref_section_renders_bare_path_ord_when_label_empty() {
-        let (_d, i) = idx();
         let n = section_node("d.pdf#5", "d.pdf", "");
-        assert_eq!(node_ref(&i, &n).as_deref(), Some("d.pdf#5"));
+        assert_eq!(node_ref(&n).as_deref(), Some("d.pdf#5"));
     }
 
     #[test]
     fn node_ref_section_renders_path_ord_label_when_label_present() {
-        let (_d, i) = idx();
         let n = section_node("d.md#2", "d.md", "Introduction");
-        assert_eq!(node_ref(&i, &n).as_deref(), Some("d.md#2 · Introduction"));
+        assert_eq!(node_ref(&n).as_deref(), Some("d.md#2 · Introduction"));
     }
 
     #[test]
