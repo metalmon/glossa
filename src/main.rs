@@ -725,7 +725,9 @@ fn epoch_to_rfc3339(secs: i64) -> String {
 fn print_read(path: &std::path::Path, location: Option<&str>) -> anyhow::Result<()> {
     let text = glossa::read::read_region(path, location)?;
     if glossa::cli_fmt::stdout_is_tty() {
-        let head = match location {
+        // Show a section/heading label, but drop a `p.N` page label (deprecated form). The RAW
+        // `location` still drives `read_region` above — only the head display is filtered.
+        let head = match location.and_then(glossa::cli_fmt::display_location) {
             Some(l) => format!("── {} · {} ──", path.display(), l),
             None => format!("── {} ──", path.display()),
         };
@@ -1626,14 +1628,20 @@ fn main() -> anyhow::Result<()> {
                     scope.as_deref(),
                 )? {
                     // Lead with the copy-ready `path#ord` token (same ref the MCP tools + `kb read`
-                    // consume), then the human location label + snippet.
+                    // consume), then the human location label + snippet. A `p.N` page label is
+                    // dropped — it only duplicates the `#ord` already in the token.
+                    let loc = glossa::cli_fmt::display_location(&h.location);
                     rg_lines.push(format!(
-                        "{}#{}  {}: {}  [{:.3}]",
-                        h.path, h.ord, h.location, h.snippet, h.score
+                        "{}#{}  {}{}  [{:.3}]",
+                        h.path,
+                        h.ord,
+                        loc.map(|l| format!("{l}: ")).unwrap_or_default(),
+                        h.snippet,
+                        h.score
                     ));
                     display.push(glossa::cli_fmt::DisplayHit {
                         file: glossa::cli_fmt::rel_file(&rr.root, &h.path),
-                        location: h.location.clone(),
+                        location: loc.unwrap_or("").to_string(),
                         snippet: h.snippet.clone(),
                         score: Some(h.score),
                         ord: Some(h.ord),
@@ -1653,10 +1661,13 @@ fn main() -> anyhow::Result<()> {
                 let chunks = collect_chunks(&rr.root, glob.as_deref(), !no_ignore)?;
                 for h in search_chunks(&chunks, &re, limit) {
                     let p = h.doc_path.display().to_string();
-                    rg_lines.push(format!("{}:{}:{}: {}", p, h.location, h.line, h.snippet));
+                    // Drop a `p.N` page label from the shown location (deprecated form); the record
+                    // below keeps the RAW location — a scan hit is read back by that label.
+                    let shown_loc = glossa::cli_fmt::display_location(&h.location).unwrap_or("");
+                    rg_lines.push(format!("{}:{}:{}: {}", p, shown_loc, h.line, h.snippet));
                     display.push(glossa::cli_fmt::DisplayHit {
                         file: glossa::cli_fmt::rel_file(&rr.root, &p),
-                        location: h.location.clone(),
+                        location: shown_loc.to_string(),
                         snippet: h.snippet.clone(),
                         score: None,
                         // Raw-file scan has no chunk ordinal — its `read <#>` stays location-based.
@@ -1765,10 +1776,12 @@ fn main() -> anyhow::Result<()> {
                         match from_index {
                             Some(body) => {
                                 if glossa::cli_fmt::stdout_is_tty() {
-                                    println!(
-                                        "{}",
-                                        glossa::cli_fmt::dim(&format!("── {p} · {loc} ──"))
-                                    );
+                                    // Drop a `p.N` page label from the head (deprecated form).
+                                    let head = match glossa::cli_fmt::display_location(&loc) {
+                                        Some(l) => format!("── {p} · {l} ──"),
+                                        None => format!("── {p} ──"),
+                                    };
+                                    println!("{}", glossa::cli_fmt::dim(&head));
                                 }
                                 print!("{body}");
                                 if !body.ends_with('\n') {

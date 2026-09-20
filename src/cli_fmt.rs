@@ -146,7 +146,7 @@ pub fn stdout_is_tty() -> bool {
 /// One search hit prepared for the pretty (log-line) view.
 pub struct DisplayHit {
     pub file: String,     // path shown to the human (relative to root if possible)
-    pub location: String, // "p.142" | heading | "(no-text)"
+    pub location: String, // display label: heading | "(no-text)" | "" (p.N pages are dropped upstream)
     pub snippet: String,
     pub score: Option<f32>, // Some for --rank
     /// Chunk ordinal, when known (index search). `Some` → the pretty view leads the hit with the
@@ -235,6 +235,20 @@ pub fn rel_file(root: &Path, p: &str) -> String {
         Ok(r) => r.display().to_string().replace('\\', "/"),
         Err(_) => p.to_string(),
     }
+}
+
+/// The location label worth showing beside a hit or in a read header. A bare `p.N` page label is
+/// the deprecated form we no longer surface: it only duplicates the `#ord` already carried by the
+/// `path#ord` ref (line 1 of a hit / the `── path#ord ──` head). Headings and section labels are
+/// kept — they add context the numeric ref doesn't. `None` means "nothing to show"; callers put it
+/// in the label slot via `.unwrap_or("")`. Mirrors `RankedHit::display_line`'s p.N suppression.
+pub fn display_location(location: &str) -> Option<&str> {
+    if let Some(d) = location.strip_prefix("p.") {
+        if !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+    }
+    (!location.is_empty()).then_some(location)
 }
 
 /// Persist the ordered hits (path<TAB>location) so `kb read <#>` can resolve them later.
@@ -397,6 +411,20 @@ mod tests {
             "PLK/doc.pdf"
         );
         assert_eq!(rel_file(root, "D:/other/doc.pdf"), "D:/other/doc.pdf");
+    }
+
+    /// `p.N` page labels are the deprecated form (redundant with the `#ord` in the ref) → suppressed
+    /// everywhere they'd be shown; headings and other labels survive.
+    #[test]
+    fn display_location_drops_page_labels_keeps_headings() {
+        assert_eq!(display_location("p.14"), None);
+        assert_eq!(display_location("p.350"), None);
+        assert_eq!(display_location(""), None);
+        assert_eq!(display_location("Introduction"), Some("Introduction"));
+        assert_eq!(display_location("4.1.3 Safety"), Some("4.1.3 Safety"));
+        // Not a page label: a heading that merely starts with "p." keeps showing.
+        assert_eq!(display_location("p.s. notes"), Some("p.s. notes"));
+        assert_eq!(display_location("(no-text)"), Some("(no-text)"));
     }
 
     #[test]
