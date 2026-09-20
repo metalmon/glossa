@@ -128,6 +128,20 @@ fn gold_pairs(gold: &[String]) -> Vec<(String, String)> {
     gold.iter().filter_map(|g| parse_gold_loc(g)).collect()
 }
 
+/// A gold suffix is an ord only when purely numeric or `p.<digits>`/`part.<digits>`.
+/// An arbitrary heading (even one containing digits) is NOT coerced.
+pub(crate) fn gold_ord(gl: &str) -> Option<u64> {
+    let s = gl
+        .strip_prefix("p.")
+        .or_else(|| gl.strip_prefix("part."))
+        .unwrap_or(gl);
+    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+        s.parse().ok()
+    } else {
+        None
+    }
+}
+
 fn parse_n(v: &Value) -> Option<u64> {
     if let Some(n) = v.as_u64() {
         return Some(n);
@@ -288,7 +302,9 @@ fn render_ranked_hits(hits: &[glossa::index::store::RankedHit]) -> String {
 fn search_hit_hits(hits: &[glossa::index::store::RankedHit], gold: &[(String, String)]) -> bool {
     for h in hits {
         for (gp, gl) in gold {
-            if normalize_path(&h.path) == normalize_path(gp) && h.location == *gl {
+            if normalize_path(&h.path) == normalize_path(gp)
+                && (h.location == *gl || gold_ord(gl) == Some(h.ord))
+            {
                 return true;
             }
         }
@@ -307,7 +323,7 @@ fn grep_hit_hits(
                 continue;
             }
             if let Ok(Some(loc)) = idx.location_for_ord(&h.path, h.ord) {
-                if loc == *gl {
+                if loc == *gl || gold_ord(gl) == Some(h.ord) {
                     return true;
                 }
             }
@@ -333,7 +349,7 @@ fn read_hit(idx: &DocIndex, pick: &ReadPick, gold: &[(String, String)]) -> bool 
             continue;
         }
         if let Ok(Some(loc)) = idx.location_for_ord(&pick.path, pick.n) {
-            if loc == *gl {
+            if loc == *gl || gold_ord(gl) == Some(pick.n) {
                 return true;
             }
         }
@@ -2229,6 +2245,36 @@ mod tests {
             l_val: Vec::new(),
             r_val: Vec::new(),
         }
+    }
+
+    #[test]
+    fn gold_matches_pdf_by_ord_and_office_by_heading() {
+        let gold = vec![
+            ("d.pdf".to_string(), "14".to_string()),
+            ("d.md".to_string(), "A > B".to_string()),
+        ];
+        let pdf = glossa::index::store::RankedHit {
+            path: "d.pdf".into(),
+            location: String::new(),
+            file_type: "pdf".into(),
+            ord: 14,
+            snippet: "x".into(),
+            score: 1.0,
+        };
+        let office = glossa::index::store::RankedHit {
+            path: "d.md".into(),
+            location: "A > B".into(),
+            file_type: "md".into(),
+            ord: 3,
+            snippet: "y".into(),
+            score: 1.0,
+        };
+        assert!(search_hit_hits(&[pdf], &gold));
+        assert!(search_hit_hits(&[office], &gold));
+        assert_eq!(gold_ord("p.14"), Some(14));
+        assert_eq!(gold_ord("14"), Some(14));
+        assert_eq!(gold_ord("A > B"), None);
+        assert_eq!(gold_ord("4.1.3 Safety"), None); // heading with digits is NOT an ord
     }
 
     #[test]
