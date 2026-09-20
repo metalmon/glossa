@@ -24,6 +24,16 @@ use std::time::Duration;
 /// every cloned per-session `GlossaServer` shares the same count.
 static TOOL_PANICS: AtomicU64 = AtomicU64::new(0);
 
+/// Build `search`'s per-hit anti-loop signal ids: the stable, distinct `path#ord` — the same
+/// copy-ready chunk reference the result body renders. `location` is display-only and now empty
+/// for PDF/split-text chunks, so keying on it would collapse every PDF hit's id to `""` and
+/// degenerate the Repeat/Streak tracker.
+fn search_signal_ids(hits: &[crate::index::store::RankedHit]) -> Vec<String> {
+    hits.iter()
+        .map(|h| format!("{}#{}", h.path, h.ord))
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
     Reader,
@@ -1538,7 +1548,7 @@ impl GlossaServer {
             &self.trace,
             a.scope.as_deref(),
         );
-        let ids: Vec<String> = hits.iter().map(|h| h.location.clone()).collect();
+        let ids: Vec<String> = search_signal_ids(&hits);
         let body = self.apply_signals(
             "search",
             &key,
@@ -4583,5 +4593,34 @@ mod tests {
             info.capabilities.prompts.is_some(),
             "get_info must advertise the prompts capability once enabled"
         );
+    }
+
+    /// `search`'s anti-loop signal ids must key on `path#ord`, not `location` — post-refactor
+    /// PDF/split-text chunks all ground with `location=""`, which used to collapse every PDF
+    /// hit's signal id to the same empty string and degenerate the Repeat/Streak tracker.
+    #[test]
+    fn search_signal_ids_are_distinct_for_empty_location_pdf_hits() {
+        use crate::index::store::RankedHit;
+        let hits = vec![
+            RankedHit {
+                path: "d.pdf".into(),
+                location: String::new(),
+                file_type: "pdf".into(),
+                ord: 1,
+                snippet: String::new(),
+                score: 1.0,
+            },
+            RankedHit {
+                path: "d.pdf".into(),
+                location: String::new(),
+                file_type: "pdf".into(),
+                ord: 2,
+                snippet: String::new(),
+                score: 1.0,
+            },
+        ];
+        let ids = search_signal_ids(&hits);
+        assert_eq!(ids, vec!["d.pdf#1".to_string(), "d.pdf#2".to_string()]);
+        assert_ne!(ids[0], ids[1], "distinct ord must yield distinct ids");
     }
 }
