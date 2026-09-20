@@ -4,6 +4,7 @@
 //! keep `search` / `grep` / `glob` / `read` tool events, and label hits against gold chunks
 //! from the case registry (`source: path#loc`) with optional graph `MENTIONS` fallback.
 
+use crate::gepa::gold_ord;
 use anyhow::{Context, Result};
 use glossa::graph::ontology::Ontology;
 use glossa::graph::store::GraphStore;
@@ -491,6 +492,10 @@ fn validate_gold_pair(idx: &DocIndex, path: &str, loc: &str) -> Option<(String, 
         return None;
     }
     let path = idx.canonical_document_path(path)?;
+    if let Some(ord) = gold_ord(loc) {
+        idx.read_chunk_by_ord(&path, ord).ok().flatten()?;
+        return Some((path, ord.to_string()));
+    }
     idx.read_chunk(&path, loc).ok().flatten()?;
     Some((path, loc.to_string()))
 }
@@ -615,7 +620,15 @@ fn gold_from_graph_relevance(
             let Some((canon, loc)) = validate_gold_pair(idx, p, l) else {
                 continue;
             };
-            let Some(text) = idx.read_chunk(&canon, &loc).ok().flatten() else {
+            let text = if let Some(ord) = gold_ord(&loc) {
+                idx.read_chunk_by_ord(&canon, ord)
+                    .ok()
+                    .flatten()
+                    .map(|c| c.body)
+            } else {
+                idx.read_chunk(&canon, &loc).ok().flatten()
+            };
+            let Some(text) = text else {
                 continue;
             };
             let mut chunk_terms = std::collections::BTreeSet::new();
@@ -677,6 +690,9 @@ fn hit_matches_gold(idx: &DocIndex, hit: &ParsedHit, gold: &[(String, String)]) 
                 return true;
             }
         }
+        if gold_ord(gl) == Some(hit.ord) {
+            return true;
+        }
     }
     false
 }
@@ -690,6 +706,9 @@ fn read_matches_gold(idx: &DocIndex, path: &str, n: u64, gold: &[(String, String
             if loc == *gl {
                 return true;
             }
+        }
+        if gold_ord(gl) == Some(n) {
+            return true;
         }
     }
     false
@@ -714,12 +733,10 @@ fn hydrate_snippet(
     if !parsed.is_empty() {
         return parsed.to_string();
     }
-    if let Ok(Some(loc)) = idx.location_for_ord(path, ord) {
-        if let Ok(Some(text)) = idx.read_chunk(path, &loc) {
-            if !text.is_empty() {
-                *hydrated += 1;
-                return text.chars().take(SNIPPET_HYDRATE_MAX).collect();
-            }
+    if let Ok(Some(c)) = idx.read_chunk_by_ord(path, ord) {
+        if !c.body.is_empty() {
+            *hydrated += 1;
+            return c.body.chars().take(SNIPPET_HYDRATE_MAX).collect();
         }
     }
     String::new()
@@ -733,11 +750,11 @@ fn hits_to_json(idx: &DocIndex, hits: &[ParsedHit], snippets_hydrated: &mut u64)
                 .ok()
                 .flatten()
                 .unwrap_or_default();
-            let file_type = if location.starts_with("p.") {
-                "pdf"
-            } else {
-                ""
-            };
+            let file_type = idx
+                .file_type_for_ord(&h.path, h.ord)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
             let snippet = hydrate_snippet(idx, &h.path, h.ord, &h.snippet, snippets_hydrated);
             json!({
                 "ord": h.ord,
@@ -970,7 +987,15 @@ pub fn synthetic_grep(
         };
         let gold = gold_strings(gold_pairs);
         let (path, loc) = &gold_pairs[0];
-        let Some(text) = idx.read_chunk(path, loc).ok().flatten() else {
+        let text = if let Some(ord) = gold_ord(loc) {
+            idx.read_chunk_by_ord(path, ord)
+                .ok()
+                .flatten()
+                .map(|c| c.body)
+        } else {
+            idx.read_chunk(path, loc).ok().flatten()
+        };
+        let Some(text) = text else {
             continue;
         };
         let Some(token) = pick_grep_token(&text) else {
@@ -1464,7 +1489,8 @@ mod tests {
             id: "t".into(),
             question: "q?".into(),
             answer: "gold".into(),
-            source: Some("d.pdf#p.99".into()),
+            // Second-written chunk's real sequential ord is 2 (not the "p.99" display label).
+            source: Some("d.pdf#2".into()),
         };
         let gold = gold_for_case(&case, &graph, &ont, &idx);
         let mut skipped = 0u64;
@@ -1505,15 +1531,16 @@ mod tests {
         let msgs = vec![
             json!({"role":"user","content":[{"type":"text","text":"Question: q?"}]}),
             json!({"role":"assistant","content":[{"type":"tool_call","id":"s1","name":"search","arguments":{"query":"q"}}]}),
-            json!({"role":"user","content":[{"type":"tool_result","id":"s1","name":"search","result":"[#3] d.pdf · pdf · answer text"}]}),
-            json!({"role":"assistant","content":[{"type":"tool_call","id":"r1","name":"read","arguments":{"path":"d.pdf","n":3}}]}),
+            json!({"role":"user","content":[{"type":"tool_result","id":"s1","name":"search","result":"[#1] d.pdf · pdf · answer text"}]}),
+            json!({"role":"assistant","content":[{"type":"tool_call","id":"r1","name":"read","arguments":{"path":"d.pdf","n":1}}]}),
             json!({"role":"user","content":[{"type":"tool_result","id":"r1","name":"read","result":"answer"}]}),
         ];
         let case = TrainCase {
             id: "t".into(),
             question: "q?".into(),
             answer: "answer".into(),
-            source: Some("d.pdf#p.3".into()),
+            // The only written chunk's real sequential ord is 1 (not the "p.3" display label).
+            source: Some("d.pdf#1".into()),
         };
         let gold = gold_for_case(&case, &graph, &ont, &idx);
         let mut skipped = 0u64;
@@ -1587,7 +1614,80 @@ mod tests {
         assert!(super::validate_gold_pair(&idx, "d.pdf", "").is_none());
         assert!(super::validate_gold_pair(&idx, "d.pdf", "p.99").is_none());
         let g = super::validate_gold_pair(&idx, "d.pdf", "p.1").unwrap();
-        assert_eq!(g, ("d.pdf".to_string(), "p.1".to_string()));
+        assert_eq!(g, ("d.pdf".to_string(), "1".to_string()));
+    }
+
+    #[test]
+    fn validate_gold_pair_ord_gold_validates_by_ord_and_returns_ord_string() {
+        use glossa::index::store::DocIndex;
+        use glossa::model::Chunk;
+
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        // PDF chunks now carry an EMPTY location string; the gold suffix is the ord.
+        idx.write_chunks(&[Chunk {
+            doc_path: "d.pdf".into(),
+            location: "".into(),
+            file_type: "pdf".into(),
+            text: "x".into(),
+        }])
+        .unwrap();
+
+        let g = super::validate_gold_pair(&idx, "d.pdf", "1").unwrap();
+        assert_eq!(g, ("d.pdf".to_string(), "1".to_string()));
+        assert!(super::validate_gold_pair(&idx, "d.pdf", "99").is_none());
+    }
+
+    #[test]
+    fn hit_and_read_matches_gold_match_pdf_gold_by_ord_with_empty_location() {
+        use glossa::index::store::DocIndex;
+        use glossa::model::Chunk;
+
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[Chunk {
+            doc_path: "d.pdf".into(),
+            location: "".into(),
+            file_type: "pdf".into(),
+            text: "x".into(),
+        }])
+        .unwrap();
+        let gold = vec![("d.pdf".to_string(), "1".to_string())];
+
+        let hit = ParsedHit {
+            ord: 1,
+            path: "d.pdf".into(),
+            label: String::new(),
+            snippet: String::new(),
+        };
+        assert!(super::hit_matches_gold(&idx, &hit, &gold));
+        assert!(super::read_matches_gold(&idx, "d.pdf", 1, &gold));
+    }
+
+    #[test]
+    fn hits_to_json_emits_pdf_file_type_for_empty_location_hit() {
+        use glossa::index::store::DocIndex;
+        use glossa::model::Chunk;
+
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[Chunk {
+            doc_path: "d.pdf".into(),
+            location: "".into(),
+            file_type: "pdf".into(),
+            text: "body".into(),
+        }])
+        .unwrap();
+        let hits = vec![ParsedHit {
+            ord: 1,
+            path: "d.pdf".into(),
+            label: "pdf".into(),
+            snippet: "snippet".into(),
+        }];
+        let mut hydrated = 0u64;
+        let json = hits_to_json(&idx, &hits, &mut hydrated);
+        assert_eq!(json[0]["location"], "");
+        assert_eq!(json[0]["file_type"], "pdf");
     }
 
     #[test]
@@ -1612,19 +1712,20 @@ mod tests {
 
         let abs_path = work.join("kb-test").join("doc.pdf");
         let abs_path_s = abs_path.to_string_lossy();
-        let search_result = format!("[#3] {abs_path_s} · pdf · CPU runs at 1000 MHz");
+        // The only written chunk's real sequential ord is 1 (not the "p.3" display label).
+        let search_result = format!("[#1] {abs_path_s} · pdf · CPU runs at 1000 MHz");
         let msgs = vec![
             json!({"role":"user","content":[{"type":"text","text":"Question: What is the CPU clock speed?"}]}),
             json!({"role":"assistant","content":[{"type":"tool_call","id":"s1","name":"search","arguments":{"query":"CPU clock MHz"}}]}),
             json!({"role":"user","content":[{"type":"tool_result","id":"s1","name":"search","result":search_result}]}),
-            json!({"role":"assistant","content":[{"type":"tool_call","id":"r1","name":"read","arguments":{"path":abs_path_s.as_ref(),"n":3}}]}),
+            json!({"role":"assistant","content":[{"type":"tool_call","id":"r1","name":"read","arguments":{"path":abs_path_s.as_ref(),"n":1}}]}),
             json!({"role":"user","content":[{"type":"tool_result","id":"r1","name":"read","result":"CPU runs at 1000 MHz"}]}),
         ];
         let case = TrainCase {
             id: "t1".into(),
             question: "What is the CPU clock speed?".into(),
             answer: "1000 MHz".into(),
-            source: Some("kb-test/doc.pdf#p.3".into()),
+            source: Some("kb-test/doc.pdf#1".into()),
         };
 
         let mut skipped = 0u64;
@@ -1644,7 +1745,7 @@ mod tests {
             searches[0].hit,
             "expected search hit after path canonicalization"
         );
-        assert_eq!(searches[0].gold, vec!["kb-test/doc.pdf#p.3"]);
+        assert_eq!(searches[0].gold, vec!["kb-test/doc.pdf#1"]);
         assert_eq!(reads.len(), 1);
         assert!(reads[0].hit);
         assert_eq!(
