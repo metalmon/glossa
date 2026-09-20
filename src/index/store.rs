@@ -521,6 +521,46 @@ impl DocIndex {
         }
     }
 
+    /// Resolve chunk number `n` to the `file_type` string stored in the index for `path`.
+    /// Mirrors `location_for_ord` but returns the file_type field instead of location.
+    /// Returns `None` when no chunk with that (path, ord) pair is indexed.
+    pub fn file_type_for_ord(&self, path: &str, n: u64) -> anyhow::Result<Option<String>> {
+        use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+        let searcher = self.reader.searcher();
+        let clauses: Vec<(Occur, Box<dyn Query>)> = vec![
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    tantivy::Term::from_field_text(self.fields.path, path),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    tantivy::Term::from_field_u64(self.fields.ord, n),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+        ];
+        let top = searcher.search(
+            &BooleanQuery::new(clauses),
+            &TopDocs::with_limit(1).order_by_score(),
+        )?;
+        match top.first() {
+            Some((_score, addr)) => {
+                let d: TantivyDocument = searcher.doc(*addr)?;
+                Ok(Some(
+                    d.get_first(self.fields.file_type)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                ))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Resolve chunk number `n` to the `location` string stored in the index for `path`.
     /// Mirrors `ord_body` but returns the location field instead of the body.
     /// Returns `None` when no chunk with that (path, ord) pair is indexed.
@@ -4670,6 +4710,24 @@ mod search_tests {
             Some("A > B")
         );
         assert_eq!(i.ord_for_location("d.md", "missing").unwrap(), None);
+    }
+
+    #[test]
+    fn file_type_for_ord_returns_the_stored_file_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(dir.path()).unwrap();
+        i.write_chunks(&[crate::model::Chunk {
+            doc_path: "d.pdf".into(),
+            location: String::new(),
+            file_type: "pdf".into(),
+            text: "x".into(),
+        }])
+        .unwrap();
+        assert_eq!(
+            i.file_type_for_ord("d.pdf", 1).unwrap().as_deref(),
+            Some("pdf")
+        );
+        assert_eq!(i.file_type_for_ord("d.pdf", 99).unwrap(), None);
     }
 
     #[test]
