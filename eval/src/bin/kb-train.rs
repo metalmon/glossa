@@ -1111,6 +1111,60 @@ fn hits_json(hits: &[RankedHit]) -> Vec<Value> {
         .collect()
 }
 
+/// Mirrors `kb_eval::gepa::gold_ord` (that helper is `pub(crate)` inside the `kb_eval` lib crate,
+/// so it isn't visible from this separate bin crate): a gold suffix is an ord only when purely
+/// numeric or `p.<digits>`/`part.<digits>`; an arbitrary heading (even one containing digits) is
+/// NOT coerced.
+fn gold_ord(gl: &str) -> Option<u64> {
+    let s = gl
+        .strip_prefix("p.")
+        .or_else(|| gl.strip_prefix("part."))
+        .unwrap_or(gl);
+    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+        s.parse().ok()
+    } else {
+        None
+    }
+}
+
+/// Read a gold chunk's body: an ord-style suffix (`gold_ord` matches) is resolved via
+/// `read_chunk_by_ord` (PDF/split-text chunks carry an empty `location` post-refactor, so a
+/// location-string lookup would silently miss them); a heading-style suffix falls back to the
+/// legacy `read_chunk(path, location)` lookup.
+fn read_gold_chunk(idx: &DocIndex, path: &str, loc: &str) -> Option<String> {
+    if let Some(ord) = gold_ord(loc) {
+        idx.read_chunk_by_ord(path, ord)
+            .ok()
+            .flatten()
+            .map(|c| c.body)
+    } else {
+        idx.read_chunk(path, loc).ok().flatten()
+    }
+}
+
+/// Select the ords of `hits` whose (path, gold) matches one of `relevant`'s gold refs. An
+/// ord-style gold (`gold_ord` matches) is compared against the hit's `ord` field; a heading-style
+/// gold (no ord) is compared against the hit's `location` string, so an office-heading gold still
+/// matches even though PDF/text hits now carry an empty `location`.
+fn select_gold_ords(hits: &[RankedHit], relevant: &[(String, String)]) -> Vec<u64> {
+    let gold_ord_set: HashSet<(String, u64)> = relevant
+        .iter()
+        .filter_map(|(p, l)| gold_ord(l).map(|o| (p.clone(), o)))
+        .collect();
+    let gold_loc_set: HashSet<(String, String)> = relevant
+        .iter()
+        .filter(|(_, l)| gold_ord(l).is_none())
+        .cloned()
+        .collect();
+    hits.iter()
+        .filter(|h| {
+            gold_ord_set.contains(&(h.path.clone(), h.ord))
+                || gold_loc_set.contains(&(h.path.clone(), h.location.clone()))
+        })
+        .map(|h| h.ord)
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_dump(
     work: PathBuf,
@@ -1169,9 +1223,7 @@ fn run_dump(
             let relevant: Vec<(String, String)> = gold
                 .into_iter()
                 .filter(|(p, l)| {
-                    idx.read_chunk(p, l)
-                        .ok()
-                        .flatten()
+                    read_gold_chunk(&idx, p, l)
                         .map(|text| evidence_is_relevant(&analyzer, &node.label, &text))
                         .unwrap_or(false)
                 })
@@ -1190,12 +1242,7 @@ fn run_dump(
             let hits = idx
                 .search_filtered(&node.label, k, None, None, None)
                 .unwrap_or_default();
-            let gold_set: HashSet<(String, String)> = relevant.into_iter().collect();
-            let gold_ords: Vec<u64> = hits
-                .iter()
-                .filter(|h| gold_set.contains(&(h.path.clone(), h.location.clone())))
-                .map(|h| h.ord)
-                .collect();
+            let gold_ords = select_gold_ords(&hits, &relevant);
             if !gold_ords.is_empty() {
                 recall_hit += 1;
                 writeln!(
@@ -1241,5 +1288,47 @@ mod tests {
         let j = hits_json(&hits);
         assert_eq!(j[0]["ord"], 7);
         assert!(j[0].get("score").is_none());
+    }
+
+    fn hit(path: &str, location: &str, ord: u64) -> RankedHit {
+        RankedHit {
+            path: path.into(),
+            location: location.into(),
+            file_type: "pdf".into(),
+            ord,
+            snippet: "s".into(),
+            score: 1.0,
+        }
+    }
+
+    #[test]
+    fn gold_ord_parses_ord_suffixes_only() {
+        assert_eq!(gold_ord("14"), Some(14));
+        assert_eq!(gold_ord("p.14"), Some(14));
+        assert_eq!(gold_ord("part.14"), Some(14));
+        assert_eq!(gold_ord("4.1.3 Safety"), None);
+    }
+
+    #[test]
+    fn select_gold_ords_matches_pdf_hit_with_empty_location_by_ord() {
+        // Post-refactor PDF/split-text hits carry an empty `location`; the gold set must be keyed
+        // on ord, not on the (now-empty) location string, or this hit is silently dropped.
+        let hits = vec![hit("doc.pdf", "", 14)];
+        let relevant = vec![("doc.pdf".to_string(), "14".to_string())];
+        assert_eq!(select_gold_ords(&hits, &relevant), vec![14]);
+    }
+
+    #[test]
+    fn select_gold_ords_still_matches_heading_gold_by_location() {
+        let hits = vec![hit("doc.docx", "Intro", 3)];
+        let relevant = vec![("doc.docx".to_string(), "Intro".to_string())];
+        assert_eq!(select_gold_ords(&hits, &relevant), vec![3]);
+    }
+
+    #[test]
+    fn select_gold_ords_excludes_non_matching_hit() {
+        let hits = vec![hit("doc.pdf", "", 5)];
+        let relevant = vec![("doc.pdf".to_string(), "14".to_string())];
+        assert!(select_gold_ords(&hits, &relevant).is_empty());
     }
 }
