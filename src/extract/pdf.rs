@@ -31,13 +31,12 @@ impl Extractor for PdfExtractor {
                     let text = doc.extract_text(i).unwrap_or_default();
                     out.push(Chunk {
                         doc_path: path_buf.clone(),
-                        location: format!("p.{}", i + 1),
+                        location: String::new(),
                         file_type: "pdf".into(),
                         text,
                     });
                 }
 
-                pad_pdf_page_stubs(&mut out, &path_buf, page_count);
                 out
             }));
 
@@ -63,37 +62,9 @@ impl Extractor for PdfExtractor {
     }
 }
 
-/// Ensure every physical page `1..=page_count` has a chunk (blank pages get empty body).
-fn pad_pdf_page_stubs(out: &mut Vec<Chunk>, doc_path: &Path, page_count: u32) {
-    if page_count == 0 {
-        return;
-    }
-    let have: std::collections::HashSet<String> = out.iter().map(|c| c.location.clone()).collect();
-    for p in 1..=page_count {
-        let loc = format!("p.{p}");
-        if !have.contains(&loc) {
-            out.push(Chunk {
-                doc_path: doc_path.to_path_buf(),
-                location: loc,
-                file_type: "pdf".into(),
-                text: String::new(),
-            });
-        }
-    }
-    out.sort_by(|a, b| {
-        let ord = |loc: &str| {
-            loc.strip_prefix("p.")
-                .and_then(|n| n.parse::<u32>().ok())
-                .unwrap_or(0)
-        };
-        ord(&a.location).cmp(&ord(&b.location))
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn blank_pdf(page_count: usize) -> Vec<u8> {
         let mut objects = vec![
@@ -141,8 +112,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(chunks.len(), 3, "expected physical page stubs: {chunks:?}");
-        for (i, chunk) in chunks.iter().enumerate() {
-            assert_eq!(chunk.location, format!("p.{}", i + 1));
+        for chunk in chunks.iter() {
+            assert!(chunk.location.is_empty(), "no p.N label: {chunk:?}");
             assert!(
                 chunk.text.is_empty(),
                 "blank page must stay empty: {chunk:?}"
@@ -151,26 +122,12 @@ mod tests {
     }
 
     #[test]
-    fn pad_pdf_page_stubs_fills_gaps() {
-        let path = PathBuf::from("d.pdf");
-        let mut out = vec![
-            Chunk {
-                doc_path: path.clone(),
-                location: "p.1".into(),
-                file_type: "pdf".into(),
-                text: "a".into(),
-            },
-            Chunk {
-                doc_path: path.clone(),
-                location: "p.3".into(),
-                file_type: "pdf".into(),
-                text: "c".into(),
-            },
-        ];
-        pad_pdf_page_stubs(&mut out, &path, 3);
-        assert_eq!(out.len(), 3);
-        assert_eq!(out[1].location, "p.2");
-        assert!(out[1].text.is_empty());
+    fn pdf_chunks_have_empty_location_one_per_page_in_order() {
+        let bytes = blank_pdf(3);
+        let chunks = PdfExtractor.extract(Path::new("d.pdf"), &bytes).unwrap();
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks.iter().all(|c| c.location.is_empty()), "no p.N label");
+        // Order is page order: index i is page i+1 (ord == page downstream).
     }
 
     #[test]
@@ -184,13 +141,11 @@ mod tests {
             3,
             "expected one chunk per physical page, got: {chunks:?}"
         );
-        assert_eq!(chunks[0].location, "p.1");
-        assert_eq!(chunks[1].location, "p.2");
+        assert!(chunks.iter().all(|c| c.location.is_empty()), "no p.N label");
         assert!(
             chunks[1].text.trim().is_empty(),
             "blank middle page must be indexed with empty body"
         );
-        assert_eq!(chunks[2].location, "p.3");
         assert!(chunks[0].text.contains("page one"));
         assert!(chunks[2].text.contains("page three"));
     }
@@ -207,14 +162,11 @@ mod tests {
         assert_eq!(
             chunks.len(),
             21,
-            "expected 21 physical pages, got {}: {:?}",
-            chunks.len(),
-            chunks.iter().map(|c| &c.location).collect::<Vec<_>>()
+            "expected 21 physical pages, got {}",
+            chunks.len()
         );
-        let p4 = chunks
-            .iter()
-            .find(|c| c.location == "p.4")
-            .expect("missing p.4 chunk");
+        // Page identity is index order (ord downstream): page 4 is chunks[3].
+        let p4 = &chunks[3];
         assert!(
             p4.text.trim().is_empty(),
             "p.4 must be empty, got {:?}",
@@ -260,7 +212,7 @@ mod tests {
             .unwrap();
         assert_eq!(chunks.len(), 1, "single-page fixture → one page chunk");
         assert_eq!(chunks[0].file_type, "pdf");
-        assert_eq!(chunks[0].location, "p.1");
+        assert!(chunks[0].location.is_empty(), "no p.N label");
         assert!(
             chunks[0].text.contains("glossa sample"),
             "expected fixture marker text, got: {}",
@@ -272,11 +224,11 @@ mod tests {
     fn extracts_table_content_as_flat_text() {
         let bytes = include_bytes!("../../tests/fixtures/table.pdf");
         let chunks = PdfExtractor.extract(Path::new("table.pdf"), bytes).unwrap();
-        // Layout-text is the only path: a table is flattened to readable rows on p.1 (its cell
+        // Layout-text is the only path: a table is flattened to readable rows on page 1 (its cell
         // VALUES are preserved). We deliberately do NOT run pdf_oxide's structured table detector
-        // — it mis-detected multi-column prose as tables and mangled the words. p.1 also locks the
-        // 1-based `p.N` page mapping the read contract rests on.
-        assert_eq!(chunks[0].location, "p.1");
+        // — it mis-detected multi-column prose as tables and mangled the words. Page identity is
+        // ord (index order) downstream; location carries no page label.
+        assert!(chunks[0].location.is_empty(), "no p.N label");
         let joined = chunks
             .iter()
             .map(|c| c.text.as_str())
