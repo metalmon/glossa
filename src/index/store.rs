@@ -251,15 +251,18 @@ pub struct RankedHit {
 
 impl RankedHit {
     /// One search-result line leading with the canonical copy-ready chunk reference `path#ord`,
-    /// followed by a non-numeric label (the heading text, or the file type for paged formats whose
-    /// location is itself a number) so nothing competes with the read key.
+    /// followed by the heading label when the chunk has one. `location` is display-only now
+    /// (never a page number to parse), so a heading-less chunk (empty location — e.g. a PDF
+    /// page with no detected heading) just omits the label segment instead of showing one.
     pub fn display_line(&self) -> String {
-        let label = if self.location.starts_with("p.") {
-            self.file_type.as_str()
+        if self.location.is_empty() {
+            format!("{}#{} · {}", self.path, self.ord, self.snippet)
         } else {
-            self.location.as_str()
-        };
-        format!("{}#{} · {} · {}", self.path, self.ord, label, self.snippet)
+            format!(
+                "{}#{} · {} · {}",
+                self.path, self.ord, self.location, self.snippet
+            )
+        }
     }
 }
 
@@ -4439,10 +4442,10 @@ mod search_tests {
     }
 
     #[test]
-    fn display_line_is_numbered_with_nonnumeric_label() {
+    fn display_line_omits_empty_label_keeps_heading() {
         let pdf = RankedHit {
             path: "d.pdf".into(),
-            location: "p.350".into(),
+            location: String::new(),
             file_type: "pdf".into(),
             ord: 350,
             snippet: "hot swap".into(),
@@ -4450,8 +4453,8 @@ mod search_tests {
         };
         let line = pdf.display_line();
         assert!(line.starts_with("d.pdf#350"), "copy-ready key: {line}");
-        assert!(line.contains("pdf"), "non-numeric label for pdf: {line}");
-        assert!(!line.contains("p.350"), "no competing page number: {line}");
+        assert!(!line.contains(" ·  · "), "no dangling empty label: {line}");
+        assert!(!line.contains("p.350"), "no page string: {line}");
 
         let md = RankedHit {
             path: "d.md".into(),
@@ -4461,12 +4464,9 @@ mod search_tests {
             snippet: "text".into(),
             score: 3.0,
         };
-        assert!(md.display_line().starts_with("d.md#2"));
-        assert!(md.display_line().contains("Introduction"));
         assert!(
-            !md.display_line().contains("· md ·"),
-            "file_type must not leak as label in non-paged line: {}",
-            md.display_line()
+            md.display_line().contains("Introduction"),
+            "heading label kept"
         );
     }
 
