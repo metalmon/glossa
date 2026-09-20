@@ -397,20 +397,33 @@ mod tests {
     /// old `file_name()` fallback) breaks copy-pasting the printed `path#ord` back into `kb read`.
     #[test]
     fn rel_file_keeps_relative_key_whole() {
+        // A relative key is returned WHOLE on every platform (the common case).
         let root = Path::new("E:/glossa/kb-abac");
         assert_eq!(
             rel_file(root, "PLK/Manual_v_1_14.pdf"),
             "PLK/Manual_v_1_14.pdf"
         );
-        // Absolute under root → relativized with forward slashes; absolute outside → kept whole.
-        assert_eq!(
-            rel_file(
-                Path::new("E:/glossa/kb-abac"),
-                "E:/glossa/kb-abac/PLK/doc.pdf"
-            ),
-            "PLK/doc.pdf"
-        );
-        assert_eq!(rel_file(root, "D:/other/doc.pdf"), "D:/other/doc.pdf");
+        // Absolute under root → relativized (forward slashes); absolute outside → kept whole. The
+        // absolute-path branch turns on `Path::is_relative()`, which is platform-specific (a Windows
+        // drive path reads as RELATIVE on Unix, and a Unix `/abs` path reads as relative on Windows),
+        // so assert with a root that is genuinely absolute on the host OS.
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                rel_file(
+                    Path::new("E:/glossa/kb-abac"),
+                    "E:/glossa/kb-abac/PLK/doc.pdf"
+                ),
+                "PLK/doc.pdf"
+            );
+            assert_eq!(rel_file(root, "D:/other/doc.pdf"), "D:/other/doc.pdf");
+        }
+        #[cfg(not(windows))]
+        {
+            let root = Path::new("/glossa/kb-abac");
+            assert_eq!(rel_file(root, "/glossa/kb-abac/PLK/doc.pdf"), "PLK/doc.pdf");
+            assert_eq!(rel_file(root, "/other/doc.pdf"), "/other/doc.pdf");
+        }
     }
 
     /// `p.N` page labels are the deprecated form (redundant with the `#ord` in the ref) → suppressed
