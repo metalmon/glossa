@@ -92,7 +92,19 @@ fn load_evidence(source: &[String], idx: Option<&DocIndex>) -> Vec<(String, Stri
         let Some((path, loc)) = parse_ref(reference) else {
             continue;
         };
-        if let Ok(Some(text)) = idx.read_chunk(path, loc) {
+        // An ord-style suffix (`gold_ord` matches) must resolve via `read_chunk_by_ord` — PDF/
+        // split-text chunks carry an empty `location` post-refactor, so a `read_chunk(path,
+        // location)` lookup on that suffix would silently miss them. A heading-style suffix (no
+        // ord) still falls back to the legacy `read_chunk` lookup.
+        let text = if let Some(ord) = crate::gepa::gold_ord(loc) {
+            idx.read_chunk_by_ord(path, ord)
+                .ok()
+                .flatten()
+                .map(|c| c.body)
+        } else {
+            idx.read_chunk(path, loc).ok().flatten()
+        };
+        if let Some(text) = text {
             out.push((reference.trim().to_string(), text));
         }
     }
@@ -487,6 +499,35 @@ mod tests {
         // Empty path or empty location → None.
         assert_eq!(parse_ref("#p.1"), None);
         assert_eq!(parse_ref("a.pdf#"), None);
+    }
+
+    #[test]
+    fn load_evidence_reads_pdf_page_by_ord() {
+        // Post-refactor PDF chunks carry an empty `location` — the gold ref `"d.pdf#2"` must
+        // resolve via `read_chunk_by_ord`, not a (now futile) `location` string lookup.
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[
+            glossa::model::Chunk {
+                doc_path: std::path::PathBuf::from("d.pdf"),
+                location: String::new(),
+                file_type: "pdf".into(),
+                text: "page one body".into(),
+            },
+            glossa::model::Chunk {
+                doc_path: std::path::PathBuf::from("d.pdf"),
+                location: String::new(),
+                file_type: "pdf".into(),
+                text: "page two body".into(),
+            },
+        ])
+        .unwrap();
+
+        let snippets = load_evidence(&["d.pdf#2".to_string()], Some(&idx));
+        assert_eq!(
+            snippets,
+            vec![("d.pdf#2".to_string(), "page two body".to_string())]
+        );
     }
 
     #[test]
