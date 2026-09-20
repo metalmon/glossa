@@ -1158,6 +1158,17 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
         mode_str,
     );
 
+    // Report/store the SELECTED mode's served coverage, not the grounding-only (AC) sweep number:
+    // a run that writes mode=combined would otherwise summarize the AC coverage (e.g. 17%) and
+    // understate what it actually calibrated (combined, e.g. 38%). The AC-weighted value stays the
+    // fallback when a mode's coverage didn't materialize. `error_pct` remains the calibrated
+    // operating-point error (≤ the target budget for every mode).
+    let answered_pct = match sel.mode {
+        glossa::gate::config::VerifyMode::Ac => sel.ac_cov,
+        glossa::gate::config::VerifyMode::Nli => sel.nli_cov.unwrap_or(answered_pct),
+        glossa::gate::config::VerifyMode::Combined => sel.combined_cov.unwrap_or(answered_pct),
+    };
+
     if args.write {
         write_threshold(
             &corpus_glossa,
@@ -1169,7 +1180,7 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
             args.folds,
         )?;
         println!(
-            "written to ontology.toml: mode={mode_str} single={:.2} multi={:.2}   (weighted: answers {:.0}% at {:.0}% error)",
+            "written to ontology.toml: mode={mode_str} single={:.2} multi={:.2}   (selected mode: answers {:.0}% at {:.0}% error)",
             sel.ac_single,
             sel.ac_multi,
             answered_pct * 100.0,
