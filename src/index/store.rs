@@ -17,7 +17,7 @@ use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer};
 use tantivy::{doc, Index, IndexReader, TantivyDocument, TantivyError};
 
 /// Bump when the tantivy schema changes (triggers index-only rebuild via manifest migration).
-pub const INDEX_SCHEMA_VERSION: u32 = 2;
+pub const INDEX_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Copy)]
 pub struct Fields {
