@@ -548,22 +548,24 @@ mod tests {
 
     #[test]
     fn grep_finds_exact_code_token() {
+        // ord is the chunk's 1-based sequence position, not derived from the (display-only)
+        // location label — the matching chunk is the first one written, so its ord is 1.
         let (_d, idx) = idx_with(&[
             (
                 "d.pdf",
-                "p.7",
+                "",
                 "pdf",
                 "Set parameter respTimeout to 3000 tbit.",
             ),
-            ("d.pdf", "p.8", "pdf", "Another page without the code."),
+            ("d.pdf", "", "pdf", "Another page without the code."),
         ]);
         let hits = grep(&idx, "respTimeout", &GrepOpts::default()).unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].ord, 7);
+        assert_eq!(hits[0].ord, 1);
         assert!(hits[0].line.contains("respTimeout"));
         assert_eq!(
             hits[0].display_line(),
-            "d.pdf#7: Set parameter respTimeout to 3000 tbit."
+            "d.pdf#1: Set parameter respTimeout to 3000 tbit."
         );
     }
 

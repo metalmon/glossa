@@ -2759,8 +2759,11 @@ strict = false
             },
         ])
         .unwrap();
-        let resolved = resolve_section_ref(&idx, "spec.pdf#4").unwrap();
-        assert_eq!(resolved, Some("spec.pdf#4".to_string()));
+        // ord is the chunk's sequence position (1-based), not the page number encoded in
+        // its (display-only) location label — the blank page is the 2nd chunk written,
+        // so its ord is 2 regardless of the "p.4" label.
+        let resolved = resolve_section_ref(&idx, "spec.pdf#2").unwrap();
+        assert_eq!(resolved, Some("spec.pdf#2".to_string()));
     }
 
     /// MENTIONS target that resolves to a real section is NOT a node in the agent graph.

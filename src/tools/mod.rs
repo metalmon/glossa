@@ -3525,12 +3525,12 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
 
     #[test]
     fn read_is_omnivorous_over_reasoning_node_ids() {
-        let (_d, i) = idx(); // MODULE.pdf #p.7 = "response timeout param equals 3000"
+        let (_d, i) = idx(); // MODULE.pdf's only chunk (ord=1) = "response timeout param equals 3000"
         let gd = tempfile::tempdir().unwrap();
         let g = GraphStore::open(gd.path()).unwrap();
         g.put_node(&node("res:fix", "Resolution", "Change respTimeout to 3000"))
             .unwrap();
-        g.put_edge(&edge("res:fix", "MENTIONS", "MODULE.pdf#p.7"))
+        g.put_edge(&edge("res:fix", "MENTIONS", "MODULE.pdf#1"))
             .unwrap();
         let t = TraceLog::disabled();
         // reading the NODE id returns the node line + the evidence chunk it MENTIONS, attributed.
@@ -3540,7 +3540,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "node header: {out}"
         );
         assert!(
-            out.contains("── MENTIONS · MODULE.pdf#7 ──"),
+            out.contains("── MENTIONS · MODULE.pdf#1 ──"),
             "attributed evidence header: {out}"
         );
         assert!(
@@ -3548,7 +3548,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "evidence body: {out}"
         );
         // a plain doc path still reads the chunk (not treated as a node).
-        let doc = read(_d.path(), &i, Some(&g), "MODULE.pdf", 7, false, &t).text;
+        let doc = read(_d.path(), &i, Some(&g), "MODULE.pdf", 1, false, &t).text;
         assert!(
             doc.contains("response timeout param equals 3000") && !doc.contains("── MENTIONS"),
             "doc read unchanged: {doc}"
@@ -3561,7 +3561,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let t = TraceLog::disabled();
         let (body, hits) = search(&i, "timeout", 10, None, None, &t, None);
         assert_eq!(hits.len(), 1);
-        assert!(body.starts_with("MODULE.pdf#7") && body.contains("timeout"));
+        assert!(body.starts_with("MODULE.pdf#1") && body.contains("timeout"));
         let (empty, _) = search(&i, "nonexistentzzz", 10, None, None, &t, None);
         assert_eq!(empty, "(no results)");
     }
@@ -3828,9 +3828,10 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             text: "evidence body".into(),
         }])
         .unwrap();
+        // ord is the chunk's sequence position (1), not its (display-only) location label.
         g.put_edge(&Edge {
             from: "sym:test".into(),
-            to: "evidence.md#S1".into(),
+            to: "evidence.md#1".into(),
             edge_type: "MENTIONS".into(),
             prov: prov(),
         })
@@ -3912,7 +3913,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             &crate::grep::GrepOpts::default(),
             &t
         )
-        .contains("MODULE.pdf#7:"));
+        .contains("MODULE.pdf#1:"));
         let no = grep(
             d.path(),
             &i,
@@ -3928,7 +3929,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             no.contains("fixed:true"),
             "coaches toward a simpler literal: {no}"
         );
-        assert!(glob(&i, "*MODULE*", &t).contains("MODULE.pdf  (7 chunks)"));
+        assert!(glob(&i, "*MODULE*", &t).contains("MODULE.pdf  (1 chunks)"));
         assert!(glob(&i, "*nomatch*", &t).starts_with("(no documents match"));
     }
 
