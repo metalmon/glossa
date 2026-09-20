@@ -4,6 +4,7 @@ pub use crate::constraint_synthetic::{
     CompileFixExample, CoverageExample, MaterializeExample, ValidateExample,
 };
 use crate::export_tz::GrepExample;
+use crate::gepa::gold_ord;
 use anyhow::{Context, Result};
 use glossa::grep::GrepOpts;
 use glossa::index::store::DocIndex;
@@ -395,7 +396,7 @@ fn grep_hit_hits(
                 continue;
             }
             if let Ok(Some(loc)) = idx.location_for_ord(&h.path, h.ord) {
-                if loc == *gl {
+                if loc == *gl || gold_ord(gl) == Some(h.ord) {
                     return true;
                 }
             }
@@ -1720,6 +1721,29 @@ mod tests {
             w_validate: 0.10,
             work: "kb-test".into(),
         }
+    }
+
+    #[test]
+    fn grep_hit_hits_matches_pdf_gold_by_ord_with_empty_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[glossa::model::Chunk {
+            doc_path: PathBuf::from("d.pdf"),
+            location: String::new(),
+            file_type: "pdf".into(),
+            text: "hot cpu swap".into(),
+        }])
+        .unwrap();
+
+        let gold = vec![("d.pdf".to_string(), "1".to_string())];
+        let hits = vec![glossa::grep::GrepHit {
+            path: "d.pdf".into(),
+            ord: 1,
+            line_no: 0,
+            line: "hot cpu swap".into(),
+            kind: glossa::grep::HitKind::Match,
+        }];
+        assert!(grep_hit_hits(&hits, &gold, &idx));
     }
 
     #[test]
