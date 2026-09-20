@@ -46,7 +46,8 @@ impl Extractor for PdfExtractor {
         }
 
         // Layer 3: only unparseable PDFs (open failure, zero pages, or a caught panic) reach this
-        // filename fallback. Parseable scan-only PDFs keep one empty p.N chunk per physical page.
+        // filename fallback. Parseable scan-only PDFs keep one empty chunk per physical page
+        // (position is ord, not a label).
         let name = path
             .file_stem()
             .and_then(|s| s.to_str())
