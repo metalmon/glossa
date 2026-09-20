@@ -213,9 +213,11 @@ fn gather_mentions(
         if e.edge_type != crate::graph::MENTIONS {
             continue;
         }
-        if let Some((p, loc)) = e.to.split_once('#') {
-            if let Ok(Some(ord)) = idx.ord_for_location(p, loc) {
-                if seen.insert((p.to_string(), ord)) {
+        if let Some((p, frag)) = e.to.split_once('#') {
+            if let Ok(ord) = frag.parse::<u64>() {
+                if idx.location_for_ord(p, ord).ok().flatten().is_some()
+                    && seen.insert((p.to_string(), ord))
+                {
                     out.push((attr.to_string(), p.to_string(), ord));
                 }
             }
@@ -638,17 +640,24 @@ pub fn graph_build(
 }
 
 /// Render a graph node as a copy-ready reference string.
-/// Section  → `"path#ord · label"` (None if `ord_for_location` can't resolve).
+/// Section  → `"path#ord · label"` (bare `"path#ord"` when `label` is empty), ord taken from the
+/// node id's `#`-suffix (`None` if the id has no parseable `#ord` suffix).
 /// Document → `"path  (document)"`.
 /// Other    → `None` (caller decides whether to skip or fall back to the raw id).
-fn node_ref(idx: &DocIndex, node: &crate::graph::store::Node) -> Option<String> {
+fn node_ref(_idx: &DocIndex, node: &crate::graph::store::Node) -> Option<String> {
     let tp = node.prov.source_path.as_str();
     match node.node_type.as_str() {
-        "Section" => idx
-            .ord_for_location(tp, &node.label)
-            .ok()
-            .flatten()
-            .map(|ord| format!("{}#{} · {}", tp, ord, node.label)),
+        "Section" => {
+            let ord = node
+                .id
+                .rsplit_once('#')
+                .and_then(|(_, o)| o.parse::<u64>().ok())?;
+            if node.label.is_empty() {
+                Some(format!("{}#{}", tp, ord))
+            } else {
+                Some(format!("{}#{} · {}", tp, ord, node.label))
+            }
+        }
         "Document" => Some(format!("{}  (document)", tp)),
         _ => None,
     }
@@ -4585,5 +4594,47 @@ strict = true
         );
         assert!(scoped.contains("reach_target_a"), "{scoped}");
         assert!(!scoped.contains("reach_target_b"), "{scoped}");
+    }
+
+    // ── node_ref / MENTIONS-expansion (ord-single-key) tests ───────────────
+
+    #[test]
+    fn node_ref_section_renders_bare_path_ord_when_label_empty() {
+        let (_d, i) = idx();
+        let n = section_node("d.pdf#5", "d.pdf", "");
+        assert_eq!(node_ref(&i, &n).as_deref(), Some("d.pdf#5"));
+    }
+
+    #[test]
+    fn node_ref_section_renders_path_ord_label_when_label_present() {
+        let (_d, i) = idx();
+        let n = section_node("d.md#2", "d.md", "Introduction");
+        assert_eq!(node_ref(&i, &n).as_deref(), Some("d.md#2 · Introduction"));
+    }
+
+    #[test]
+    fn gather_mentions_surfaces_existing_chunk_and_filters_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(dir.path()).unwrap();
+        i.write_chunks(&[crate::model::Chunk {
+            doc_path: "d.pdf".into(),
+            location: "".into(),
+            file_type: "pdf".into(),
+            text: "x".into(),
+        }])
+        .unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        g.put_node(&node("fact:x", "Fact", "x")).unwrap();
+        g.put_edge(&edge("fact:x", "MENTIONS", "d.pdf#1")).unwrap();
+        g.put_edge(&edge("fact:x", "MENTIONS", "d.pdf#99")).unwrap();
+
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        gather_mentions(&i, &g, "fact:x", "MENTIONS", &mut seen, &mut out);
+
+        assert_eq!(
+            out,
+            vec![("MENTIONS".to_string(), "d.pdf".to_string(), 1u64)]
+        );
     }
 }
