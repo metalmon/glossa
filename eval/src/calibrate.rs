@@ -215,6 +215,27 @@ impl Composition {
     }
 }
 
+/// AUROC of `pos` vs `neg` scores via the Mann–Whitney U statistic: the probability a random
+/// positive outranks a random negative. 0.5 = no separation (the signal can't tell the classes
+/// apart — a threshold here is noise), 1.0 = perfect. Empty side → 0.5. Reported by dataset
+/// calibration as an honest "is there any signal to calibrate?" gate before trusting a threshold.
+pub fn auroc(pos: &[f32], neg: &[f32]) -> f32 {
+    if pos.is_empty() || neg.is_empty() {
+        return 0.5;
+    }
+    let mut wins = 0.0f64;
+    for &p in pos {
+        for &n in neg {
+            if p > n {
+                wins += 1.0;
+            } else if (p - n).abs() < f32::EPSILON {
+                wins += 0.5;
+            }
+        }
+    }
+    (wins / (pos.len() as f64 * neg.len() as f64)) as f32
+}
+
 /// The chunk ref token (`path#ord`) for one search hit — the copy-ready shape `read_chunk_text`
 /// resolves.
 fn hit_ref(h: &glossa::index::store::RankedHit) -> String {
@@ -259,7 +280,10 @@ pub fn load_cases_from_dataset(
     let idx = glossa::index::store::DocIndex::open_or_create(root)
         .with_context(|| format!("opening index at {}", root.display()))?;
 
-    const RETRIEVE_K: usize = 8;
+    // Distractor mining knobs (see the mismatch branch): skip the FN-prone top hits, and drop any
+    // candidate the answer already scores >= this (a likely false negative).
+    const SKIP_TOP_DISTRACTORS: usize = 2;
+    const DENOISE_CUTOFF: f32 = 0.8;
     let retrieve = |q: &str, n: usize| -> Vec<glossa::index::store::RankedHit> {
         idx.search_filtered(q, n, None, None, None)
             .unwrap_or_default()
@@ -325,10 +349,19 @@ pub fn load_cases_from_dataset(
             // class, not just the single bucket.
             let source_docs: Vec<&str> = g.source.iter().map(|r| ref_doc(r)).collect();
             let n_src = g.source.len().max(1);
-            let distractors: Vec<String> = retrieve(&g.question, RETRIEVE_K + n_src)
+            // Best practice (RocketQA/SimANS): the TOP retrieved hits are the biggest false-negative
+            // risk (often actually relevant), and a distractor the answer is already well-grounded in
+            // IS a false negative that collapses the boundary. So retrieve a WIDE pool, skip the top
+            // few (take "ambiguous" near-rank hits, not the FN-prone top-1), and DENOISE — drop any
+            // candidate scoring >= cutoff. Take n_src survivors (mirrors the bucket).
+            let distractors: Vec<String> = retrieve(&g.question, 40)
                 .into_iter()
                 .filter(|h| !source_docs.contains(&h.path.as_str()))
+                .skip(SKIP_TOP_DISTRACTORS)
                 .filter_map(|h| chunk_text(&hit_ref(&h)))
+                .filter(|c| {
+                    score(answer, std::slice::from_ref(c), &df, rare).grounding < DENOISE_CUTOFF
+                })
                 .take(n_src)
                 .collect();
             if !distractors.is_empty() {
@@ -349,6 +382,17 @@ pub fn load_cases_from_dataset(
     }
     pb.finish_and_clear();
 
+    // Separation diagnostic (reliability gate): AUROC of positives vs negatives per signal. Near
+    // 0.5 ⇒ the signal can't tell grounded from ungrounded on this dataset, so any swept threshold
+    // is noise — trust the prior only when this is comfortably above chance.
+    let pos_g: Vec<f32> = out.iter().filter(|c| c.cell == Cell::ShouldServe).map(|c| c.grounding).collect();
+    let neg_g: Vec<f32> = out.iter().filter(|c| c.cell == Cell::ShouldAbstain).map(|c| c.grounding).collect();
+    eprintln!("AUROC pos-vs-neg  grounding(AC): {:.3}", auroc(&pos_g, &neg_g));
+    let pos_n: Vec<f32> = out.iter().filter(|c| c.cell == Cell::ShouldServe).filter_map(|c| c.nli).collect();
+    let neg_n: Vec<f32> = out.iter().filter(|c| c.cell == Cell::ShouldAbstain).filter_map(|c| c.nli).collect();
+    if !pos_n.is_empty() && !neg_n.is_empty() {
+        eprintln!("AUROC pos-vs-neg  nli:           {:.3}", auroc(&pos_n, &neg_n));
+    }
     eprintln!("{}", comp.summary());
     comp.check(min_class).map_err(|e| anyhow::anyhow!(e))?;
     Ok(out)
@@ -1144,6 +1188,16 @@ mod tests {
             c(3, 0, 0, 20).check(8).is_err(),
             "too few positives must fail"
         );
+    }
+
+    /// `auroc` — the separation gate. Perfect separation → 1.0, reversed → 0.0, identical (all ties)
+    /// or an empty side → 0.5 (no signal to calibrate on).
+    #[test]
+    fn auroc_measures_separation() {
+        assert!((super::auroc(&[0.9, 0.8, 0.7], &[0.3, 0.2, 0.1]) - 1.0).abs() < 1e-6);
+        assert!((super::auroc(&[0.1, 0.2], &[0.8, 0.9]) - 0.0).abs() < 1e-6);
+        assert!((super::auroc(&[0.5, 0.5], &[0.5, 0.5]) - 0.5).abs() < 1e-6);
+        assert_eq!(super::auroc(&[], &[0.1]), 0.5);
     }
 
     /// Writes a minimal corpus (indexed, so `.glossa/df` exists) + one answerable-correct
