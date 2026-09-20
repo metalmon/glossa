@@ -217,15 +217,23 @@ pub fn render_search_pretty(hits: &[DisplayHit], reverse: bool, query: &str) -> 
     out
 }
 
-/// Display name for a hit: path relative to `root` if possible, else the file name.
+/// Display name for a hit — the copy-ready path the reader consumes, so it MUST round-trip.
+///
+/// `p` is normally the index/graph canonical key: already corpus-root-relative with forward slashes
+/// (see `index::store::rel_key`). That is the exact ref `kb read`/the MCP tools take, so a relative
+/// key is returned verbatim — never shortened to the file name, which would drop the directory
+/// prefix (e.g. `sub/doc.pdf` → `doc.pdf`) and break the printed `path#ord` round-trip.
 pub fn rel_file(root: &Path, p: &str) -> String {
     let pp = Path::new(p);
+    if pp.is_relative() {
+        return p.to_string();
+    }
+    // Absolute (rare here): show it relative to the root when it lives under it, matching the
+    // canonical forward-slash form; otherwise keep the whole path — a foreign path is still a valid
+    // ref, and truncating to the file name would again break the round-trip.
     match pp.strip_prefix(root) {
-        Ok(r) => r.display().to_string(),
-        Err(_) => pp
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| p.to_string()),
+        Ok(r) => r.display().to_string().replace('\\', "/"),
+        Err(_) => p.to_string(),
     }
 }
 
@@ -368,6 +376,27 @@ mod tests {
             .exists());
         let raw = read_last_search(state.path()).unwrap();
         assert!(raw.contains("A/x.md\tp.1"));
+    }
+
+    /// Regression: the canonical index key (corpus-root-relative, forward slashes) is the ref
+    /// `kb read` consumes, so `rel_file` must return it WHOLE — dropping the `sub/` directory (the
+    /// old `file_name()` fallback) breaks copy-pasting the printed `path#ord` back into `kb read`.
+    #[test]
+    fn rel_file_keeps_relative_key_whole() {
+        let root = Path::new("E:/glossa/kb-abac");
+        assert_eq!(
+            rel_file(root, "PLK/Manual_v_1_14.pdf"),
+            "PLK/Manual_v_1_14.pdf"
+        );
+        // Absolute under root → relativized with forward slashes; absolute outside → kept whole.
+        assert_eq!(
+            rel_file(
+                Path::new("E:/glossa/kb-abac"),
+                "E:/glossa/kb-abac/PLK/doc.pdf"
+            ),
+            "PLK/doc.pdf"
+        );
+        assert_eq!(rel_file(root, "D:/other/doc.pdf"), "D:/other/doc.pdf");
     }
 
     #[test]
