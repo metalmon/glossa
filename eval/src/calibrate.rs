@@ -385,13 +385,35 @@ pub fn load_cases_from_dataset(
     // Separation diagnostic (reliability gate): AUROC of positives vs negatives per signal. Near
     // 0.5 ⇒ the signal can't tell grounded from ungrounded on this dataset, so any swept threshold
     // is noise — trust the prior only when this is comfortably above chance.
-    let pos_g: Vec<f32> = out.iter().filter(|c| c.cell == Cell::ShouldServe).map(|c| c.grounding).collect();
-    let neg_g: Vec<f32> = out.iter().filter(|c| c.cell == Cell::ShouldAbstain).map(|c| c.grounding).collect();
-    eprintln!("AUROC pos-vs-neg  grounding(AC): {:.3}", auroc(&pos_g, &neg_g));
-    let pos_n: Vec<f32> = out.iter().filter(|c| c.cell == Cell::ShouldServe).filter_map(|c| c.nli).collect();
-    let neg_n: Vec<f32> = out.iter().filter(|c| c.cell == Cell::ShouldAbstain).filter_map(|c| c.nli).collect();
+    let pos_g: Vec<f32> = out
+        .iter()
+        .filter(|c| c.cell == Cell::ShouldServe)
+        .map(|c| c.grounding)
+        .collect();
+    let neg_g: Vec<f32> = out
+        .iter()
+        .filter(|c| c.cell == Cell::ShouldAbstain)
+        .map(|c| c.grounding)
+        .collect();
+    eprintln!(
+        "AUROC pos-vs-neg  grounding(AC): {:.3}",
+        auroc(&pos_g, &neg_g)
+    );
+    let pos_n: Vec<f32> = out
+        .iter()
+        .filter(|c| c.cell == Cell::ShouldServe)
+        .filter_map(|c| c.nli)
+        .collect();
+    let neg_n: Vec<f32> = out
+        .iter()
+        .filter(|c| c.cell == Cell::ShouldAbstain)
+        .filter_map(|c| c.nli)
+        .collect();
     if !pos_n.is_empty() && !neg_n.is_empty() {
-        eprintln!("AUROC pos-vs-neg  nli:           {:.3}", auroc(&pos_n, &neg_n));
+        eprintln!(
+            "AUROC pos-vs-neg  nli:           {:.3}",
+            auroc(&pos_n, &neg_n)
+        );
     }
     eprintln!("{}", comp.summary());
     comp.check(min_class).map_err(|e| anyhow::anyhow!(e))?;
