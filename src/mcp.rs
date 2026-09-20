@@ -1442,8 +1442,6 @@ impl GlossaServer {
         let h = self.handle().map_err(internal)?;
         let page_image = !self.no_image && a.page_image.unwrap_or(false);
         let include_images = !self.no_image && a.include_images.unwrap_or(true);
-        let key = format!("read:{a:?}");
-        let ids = vec![a.path.clone()];
         Ok(read_common(
             &self.state_base,
             &h.idx(),
@@ -1453,7 +1451,13 @@ impl GlossaServer {
             page_image,
             include_images,
             &self.trace,
-            |body| self.apply_signals("read", &key, ids, body),
+            // An explicit read(path, n) is a targeted fetch-by-exact-id — always return
+            // the requested chunk. It is deliberately NOT routed through the anti-loop
+            // tracker (`apply_signals`), which exists to detect open-ended SEARCH spirals:
+            // gating a by-id read would blank the very chunk the caller asked for, and
+            // which chunk blanks would shift per session (window/seen state), so a client
+            // re-reading the same refs (e.g. the grounding canvas) sees random dropouts.
+            |body| body,
         ))
     }
 
