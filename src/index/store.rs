@@ -283,21 +283,14 @@ impl DocIndex {
             }
             for (i, c) in chunks.iter().enumerate() {
                 let ord = chunk_ord(&c.file_type, &c.location, (i + 1) as u64);
-                // A heading-less chunk has no location, which would make its section id a
-                // bare "<path>#" — meaningless and, to the agent, indistinguishable from a
-                // broken empty path. Fall back to the chunk's ordinal so every section has a
-                // real id ("<path>#<ord>") that matches how the agent references it (#n) and
-                // resolves the same way in the section node, resolve_section_ref, and read.
-                let location = if c.location.is_empty() {
-                    ord.to_string()
-                } else {
-                    c.location.clone()
-                };
+                // The section id is always the ordinal ("<path>#<ord>") regardless of whether
+                // the chunk has a heading; the stored `location` is display-only and a
+                // heading-less chunk simply has none (see RankedHit::display_line).
                 writer.add_document(doc!(
                     self.fields.body => c.text.clone(),
                     self.fields.body_trigrams => c.text.clone(),
                     self.fields.path => c.doc_path.to_string_lossy().to_string(),
-                    self.fields.location => location,
+                    self.fields.location => c.location.clone(),
                     self.fields.file_type => c.file_type.clone(),
                     self.fields.ord => ord,
                 ))?;
@@ -1667,7 +1660,7 @@ pub fn index_file_into(
     // Index/graph write errors are intentionally not propagated here: one bad chunk must not
     // abort the whole run (matches the prior per-file behavior). The file is still recorded
     // in the manifest; a failed write is corrected on the next `reindex`.
-    for mut c in chunks {
+    for c in chunks {
         if !doc_written {
             let _ = crate::graph::build::build_document(graph, doc_key, sig);
             doc_written = true;
@@ -1676,12 +1669,8 @@ pub fn index_file_into(
         let ord = crate::index::store::chunk_ord(&c.file_type, &c.location, seq);
         // Section ids are always the ordinal now (see build_section), so `path#n`
         // from resolve_section_ref/neighbors always matches. A heading-less chunk
-        // still has an empty location, which reads back as a blank node label /
-        // index field — fall back to the ordinal so it shows something. This only
-        // affects the label/location field, not the (already ordinal) section id.
-        if c.location.is_empty() {
-            c.location = ord.to_string();
-        }
+        // simply has an empty location — display-only, and RankedHit::display_line
+        // omits the label segment when it's empty.
         // DF accumulation (full-rebuild only — see the `df` param doc) reuses the same chunk body
         // text being written to the tantivy `body` field below — one tokenize pass per chunk, no
         // separate corpus walk (rides the existing per-chunk indexing loop's progress).
@@ -4382,6 +4371,25 @@ mod search_tests {
                 .iter()
                 .any(|h| h.path.contains("b.md")),
             "a freshly re-opened index must see the externally committed file"
+        );
+    }
+
+    #[test]
+    fn heading_less_chunk_stores_empty_location_not_ord() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        // A chunk with an empty location (what PDFs/heading-less office chunks will emit).
+        idx.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("d.md"),
+            location: String::new(),
+            file_type: "md".into(),
+            text: "body".into(),
+        }])
+        .unwrap();
+        // location field for ord 1 must be empty, NOT "1".
+        assert_eq!(
+            idx.location_for_ord("d.md", 1).unwrap(),
+            Some(String::new())
         );
     }
 
