@@ -1025,8 +1025,6 @@ fn spawn_capped(count: usize, cap: usize) -> Option<&'static str> {
     }
 }
 
-/// One-line receipt: files whose row count grew during the worker episode.
-
 /// Run ONE delegated subagent episode and return its OWN final answer.
 ///
 /// A subagent neither delegates nor advances SOP steps: its tool set is the plain
@@ -1772,6 +1770,7 @@ fn norm_name(s: &str) -> String {
 ///   - recall: reference tuples reproduced as agent rows;
 ///   - precision: agent tuples (deduped, projected onto the matched columns)
 ///     that are genuinely in the reference.
+///
 /// Constant params (a single value, e.g. a fixed marking context) are ignored —
 /// they carry no combinatorial information and the compiler drops them too, so
 /// a correct 2-column table matches a 3-param reference table. If a reference
@@ -2008,12 +2007,15 @@ fn compare_tables_by_domain(
 
     if use_positional {
         let n = canon_order.len().min(agent_order.files.len());
-        for i in 0..n {
-            let gname = &canon_order[i];
+        for (i, (gname, file)) in canon_order
+            .iter()
+            .zip(agent_order.files.iter())
+            .enumerate()
+            .take(n)
+        {
             let Some(&ri) = col_by_name.get(gname.as_str()) else {
                 continue;
             };
-            let file = &agent_order.files[i];
             let Some(&ti) = file_map.get(file.as_str()) else {
                 continue;
             };

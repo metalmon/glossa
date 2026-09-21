@@ -1063,6 +1063,9 @@ fn reflect_quintuple(
     Ok(out)
 }
 
+// One (examples, outcomes) pair per pipeline stage (discover/materialize/compile/coverage/
+// validate) — the arg count is intrinsic to rendering all five stages' traces together.
+#[allow(clippy::too_many_arguments)]
 fn format_quintuple_traces(
     discover: &[GrepExample],
     d_out: &[DiscoverOutcome],
@@ -1142,6 +1145,17 @@ fn format_quintuple_traces(
     out
 }
 
+// (discover, materialize, compile, coverage, validate) outcome vectors for one candidate —
+// aliased so `score_quintuple`'s return type reads clean and stays under clippy's
+// type_complexity threshold.
+type QuintupleOutcomes = (
+    Vec<DiscoverOutcome>,
+    Vec<CspOutcome>,
+    Vec<CspOutcome>,
+    Vec<CspOutcome>,
+    Vec<CspOutcome>,
+);
+
 #[allow(clippy::too_many_arguments)]
 fn score_quintuple(
     cfg: &GepaConstraintConfig,
@@ -1152,13 +1166,7 @@ fn score_quintuple(
     coverage: &[CoverageExample],
     validate: &[ValidateExample],
     idx: &DocIndex,
-) -> Result<(
-    Vec<DiscoverOutcome>,
-    Vec<CspOutcome>,
-    Vec<CspOutcome>,
-    Vec<CspOutcome>,
-    Vec<CspOutcome>,
-)> {
+) -> Result<QuintupleOutcomes> {
     let d = score_discover(cfg, &candidate.discover_prompt, discover, idx);
     let m = score_materialize(cfg, &candidate.materialize_prompt, materialize)?;
     let c = score_compile(cfg, &candidate.compile_prompt, compile)?;
