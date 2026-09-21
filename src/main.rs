@@ -388,9 +388,10 @@ enum Cmd {
         /// Enable the retrieval anti-loop dedup (repeat/streak/plateau markers on the retrieval
         /// tools). OFF by default (`config::defaults::DEDUP`) — it is a guard for a weak reasoning
         /// reader; a general/display client should leave it off, or use a per-call `raw` carve-out.
-        /// Env `GLOSSA_MCP_DEDUP`.
-        #[arg(long = "dedup", env = "GLOSSA_MCP_DEDUP")]
-        dedup: Option<bool>,
+        /// Env `GLOSSA_MCP_DEDUP` (truthy = on). Bare `--dedup` turns it on; absent = off
+        /// (`config::defaults::DEDUP`).
+        #[arg(long = "dedup", env = "GLOSSA_MCP_DEDUP", action = clap::ArgAction::SetTrue)]
+        dedup: bool,
         /// Transport: stdio (local subprocess) or streamable-http (network endpoint at <bind>/mcp).
         /// `Option` with NO `default_value`: the built-in default now lives in `config::defaults`
         /// (Plan E merges CLI > env > config-file > default), resolved at the wiring layer.
@@ -2144,9 +2145,10 @@ fn main() -> anyhow::Result<()> {
                     no_image: no_image || !vision,
                     // get_source_file is opt-in via --source-file (off by default).
                     no_source_file: !source_file,
-                    // Anti-loop dedup is opt-in via --dedup; default from config::defaults::DEDUP
-                    // (the same const the eval harness reads, so eval and prod can't diverge).
-                    dedup: dedup.unwrap_or(glossa::config::defaults::DEDUP),
+                    // Anti-loop dedup is opt-in via a bare --dedup (SetTrue); absent = off, which
+                    // equals config::defaults::DEDUP (the same const the eval harness's default
+                    // matches, so eval and prod can't diverge).
+                    dedup,
                     transport,
                     bind,
                     allowed_hosts,

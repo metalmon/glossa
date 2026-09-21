@@ -273,7 +273,7 @@ enum Cmd {
         /// optimizes under a default-config prod server's retrieval feedback; pass to train on the
         /// plateau signal (spec: dedup unification §4.4). Env `GLOSSA_MCP_DEDUP`.
         #[arg(long = "dedup", env = "GLOSSA_MCP_DEDUP")]
-        dedup: Option<bool>,
+        dedup: bool,
     },
     /// Phase-2 of graph construction: backward query-side synthesis (one `chain_one_seed` pass per
     /// grounded terminal, fan-out), checkpointed for `--resume`, then finalize.
@@ -643,7 +643,7 @@ fn main() -> Result<()> {
                 lab,
                 resume,
                 force,
-                dedup: dedup.unwrap_or(glossa::config::defaults::DEDUP),
+                dedup,
             },
         ),
         Cmd::Reason {
@@ -849,8 +849,8 @@ struct EvalArgs {
     /// (spec: dedup unification §4.4). Set to reproduce a deployment that runs with `--dedup`.
     /// Note: with dedup off, GEPA/fine-tuning never see the plateau training signal — pass
     /// `--dedup=true` for a run that wants it. Env `GLOSSA_MCP_DEDUP`.
-    #[arg(long = "dedup", env = "GLOSSA_MCP_DEDUP")]
-    dedup: Option<bool>,
+    #[arg(long = "dedup", env = "GLOSSA_MCP_DEDUP", action = clap::ArgAction::SetTrue)]
+    dedup: bool,
 }
 
 struct ExportArgs {
@@ -983,12 +983,13 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         None
     };
 
-    // Single-source dedup knob (spec: dedup unification §4.4): CLI/env > `config::defaults::DEDUP`
-    // (off). Since MCP's `--dedup`/`GLOSSA_MCP_DEDUP` resolve against the SAME const, an operator
-    // who sets neither flag anywhere gets eval/prod parity by construction. Logged unconditionally
-    // (not just when non-default) so a silent default-off is visible in the run header rather than
-    // discovered later as a missing plateau signal in GEPA/fine-tuning data.
-    let dedup = args.dedup.unwrap_or(glossa::config::defaults::DEDUP);
+    // Single-source dedup knob (spec: dedup unification §4.4). A bare `--dedup` (or a truthy
+    // `GLOSSA_MCP_DEDUP`) turns it on; absent = OFF, which equals `config::defaults::DEDUP` (a
+    // compile-time-guarded `false`, see the const-guard test) — the same default MCP's `--dedup`
+    // resolves to, so an operator who sets neither flag anywhere gets eval/prod parity. Logged
+    // unconditionally so a silent default-off is visible in the run header rather than discovered
+    // later as a missing plateau signal in GEPA/fine-tuning data.
+    let dedup = args.dedup;
     cli_fmt::note(&if dedup {
         "dedup: on".to_string()
     } else {
@@ -2008,68 +2009,52 @@ mod tests {
     /// `--dedup` (spec: dedup unification §4.4): unset -> `None`, so `run_eval` resolves it
     /// against `config::defaults::DEDUP` (off) — the eval reader's dedup knob must default OFF,
     /// matching the MCP server's `--dedup`/`GLOSSA_MCP_DEDUP` default, not default ON.
+    /// `--dedup` is a bare on-switch (SetTrue), like `--vision`: present ⇒ on, absent ⇒ off. Absent
+    /// must equal the shared default `config::defaults::DEDUP` (off) so eval ≡ a default-config prod
+    /// MCP server. Regression guard: the first cut used `Option<bool>`, which made
+    /// `kbx eval run --dedup` error "a value is required for '--dedup <DEDUP>'".
     #[test]
-    fn eval_cmd_dedup_flag_defaults_unset_and_parses_explicit_value() {
-        let cli = Cli::try_parse_from(["kbx", "eval", "run"]).unwrap();
-        match cli.cmd {
+    fn eval_dedup_flag_is_a_bare_on_switch_off_by_default() {
+        match Cli::try_parse_from(["kbx", "eval", "run"]).unwrap().cmd {
             Cmd::Eval {
                 cmd: EvalCmd::Run(EvalArgs { dedup, .. }),
-            } => assert_eq!(
-                dedup, None,
-                "unset --dedup must be None, not a hardcoded default"
-            ),
+            } => assert!(!dedup, "absent --dedup must be off"),
             _ => panic!("expected Cmd::Eval Run"),
         }
-        let cli = Cli::try_parse_from(["kbx", "eval", "run", "--dedup", "true"]).unwrap();
-        match cli.cmd {
+        match Cli::try_parse_from(["kbx", "eval", "run", "--dedup"])
+            .unwrap()
+            .cmd
+        {
             Cmd::Eval {
                 cmd: EvalCmd::Run(EvalArgs { dedup, .. }),
-            } => assert_eq!(dedup, Some(true)),
-            _ => panic!("expected Cmd::Eval Run"),
-        }
-        let cli = Cli::try_parse_from(["kbx", "eval", "run", "--dedup", "false"]).unwrap();
-        match cli.cmd {
-            Cmd::Eval {
-                cmd: EvalCmd::Run(EvalArgs { dedup, .. }),
-            } => assert_eq!(dedup, Some(false)),
+            } => assert!(dedup, "bare --dedup must be on"),
             _ => panic!("expected Cmd::Eval Run"),
         }
     }
 
-    /// `kbx train --dedup` (spec §4.4): unset -> `None`, so `run_train` resolves it against
-    /// `config::defaults::DEDUP` (off) — the train reader's dedup knob defaults OFF, matching the
-    /// MCP server and `kbx eval`, so GEPA never silently trains on a plateau signal a default-config
-    /// prod server won't emit.
+    /// Train mirror: bare `--dedup` ⇒ on, absent ⇒ off — so GEPA trains under the same retrieval
+    /// feedback a default-config prod server serves unless `--dedup` is passed.
     #[test]
-    fn train_cmd_dedup_flag_defaults_unset_and_parses_explicit_value() {
-        let cli = Cli::try_parse_from(["kbx", "train"]).unwrap();
-        match cli.cmd {
-            Cmd::Train { dedup, .. } => {
-                assert_eq!(
-                    dedup, None,
-                    "unset --dedup must be None, not a hardcoded default"
-                )
-            }
+    fn train_dedup_flag_is_a_bare_on_switch_off_by_default() {
+        match Cli::try_parse_from(["kbx", "train"]).unwrap().cmd {
+            Cmd::Train { dedup, .. } => assert!(!dedup, "absent --dedup must be off"),
             _ => panic!("expected Cmd::Train"),
         }
-        let cli = Cli::try_parse_from(["kbx", "train", "--dedup", "true"]).unwrap();
-        match cli.cmd {
-            Cmd::Train { dedup, .. } => assert_eq!(dedup, Some(true)),
+        match Cli::try_parse_from(["kbx", "train", "--dedup"])
+            .unwrap()
+            .cmd
+        {
+            Cmd::Train { dedup, .. } => assert!(dedup, "bare --dedup must be on"),
             _ => panic!("expected Cmd::Train"),
         }
     }
 
-    /// `args.dedup.unwrap_or(default)` resolution mirrors the MCP server's own CLI>env>const
-    /// precedence resolution (`src/main.rs`): `None` must fall back to
-    /// `glossa::config::defaults::DEDUP`, which is `false`. Guards against the const silently
-    /// flipping to `true` upstream without this call site being noticed.
+    /// The shared dedup default must stay OFF: eval, train, and the MCP server all treat "no
+    /// `--dedup`" as `config::defaults::DEDUP`, so if it flipped to `true` upstream, a bare `--dedup`
+    /// absent would silently mean ON everywhere. Pins the value at compile time (fails the BUILD,
+    /// not just the test).
     #[test]
-    fn eval_dedup_resolution_defaults_to_shared_const_which_is_off() {
-        // Compile-time guard (fails the BUILD, not just the test, if the shared default flips to
-        // `true`): eval + train + the MCP server all resolve `--dedup` against this same const, so
-        // it must stay off to keep eval ≡ train ≡ a default-config prod server. The None→default
-        // resolution itself is covered by the `*_dedup_flag_defaults_unset_*` CLI-parse tests;
-        // this pins the default's value.
+    fn dedup_shared_default_is_off() {
         const { assert!(!glossa::config::defaults::DEDUP) };
     }
 
