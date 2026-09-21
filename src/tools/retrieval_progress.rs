@@ -205,6 +205,13 @@ pub struct Outcome {
 /// (answer now / stop searching / change approach) stays the reader prompt's job.
 #[derive(Debug, Default)]
 pub struct ReaderSignals {
+    /// Whether this tracker is armed at all. `true` for every existing caller (via [`Self::new`]);
+    /// `false` only for [`Self::disabled`], the eval-side dedup=off mode (spec: dedup unification
+    /// §4.4) — a tracker in that state is a pure, stateless passthrough: nothing reads or writes
+    /// `seen`/`window`/`streak`/`last_key` through it. Exposed to other crates via
+    /// [`Self::is_enabled`] so a caller-side wrapper (`kb_eval::backend::glossa_tools::
+    /// apply_plateau_render`) can short-circuit before ever calling [`Self::observe`].
+    enabled: bool,
     /// Every distinct result-id seen so far this session (cumulative retrieval footprint).
     seen: HashSet<String>,
     /// The (tool,args) identity key of the immediately-previous observed call, for repeat
@@ -246,6 +253,7 @@ impl ReaderSignals {
     /// on).
     pub fn new() -> Self {
         Self {
+            enabled: true,
             plateau_enabled: true,
             ..Self::default()
         }
@@ -255,9 +263,35 @@ impl ReaderSignals {
     /// repeat+streak (mirroring today's loop's unproductive-streak guard) passes `false`.
     pub fn with_plateau(enabled: bool) -> Self {
         Self {
+            enabled: true,
             plateau_enabled: enabled,
             ..Self::default()
         }
+    }
+
+    /// New tracker in DISABLED (dedup=off) mode: a pure, stateless passthrough. A caller-side
+    /// wrapper must check [`Self::is_enabled`] BEFORE calling [`Self::observe`] and, when `false`,
+    /// return the body unchanged without ever calling `observe` — see
+    /// `kb_eval::backend::glossa_tools::apply_plateau_render`. Spec: dedup unification §4.4 (the
+    /// eval-side `dedup` knob, default `config::defaults::DEDUP` = off).
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Self::default()
+        }
+    }
+
+    /// Whether this tracker is armed — `false` only for a [`Self::disabled`] tracker.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Cumulative distinct-id footprint recorded so far (`seen.len()`). Read-only observability
+    /// hook: lets a caller-side test assert that a [`Self::disabled`] tracker's guard (which must
+    /// never call [`Self::observe`]) really left this at 0 across a call sequence that would have
+    /// populated it under [`Self::new`].
+    pub fn seen_count(&self) -> usize {
+        self.seen.len()
     }
 
     /// Record one retrieval call (`tool` name — gated by the caller with [`is_retrieval_tool`]

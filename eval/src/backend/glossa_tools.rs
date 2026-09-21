@@ -31,6 +31,13 @@ pub fn apply_plateau_render(
     ids: &[String],
     body: String,
 ) -> String {
+    // dedup=off (spec: dedup unification §4.4): a `ReaderSignals::disabled()` tracker is a pure
+    // passthrough — `observe` is never called, so `seen`/`window`/`streak`/`last_key` are left
+    // untouched (a later call with `dedup=true`, or a later governed call in the same episode,
+    // still counts every id as new).
+    if !signals.is_enabled() {
+        return body;
+    }
     let out = signals.observe(name, key, ids);
     if out.kind != Some(SignalKind::Plateau) {
         return body;
@@ -158,6 +165,63 @@ mod reader_signal_render_tests {
             "unchanged".into(),
         );
         assert_eq!(rendered, "unchanged");
+    }
+
+    /// `ReaderSignals::disabled()` (the eval-side `dedup=false` default, spec §4.4) makes
+    /// `apply_plateau_render` a pure passthrough: even a call sequence that WOULD drain a plateau
+    /// under `new()` renders the body verbatim, AND — because `observe` is never invoked — the
+    /// tracker's `seen` footprint stays at 0 the whole way through (a following call, if the run
+    /// were ever switched to `dedup=true`, would still count every one of these ids as new).
+    #[test]
+    fn disabled_tracker_is_a_stateless_passthrough() {
+        let mut signals = ReaderSignals::disabled();
+        assert_eq!(signals.seen_count(), 0);
+        // Same q1..q5 sequence as `drained_plateau_replaces_body_with_marker_only`, which fires
+        // ReplaceWith on q5 under `new()`. Under `disabled()`, every call must render the body
+        // verbatim — no marker, ever — and never touch `seen`.
+        assert_eq!(
+            apply_plateau_render(
+                &mut signals,
+                "search",
+                "search:q1",
+                &ids(&["a", "b", "c"]),
+                "hit-list body".into()
+            ),
+            "hit-list body"
+        );
+        assert_eq!(
+            signals.seen_count(),
+            0,
+            "a disabled tracker must not fold ids into `seen`"
+        );
+        for (key, body) in [
+            ("search:q2", "body 2"),
+            ("search:q3", "body 3"),
+            ("search:q4", "body 4"),
+        ] {
+            assert_eq!(
+                apply_plateau_render(&mut signals, "search", key, &[], body.into()),
+                body,
+                "disabled tracker must never alter the body"
+            );
+        }
+        let rendered = apply_plateau_render(
+            &mut signals,
+            "search",
+            "search:q5",
+            &[],
+            "body 5 (must survive)".into(),
+        );
+        assert_eq!(
+            rendered, "body 5 (must survive)",
+            "a disabled tracker must never replace the body with a marker, even on what would be \
+             a drained plateau under new()"
+        );
+        assert_eq!(
+            signals.seen_count(),
+            0,
+            "state (seen/window/streak/last_key) must be untouched across the whole sequence"
+        );
     }
 
     /// Repeat and Streak kinds are NOT acted on here — even though they render `ReplaceWith`

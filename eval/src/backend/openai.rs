@@ -423,6 +423,13 @@ pub struct OpenAiBackend {
     /// the `Endpoint` handed to the agent loop (see `crate::lab::Endpoint::headers`). Empty (the
     /// default) reproduces today's behavior exactly (no extra headers).
     pub headers: std::collections::BTreeMap<String, String>,
+    /// Gates the per-episode `ReaderSignals` PLATEAU tracker (spec: dedup unification §4.4) —
+    /// `true` builds a live `ReaderSignals::new()` in `answer_capturing`; `false` (the default,
+    /// mirroring `config::defaults::DEDUP`) builds `ReaderSignals::disabled()`, a stateless
+    /// passthrough, so an eval run left at the default sees the SAME (no-marker) retrieval bodies
+    /// prod's MCP server serves by default. `kbx eval --dedup` overrides; the legacy `kb-eval run`
+    /// CLI has no flag and always resolves to the const default.
+    pub dedup: bool,
 }
 
 /// Fallback agent-loop round cap for the eval reader when `lab.toml`'s `[tuning] max_rounds` is
@@ -519,7 +526,11 @@ impl OpenAiBackend {
         // loop's own pre-exec dedup / unproductive-streak guard (`agent_loop.rs`) — acting on them
         // here too would double up. Owned here so it resets per question; the POLICY (what to do
         // about a plateau) stays in the reader prompt / GEPA, not in the tool layer.
-        let mut signals = crate::backend::glossa_tools::ReaderSignals::new();
+        let mut signals = if self.dedup {
+            crate::backend::glossa_tools::ReaderSignals::new()
+        } else {
+            crate::backend::glossa_tools::ReaderSignals::disabled()
+        };
         // Under `--vision`, the images each `read`/tool call surfaces are buffered here and drained
         // by `VisionTransport::push_tool_results` into a follow-up `role:"user"` image message right
         // after the round's tool results — the same seam the build/extract path uses via
@@ -660,6 +671,7 @@ impl OpenAiBackend {
             shared: None,
             max_rounds: DEFAULT_MAX_ROUNDS,
             headers: std::collections::BTreeMap::new(),
+            dedup: false,
         }
     }
 

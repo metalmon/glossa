@@ -834,6 +834,15 @@ struct EvalArgs {
     /// (matches an MCP server launched with --vision). Off by default.
     #[arg(long)]
     vision: bool,
+    /// Enable the retrieval anti-loop dedup (repeat/streak/plateau markers on the retrieval
+    /// tools) in the eval reader — mirrors the MCP server's `--dedup`/`GLOSSA_MCP_DEDUP`. OFF by
+    /// default (`config::defaults::DEDUP`), so an eval run left at the default sees the SAME
+    /// (no-marker) retrieval bodies a default-config prod MCP server serves — eval/prod parity
+    /// (spec: dedup unification §4.4). Set to reproduce a deployment that runs with `--dedup`.
+    /// Note: with dedup off, GEPA/fine-tuning never see the plateau training signal — pass
+    /// `--dedup=true` for a run that wants it. Env `GLOSSA_MCP_DEDUP`.
+    #[arg(long = "dedup", env = "GLOSSA_MCP_DEDUP")]
+    dedup: Option<bool>,
 }
 
 struct ExportArgs {
@@ -966,6 +975,20 @@ fn run_eval(args: EvalArgs) -> Result<()> {
         None
     };
 
+    // Single-source dedup knob (spec: dedup unification §4.4): CLI/env > `config::defaults::DEDUP`
+    // (off). Since MCP's `--dedup`/`GLOSSA_MCP_DEDUP` resolve against the SAME const, an operator
+    // who sets neither flag anywhere gets eval/prod parity by construction. Logged unconditionally
+    // (not just when non-default) so a silent default-off is visible in the run header rather than
+    // discovered later as a missing plateau signal in GEPA/fine-tuning data.
+    let dedup = args.dedup.unwrap_or(glossa::config::defaults::DEDUP);
+    cli_fmt::note(&if dedup {
+        "dedup: on".to_string()
+    } else {
+        "dedup: off (default — retrieval plateau/repeat/streak markers suppressed; pass --dedup \
+         to reproduce a --dedup MCP deployment or to train on the plateau signal)"
+            .to_string()
+    });
+
     let use_judge = !args.no_judge && !args.no_gold && lab.judge.is_some();
     // Abstention policy (FP-vs-FN operating point): balanced (default) or safety_first. Only affects
     // how the judge scores a decline on an ANSWERABLE question (safety_first credits it `partial`).
@@ -1074,6 +1097,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 // unset -> the engine default.
                 max_rounds: lab.tuning.max_rounds.unwrap_or(DEFAULT_MAX_ROUNDS),
                 headers: lab.model.headers.clone(),
+                dedup,
             };
 
             // One reader+judge sample. `capture=false` drives the byte-identical non-capturing reader
@@ -1971,6 +1995,48 @@ mod tests {
             } => assert!(jobs.is_none()),
             _ => panic!("expected Cmd::Eval Run"),
         }
+    }
+
+    /// `--dedup` (spec: dedup unification §4.4): unset -> `None`, so `run_eval` resolves it
+    /// against `config::defaults::DEDUP` (off) — the eval reader's dedup knob must default OFF,
+    /// matching the MCP server's `--dedup`/`GLOSSA_MCP_DEDUP` default, not default ON.
+    #[test]
+    fn eval_cmd_dedup_flag_defaults_unset_and_parses_explicit_value() {
+        let cli = Cli::try_parse_from(["kbx", "eval", "run"]).unwrap();
+        match cli.cmd {
+            Cmd::Eval {
+                cmd: EvalCmd::Run(EvalArgs { dedup, .. }),
+            } => assert_eq!(
+                dedup, None,
+                "unset --dedup must be None, not a hardcoded default"
+            ),
+            _ => panic!("expected Cmd::Eval Run"),
+        }
+        let cli = Cli::try_parse_from(["kbx", "eval", "run", "--dedup", "true"]).unwrap();
+        match cli.cmd {
+            Cmd::Eval {
+                cmd: EvalCmd::Run(EvalArgs { dedup, .. }),
+            } => assert_eq!(dedup, Some(true)),
+            _ => panic!("expected Cmd::Eval Run"),
+        }
+        let cli = Cli::try_parse_from(["kbx", "eval", "run", "--dedup", "false"]).unwrap();
+        match cli.cmd {
+            Cmd::Eval {
+                cmd: EvalCmd::Run(EvalArgs { dedup, .. }),
+            } => assert_eq!(dedup, Some(false)),
+            _ => panic!("expected Cmd::Eval Run"),
+        }
+    }
+
+    /// `args.dedup.unwrap_or(default)` resolution mirrors the MCP server's own CLI>env>const
+    /// precedence resolution (`src/main.rs`): `None` must fall back to
+    /// `glossa::config::defaults::DEDUP`, which is `false`. Guards against the const silently
+    /// flipping to `true` upstream without this call site being noticed.
+    #[test]
+    fn eval_dedup_resolution_defaults_to_shared_const_which_is_off() {
+        assert!(!glossa::config::defaults::DEDUP);
+        let resolved: bool = None.unwrap_or(glossa::config::defaults::DEDUP);
+        assert!(!resolved, "unset --dedup must resolve to off");
     }
 
     #[test]

@@ -181,6 +181,9 @@ fn main() -> anyhow::Result<()> {
                         max_rounds: backend::openai::DEFAULT_MAX_ROUNDS,
                         // Legacy `kb-eval run` CLI has no lab endpoint -> no extra headers.
                         headers: std::collections::BTreeMap::new(),
+                        // Legacy `kb-eval run` CLI has no --dedup flag -> the shared const default
+                        // (off), same as an unset `kbx eval --dedup`.
+                        dedup: glossa::config::defaults::DEDUP,
                     })
                 }
                 BackendKind::Cli => {
