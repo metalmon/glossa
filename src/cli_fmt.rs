@@ -13,7 +13,7 @@ pub fn progress_bar(len: u64, no_progress: bool) -> ProgressBar {
     let pb = ProgressBar::new(len);
     pb.set_style(
         ProgressStyle::with_template(
-            "{spinner:.white} {prefix} [{pos}/{len}] {wide_bar:.white} {elapsed_precise}<{eta_precise}{msg}",
+            "{spinner:.white} {prefix} [{pos}/{len}] {wide_bar:.white} {elapsed_precise}{msg}",
         )
         .unwrap_or_else(|_| ProgressStyle::default_bar())
         .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
