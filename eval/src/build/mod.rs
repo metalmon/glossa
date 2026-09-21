@@ -1021,7 +1021,7 @@ mod tests {
     /// Corroborates the assumption `extract_doc_weight` relies on: `DocIndex::iter_chunks`'
     /// `path` and the `Document` node id `enumerate_docs` returns are the SAME corpus-relative
     /// string (both derive from `Chunk::doc_path.to_string_lossy()` over the same discovery
-    /// pass — see `build_structural`/`write_chunks`). If they didn't match, `extract_doc_weight`
+    /// pass — see `write_chunks`). If they didn't match, `extract_doc_weight`
     /// would silently fall back to 1 for every real doc and reintroduce the exact per-document
     /// stepping this task removes. docA.md has 3 headed sections (-> 3 chunks); docB.md is one
     /// short section (-> 1 chunk).

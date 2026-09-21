@@ -68,7 +68,7 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 | Markdown heading-scoped chunks | **Shipped** | `chunk_markdown` / `A > B` locations |
 | HTML / CSV / text streaming | **Partial** | Basic `html`, `csv`/`tsv` (100 rows/chunk), encoding sniff + binary skip in `text`; HTML image extraction (`<img>` tags) shipped in v0.2.5 |
 | Image files (png, …) | **Partial** | Index: filename/folder label chunk only. `read` serves standalone image files as raw bytes to vision (`read.rs`) and can rasterize any PDF page — behind `--vision` |
-| Image-only / scanned PDFs | **Partial** | Parseable scans now get one empty stub **per physical page** (`pad_pdf_page_stubs`, `pdf.rs`); the `(no-text)` filename fallback fires only for *unparseable* PDFs. Still no OCR |
+| Image-only / scanned PDFs | **Partial** | Parseable scans now get one empty stub **per physical page** (`pdf.rs`); the `(no-text)` filename fallback fires only for *unparseable* PDFs. Still no OCR |
 | Indexing UX | **Partial** | `+ path` per file on index; no bar/counters/ETA |
 | Format sniffing (content, not extension) | **Open** | Routing by suffix; mislabeled `.doc`/RTF etc. hit wrong parser |
 | Table fidelity (xlsx/docx/pdf) | **Partial** | Office **done** — `expand_merged_tables` densifies merged col/row spans, multi-line cells collapsed, emitted as GFM (`office_table.rs` / `office_chunk.rs`). PDF: **flat layout-text only** — the structured table detector was removed (unreliable: mis-classified multi-column prose as tables, grids low-quality; A/B on a multi-column PDF corpus). Tables come through as flattened rows |

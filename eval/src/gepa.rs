@@ -251,9 +251,7 @@ fn render_hits(hits: &[Value]) -> String {
             let location = h["location"].as_str().unwrap_or("");
             let file_type = h["file_type"].as_str().unwrap_or("");
             let snippet = h["snippet"].as_str().unwrap_or("");
-            let label = if location.starts_with("p.") || location == "pdf" {
-                file_type
-            } else if !location.is_empty() {
+            let label = if !location.is_empty() {
                 location
             } else {
                 file_type
@@ -2803,5 +2801,32 @@ mod tests {
     fn normalize_question_used_for_join() {
         use crate::export_tz::normalize_question;
         assert_eq!(normalize_question("  a  b "), "a b");
+    }
+
+    #[test]
+    fn render_hits_label_falls_back_to_file_type_when_location_empty() {
+        let hits = vec![serde_json::json!({
+            "ord": 1,
+            "path": "docs/foo.pdf",
+            "location": "",
+            "file_type": "pdf",
+            "snippet": "some text"
+        })];
+        assert_eq!(render_hits(&hits), "[#1] docs/foo.pdf · pdf · some text");
+    }
+
+    #[test]
+    fn render_hits_label_uses_location_when_present() {
+        let hits = vec![serde_json::json!({
+            "ord": 2,
+            "path": "docs/bar.md",
+            "location": "Intro > Overview",
+            "file_type": "md",
+            "snippet": "some text"
+        })];
+        assert_eq!(
+            render_hits(&hits),
+            "[#2] docs/bar.md · Intro > Overview · some text"
+        );
     }
 }
