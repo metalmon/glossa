@@ -740,7 +740,8 @@ mod tests {
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[Chunk {
             doc_path: PathBuf::from("d.pdf"),
-            location: "p.7".into(),
+            // ord = seq now (no "p.N" parsing); a real PDF chunk carries no page label.
+            location: String::new(),
             file_type: "pdf".into(),
             text: "parameter maxTsdr equals 3000".into(),
         }])
@@ -757,7 +758,8 @@ mod tests {
         )
         .0;
         assert!(out.contains("maxTsdr"), "got: {out}");
-        assert!(out.contains("d.pdf#7:"), "carries path#n read key: {out}");
+        // 1st (and only) written chunk -> seq 1 -> ord 1.
+        assert!(out.contains("d.pdf#1:"), "carries path#n read key: {out}");
     }
 
     #[test]
