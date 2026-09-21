@@ -878,12 +878,6 @@ pub(crate) fn answer_tool_context(
 #[cfg(test)]
 pub(crate) use crate::backend::agent_loop::UNPRODUCTIVE_STREAK_K;
 
-/// Cap on how many images one `exec` call's tool result feeds the model in a single vision
-/// user-message, per Task-spec guard against a context flood (a figure-heavy scanned page can
-/// return many images; `to_jpeg` bounds each one's SIZE but not the COUNT). Extras are dropped
-/// with a logged note — never a silent truncation.
-pub(crate) const MAX_IMAGES_PER_TURN: usize = 4;
-
 /// Build the vision-input user message for a set of images returned by a tool call this round, or
 /// `None` when there are none. `--vision`-only mechanism (see `run_agent_loop`): the OpenAI-
 /// compatible `/v1/chat/completions` shape has no image slot on a `role:"tool"` message, so images
@@ -895,27 +889,19 @@ pub(crate) const MAX_IMAGES_PER_TURN: usize = 4;
 /// (padded, unwrapped) alphabet — canonical, no embedded whitespace/newlines, since a malformed
 /// `image_url.url` 400s on our opencode-zen endpoint.
 ///
-/// Caps the images fed to [`MAX_IMAGES_PER_TURN`]; when the tool call returned more, the extras
-/// are dropped and a note is printed to stderr (no silent truncation — see the constraint above).
+/// NO per-turn image cap (by request): every image the tool call returned is fed. A read of a
+/// large multi-page datasheet can surface many, so mind the request payload size / endpoint limits
+/// — `to_jpeg` bounds each image's SIZE, but there is no bound on the COUNT.
 fn vision_user_message(images: &[DocImage]) -> Option<Value> {
     if images.is_empty() {
         return None;
     }
     use base64::Engine as _;
-    let total = images.len();
-    let capped: Vec<&DocImage> = images.iter().take(MAX_IMAGES_PER_TURN).collect();
-    if total > MAX_IMAGES_PER_TURN {
-        eprintln!(
-            "[vision] {total} image(s) returned this turn; feeding only the first \
-             {MAX_IMAGES_PER_TURN} (dropping {})",
-            total - MAX_IMAGES_PER_TURN
-        );
-    }
     let mut content = vec![json!({
         "type": "text",
-        "text": format!("Images from that read ({}):", capped.len())
+        "text": format!("Images from that read ({}):", images.len())
     })];
-    for img in capped {
+    for img in images {
         let jpeg = glossa::read::to_jpeg(img.clone());
         let payload = base64::engine::general_purpose::STANDARD.encode(&jpeg.bytes);
         content.push(json!({
@@ -2111,20 +2097,23 @@ mod tests {
     }
 
     #[test]
-    fn vision_message_caps_at_max_images_per_turn() {
-        let images: Vec<DocImage> = (0..(MAX_IMAGES_PER_TURN as u8 + 2))
-            .map(stub_image)
-            .collect();
-        assert!(
-            images.len() > MAX_IMAGES_PER_TURN,
-            "test must exceed the cap"
-        );
+    fn vision_message_feeds_all_images_uncapped() {
+        // No per-turn cap (by request): every image the tool call returned is fed, however many.
+        let images: Vec<DocImage> = (0..6).map(stub_image).collect();
         let msg = vision_user_message(&images).expect("non-empty -> Some(message)");
         let content = msg["content"].as_array().unwrap();
         let image_parts = content.iter().filter(|p| p["type"] == "image_url").count();
         assert_eq!(
-            image_parts, MAX_IMAGES_PER_TURN,
-            "extras must be dropped, not fed: {content:?}"
+            image_parts,
+            images.len(),
+            "every image must be fed — no per-turn cap: {content:?}"
+        );
+        assert!(
+            content[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(&images.len().to_string()),
+            "lead text states the image count: {content:?}"
         );
     }
 
