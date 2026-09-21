@@ -51,7 +51,9 @@ jobs:
           - { os: macos-latest,   target: x86_64-apple-darwin,      archive: tar.gz, engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: ort,  kb_flags: "--no-default-features --features nli-directml", kbx_flags: "--features nli-directml" }
           - { os: macos-latest,   target: aarch64-apple-darwin,     archive: tar.gz, engine: ort,  kb_flags: "--no-default-features --features nli-coreml",   kbx_flags: "--features nli-coreml" }
-          - { os: macos-latest,   target: x86_64-apple-darwin,      archive: tar.gz, engine: ort,  kb_flags: "--no-default-features --features nli-coreml",   kbx_flags: "--features nli-coreml" }
+          # NOTE: no x86_64-apple-darwin · ort — ort-sys ships no `download-binaries` ONNX Runtime for
+          # Intel Mac ("no prebuilt binaries available for target x86_64-apple-darwin"), so a
+          # self-contained ort build is impossible there. Intel Mac gets the `none` variant only.
           - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: ort,  kb_flags: "--no-default-features --features nli",          kbx_flags: "--features nli" }
     steps:
       - uses: actions/checkout@v4
