@@ -37,10 +37,12 @@ jobs:
     strategy:
       fail-fast: false
       # Two engine variants per platform:
-      #   none — the lean default (zero ML deps): `--no-default-features`.
-      #   ort  — self-contained ONNX Runtime NLI, per-platform execution provider that rides the
+      #   none — the lean public artifact: `--no-default-features` (no `notebook`, no ML deps).
+      #   ort  — the PROD-grade artifact: DEFAULT features (so `notebook` stays — prod relies on it)
+      #          PLUS a self-contained ONNX Runtime NLI execution provider that rides the
       #          `nli-ort-bundled` (`download-binaries`) linking strategy — no external dll to source:
-      #          Windows → DirectML (all-vendor GPU), macOS → CoreML, Linux → CPU.
+      #          Windows → DirectML (all-vendor GPU), macOS → CoreML, Linux → CPU. (`constraint` stays
+      #          off — it is opt-in, not a default feature.)
       # CUDA/ROCm are deliberately excluded: they need `load-dynamic` (a runtime `ORT_DYLIB_PATH`),
       # so they are not self-contained and unfit for a drop-in release artifact.
       matrix:
@@ -49,12 +51,12 @@ jobs:
           - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
           - { os: macos-latest,   target: aarch64-apple-darwin,     archive: tar.gz, engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
           - { os: macos-latest,   target: x86_64-apple-darwin,      archive: tar.gz, engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: ort,  kb_flags: "--no-default-features --features nli-directml", kbx_flags: "--features nli-directml" }
-          - { os: macos-latest,   target: aarch64-apple-darwin,     archive: tar.gz, engine: ort,  kb_flags: "--no-default-features --features nli-coreml",   kbx_flags: "--features nli-coreml" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: ort,  kb_flags: "--features nli-directml", kbx_flags: "--features nli-directml" }
+          - { os: macos-latest,   target: aarch64-apple-darwin,     archive: tar.gz, engine: ort,  kb_flags: "--features nli-coreml",   kbx_flags: "--features nli-coreml" }
           # NOTE: no x86_64-apple-darwin · ort — ort-sys ships no `download-binaries` ONNX Runtime for
           # Intel Mac ("no prebuilt binaries available for target x86_64-apple-darwin"), so a
           # self-contained ort build is impossible there. Intel Mac gets the `none` variant only.
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: ort,  kb_flags: "--no-default-features --features nli",          kbx_flags: "--features nli" }
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: ort,  kb_flags: "--features nli",          kbx_flags: "--features nli" }
     steps:
       - uses: actions/checkout@v4
 
