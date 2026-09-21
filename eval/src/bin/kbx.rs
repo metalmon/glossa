@@ -2065,9 +2065,12 @@ mod tests {
     /// flipping to `true` upstream without this call site being noticed.
     #[test]
     fn eval_dedup_resolution_defaults_to_shared_const_which_is_off() {
-        assert!(!glossa::config::defaults::DEDUP);
-        let resolved: bool = None.unwrap_or(glossa::config::defaults::DEDUP);
-        assert!(!resolved, "unset --dedup must resolve to off");
+        // Compile-time guard (fails the BUILD, not just the test, if the shared default flips to
+        // `true`): eval + train + the MCP server all resolve `--dedup` against this same const, so
+        // it must stay off to keep eval ≡ train ≡ a default-config prod server. The None→default
+        // resolution itself is covered by the `*_dedup_flag_defaults_unset_*` CLI-parse tests;
+        // this pins the default's value.
+        const { assert!(!glossa::config::defaults::DEDUP) };
     }
 
     #[test]
