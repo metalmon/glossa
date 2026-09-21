@@ -895,6 +895,9 @@ fn run_optimize_graph(
             checkpoint_path: None,
             resume: false,
             force: false,
+            // Legacy research binary has no `--dedup` flag; keep the anti-loop off (spec §4.4
+            // default, matching a default-config prod server — no behaviour change).
+            dedup: false,
         },
         qs,
         &reflect,

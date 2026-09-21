@@ -117,6 +117,12 @@ pub struct GepaGraphConfig {
     /// Resume flags (mutually exclusive at the CLI). See `gepa_checkpoint::decide_resume`.
     pub resume: bool,
     pub force: bool,
+    /// Gate the per-rollout `ReaderSignals` PLATEAU tracker (spec: dedup unification §4.4) — the
+    /// train twin of the eval reader's `dedup` knob. `true` builds a live `ReaderSignals::new()`;
+    /// `false` (the default, mirroring `config::defaults::DEDUP`) builds `ReaderSignals::disabled()`
+    /// so GEPA optimizes under the SAME retrieval feedback a default-config prod MCP server serves.
+    /// Pass `kbx train --dedup` to train on the plateau signal (a run left at the default sees none).
+    pub dedup: bool,
 }
 
 /// False-positive rate over non-errored outcomes: `count(is_fp) / count(!errored)`. `0.0` when every
@@ -306,8 +312,13 @@ fn rollout_one(
     // the SAME PLATEAU render eval's `answer_capturing` does, so GEPA optimizes the prompt under
     // the identical signal. Repeat/Streak stay the agent loop's job — not acted on here (see
     // `openai::answer_capturing`'s exec closure for the twin comment). Owned per rollout; the
-    // POLICY stays in the prompt / GEPA, not the tool layer.
-    let mut signals = crate::backend::glossa_tools::ReaderSignals::new();
+    // POLICY stays in the prompt / GEPA, not the tool layer. Gated on `cfg.dedup` (spec §4.4):
+    // off (the default) = a `disabled()` passthrough, so train matches a default-config prod server.
+    let mut signals = if cfg.dedup {
+        crate::backend::glossa_tools::ReaderSignals::new()
+    } else {
+        crate::backend::glossa_tools::ReaderSignals::disabled()
+    };
     // Full-response one-shot; resampling is applied provider-neutrally by the agent loop
     // (`backend::resample::call_with_resample`).
     let chat = |messages: &[Value]| {

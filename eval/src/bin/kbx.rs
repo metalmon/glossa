@@ -268,6 +268,12 @@ enum Cmd {
         /// Discard any existing GEPA checkpoint and start a fresh run (overwrites it as it proceeds).
         #[arg(long, conflicts_with = "resume")]
         force: bool,
+        /// Enable the reader anti-loop (plateau) in train rollouts — mirrors the MCP server's
+        /// `--dedup`/`GLOSSA_MCP_DEDUP`. OFF by default (`config::defaults::DEDUP`), so GEPA
+        /// optimizes under a default-config prod server's retrieval feedback; pass to train on the
+        /// plateau signal (spec: dedup unification §4.4). Env `GLOSSA_MCP_DEDUP`.
+        #[arg(long = "dedup", env = "GLOSSA_MCP_DEDUP")]
+        dedup: Option<bool>,
     },
     /// Phase-2 of graph construction: backward query-side synthesis (one `chain_one_seed` pass per
     /// grounded terminal, fan-out), checkpointed for `--resume`, then finalize.
@@ -614,6 +620,7 @@ fn main() -> Result<()> {
             lab,
             resume,
             force,
+            dedup,
         } => train::run_train(
             path,
             TrainArgs {
@@ -636,6 +643,7 @@ fn main() -> Result<()> {
                 lab,
                 resume,
                 force,
+                dedup: dedup.unwrap_or(glossa::config::defaults::DEDUP),
             },
         ),
         Cmd::Reason {
@@ -2025,6 +2033,29 @@ mod tests {
                 cmd: EvalCmd::Run(EvalArgs { dedup, .. }),
             } => assert_eq!(dedup, Some(false)),
             _ => panic!("expected Cmd::Eval Run"),
+        }
+    }
+
+    /// `kbx train --dedup` (spec §4.4): unset -> `None`, so `run_train` resolves it against
+    /// `config::defaults::DEDUP` (off) — the train reader's dedup knob defaults OFF, matching the
+    /// MCP server and `kbx eval`, so GEPA never silently trains on a plateau signal a default-config
+    /// prod server won't emit.
+    #[test]
+    fn train_cmd_dedup_flag_defaults_unset_and_parses_explicit_value() {
+        let cli = Cli::try_parse_from(["kbx", "train"]).unwrap();
+        match cli.cmd {
+            Cmd::Train { dedup, .. } => {
+                assert_eq!(
+                    dedup, None,
+                    "unset --dedup must be None, not a hardcoded default"
+                )
+            }
+            _ => panic!("expected Cmd::Train"),
+        }
+        let cli = Cli::try_parse_from(["kbx", "train", "--dedup", "true"]).unwrap();
+        match cli.cmd {
+            Cmd::Train { dedup, .. } => assert_eq!(dedup, Some(true)),
+            _ => panic!("expected Cmd::Train"),
         }
     }
 
