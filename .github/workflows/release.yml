@@ -43,8 +43,12 @@ jobs:
       #          `nli-ort-bundled` (`download-binaries`) linking strategy — no external dll to source:
       #          Windows → DirectML (all-vendor GPU), macOS → CoreML, Linux → CPU. (`constraint` stays
       #          off — it is opt-in, not a default feature.)
-      # CUDA/ROCm are deliberately excluded: they need `load-dynamic` (a runtime `ORT_DYLIB_PATH`),
-      # so they are not self-contained and unfit for a drop-in release artifact.
+      # ROCm is excluded (load-dynamic, no self-contained artifact). CUDA ships as the `cuda13`
+      # Windows variant: it uses `load-dynamic` too, but the ONNX Runtime GPU (CUDA 13) DLLs are
+      # fetched and bundled beside the binary (see the "Fetch ONNX Runtime CUDA-13 DLLs" step), so it
+      # is drop-in APART FROM two runtime prerequisites on the target: CUDA 13 + cuDNN 9, and
+      # `ORT_DYLIB_PATH` pointing at the bundled `onnxruntime.dll`. Matched to ort 2.0.0-rc.13 (ORT
+      # 1.28) — `onnxruntime-win-x64-gpu_cuda13-1.28.2`.
       matrix:
         include:
           - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
@@ -52,6 +56,7 @@ jobs:
           - { os: macos-latest,   target: aarch64-apple-darwin,     archive: tar.gz, engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
           - { os: macos-latest,   target: x86_64-apple-darwin,      archive: tar.gz, engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: ort,  kb_flags: "--features nli-directml", kbx_flags: "--features nli-directml" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: cuda13, kb_flags: "--features nli-cuda", kbx_flags: "--features nli-cuda" }
           - { os: macos-latest,   target: aarch64-apple-darwin,     archive: tar.gz, engine: ort,  kb_flags: "--features nli-coreml",   kbx_flags: "--features nli-coreml" }
           # NOTE: no x86_64-apple-darwin · ort — ort-sys ships no `download-binaries` ONNX Runtime for
           # Intel Mac ("no prebuilt binaries available for target x86_64-apple-darwin"), so a
@@ -74,6 +79,25 @@ jobs:
       - name: Build kbx
         # kbx is the file-first eval/train/build toolkit (lives in the kb-eval crate).
         run: cargo build --release --locked --target ${{ matrix.target }} -p kb-eval --bin kbx ${{ matrix.kbx_flags }}
+
+      - name: Fetch ONNX Runtime CUDA-13 DLLs (cuda13 only)
+        # nli-cuda uses ort's `load-dynamic`: nothing is linked/downloaded at build time, so the
+        # GPU-capable ONNX Runtime must be supplied at RUNTIME. Fetch the ORT 1.28 CUDA-13 build
+        # (matches ort 2.0.0-rc.13's ORT 1.28 target) and drop its DLLs beside the binary — the
+        # Windows package step below copies `onnxruntime*.dll` from the release dir into the zip.
+        if: matrix.engine == 'cuda13'
+        shell: pwsh
+        run: |
+          $ver = "1.28.2"
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v$ver/onnxruntime-win-x64-gpu_cuda13-$ver.zip"
+          Invoke-WebRequest -Uri $url -OutFile ort-gpu.zip
+          Expand-Archive -Path ort-gpu.zip -DestinationPath ort-gpu -Force
+          $dst = "target/${{ matrix.target }}/release"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          # Only the ONNX Runtime DLLs (onnxruntime.dll + onnxruntime_providers_*.dll). CUDA/cuDNN
+          # runtime libs are NOT bundled (licensing) — they come from the target's CUDA 13 + cuDNN 9.
+          Get-ChildItem -Recurse ort-gpu -Filter "onnxruntime*.dll" | Copy-Item -Destination $dst -Force
+          Get-ChildItem "$dst/onnxruntime*.dll" | ForEach-Object { Write-Host "bundled: $($_.Name)" }
 
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
