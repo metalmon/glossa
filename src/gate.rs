@@ -247,6 +247,8 @@ mod resolve_scorer_tests {
             model_dir: None,
             entail_index: 0,
             execution_providers: vec!["cpu".into()],
+            execution_provider_device: None,
+            execution_provider_mem_limit_mb: None,
         }
     }
 

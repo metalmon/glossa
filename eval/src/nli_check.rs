@@ -318,6 +318,7 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
 /// never hand-edits TOML. `execution_providers` is written only when non-empty — an empty list
 /// leaves the ontology key untouched (mirrors `entail_index`/`mode`/`ep_device`'s `Option` "only if
 /// given" convention).
+#[allow(clippy::too_many_arguments)]
 pub fn nli_set(
     path: Option<PathBuf>,
     model_dir: PathBuf,
@@ -379,6 +380,7 @@ pub fn nli_set(
 /// `toml_edit::DocumentMut`, mutate only the keys this function owns, then write the whole
 /// document back. Does NOT touch `[verify.nli.threshold]` (calibration's own keys) or any other
 /// table. `execution_providers` is written as a TOML array; `None` leaves the key untouched.
+#[allow(clippy::too_many_arguments)]
 pub fn write_nli_config(
     glossa_dir: &Path,
     model_dir: &Path,

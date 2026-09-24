@@ -243,6 +243,8 @@ mod tests {
             model_dir: None,
             entail_index: 0,
             execution_providers: vec!["cpu".into()],
+            execution_provider_device: None,
+            execution_provider_mem_limit_mb: None,
         };
         let mut df = DfTable::new();
         df.add_chunk(&tokenize("pp.19.00.00.00 text"));
@@ -295,6 +297,8 @@ mod tests {
             model_dir: None,
             entail_index: 0,
             execution_providers: vec!["cpu".into()],
+            execution_provider_device: None,
+            execution_provider_mem_limit_mb: None,
         }
     }
 
@@ -319,6 +323,8 @@ mod tests {
             model_dir: None,
             entail_index: 0,
             execution_providers: vec!["cpu".into()],
+            execution_provider_device: None,
+            execution_provider_mem_limit_mb: None,
         }
     }
 
