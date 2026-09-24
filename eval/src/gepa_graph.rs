@@ -123,6 +123,14 @@ pub struct GepaGraphConfig {
     /// so GEPA optimizes under the SAME retrieval feedback a default-config prod MCP server serves.
     /// Pass `kbx train --dedup` to train on the plateau signal (a run left at the default sees none).
     pub dedup: bool,
+    /// Feed the reader `read`-tool images as vision input during rollouts — the train twin of the
+    /// eval reader's `--vision`. `true` returns the images `glossa_tools::exec` surfaces so the shim
+    /// (`openai::run_agent_loop` → `ClosureTransport::push_tool_results`) rides them to the model in
+    /// a follow-up `role:"user"` image message, AND advertises the vision-shaped tool context; `false`
+    /// (the default) discards them, keeping the rollout transcript byte-identical to the text-only
+    /// path. NOTE: like `dedup`, not part of the checkpoint fingerprint (a `--vision` flip does not
+    /// invalidate a resume) — a known, pre-existing limitation shared by both flags.
+    pub vision: bool,
 }
 
 /// False-positive rate over non-errored outcomes: `count(is_fp) / count(!errored)`. `0.0` when every
@@ -332,7 +340,7 @@ fn rollout_one(
         )
     };
     let exec = |name: &str, args: &Value| -> (String, Vec<String>, Vec<glossa::read::DocImage>) {
-        let (mut body, ids, _images) =
+        let (mut body, ids, images) =
             crate::backend::glossa_tools::exec(name, args, &cfg.work, idx, graph, spec, &trace);
         // Mirror openai::execute_tool: `read`'s surfaced id is its `path` arg (glossa_tools::exec
         // returns no ids for read itself).
@@ -362,9 +370,12 @@ fn rollout_one(
             args: args.clone(),
             result: truncate_chars(&body, STEP_RESULT_CHARS),
         });
-        // GEPA graph rollouts don't feed vision input (not `kbx build --vision`) — discard, same
-        // as `_images` above.
-        (body, ids, Vec::new())
+        // Under `kbx train --vision` (cfg.vision) forward the images `exec` surfaced so the shim
+        // rides them to the model (see `openai::run_agent_loop`'s image buffer +
+        // `ClosureTransport::push_tool_results`); otherwise discard them, keeping the rollout
+        // transcript byte-identical to the text-only path.
+        let images = if cfg.vision { images } else { Vec::new() };
+        (body, ids, images)
     };
     let messages = vec![
         json!({ "role": "system", "content": prompt }),
@@ -1044,8 +1055,10 @@ pub fn run(
     // Serving parity: same tool-context the reader advertises from (`backend::openai::
     // answer_tool_context`) — GEPA's reflected prompt should describe the tool set the reader will
     // actually be offered (verify gating, graph tools, get_source_file, image shaping). Vision is
-    // off here (matches today's reflected schema); Task 6 threads --vision through the reader.
-    let tool_ctx = crate::backend::openai::answer_tool_context(&cfg.work, graph.is_some(), false);
+    // gated on `cfg.vision` (`kbx train --vision`), so the reflected schema matches the modality the
+    // rollouts actually run under.
+    let tool_ctx =
+        crate::backend::openai::answer_tool_context(&cfg.work, graph.is_some(), cfg.vision);
     let tools = crate::backend::openai::tools_schema_from_ctx(&tool_ctx);
     // Full chat-completions URL, used verbatim (no suffix appended).
     let url = cfg.endpoint.clone();

@@ -151,6 +151,11 @@ pub struct TrainArgs {
     /// optimizes under a default-config prod server's retrieval feedback. `kbx train --dedup` turns
     /// it on to train on the plateau signal (a default run sees none — logged in the run header).
     pub dedup: bool,
+    /// Feed the reader `read`-tool images as vision input during GEPA rollouts (train twin of the
+    /// eval reader's `--vision`). OFF by default: text-only rollouts, byte-identical to today. Pass
+    /// `kbx train --vision` when optimizing a prompt for an image-bearing corpus so GEPA sees the
+    /// same modality the reader will be served.
+    pub vision: bool,
 }
 
 /// Apply-gate: copy the winning prompt back onto the workspace `answer.md` only when GEPA's
@@ -342,6 +347,7 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
         resume: args.resume,
         force: args.force,
         dedup: args.dedup,
+        vision: args.vision,
     };
 
     // Reflect via the plain `[reflect]` endpoint: system = reflect.md, user = GEPA's instruction.

@@ -274,6 +274,12 @@ enum Cmd {
         /// plateau signal (spec: dedup unification §4.4). Env `GLOSSA_MCP_DEDUP`.
         #[arg(long = "dedup", env = "GLOSSA_MCP_DEDUP")]
         dedup: bool,
+        /// Feed the reader `read`-tool images (page rasters / embedded figures) as vision input
+        /// during GEPA rollouts, so a prompt trained for an image-bearing corpus optimizes under
+        /// the SAME modality it will be served. OFF by default (text-only rollouts, byte-identical
+        /// to today). Mirrors `kbx build --vision` / `kbx eval run --vision`. Env `GLOSSA_VISION`.
+        #[arg(long = "vision", env = "GLOSSA_VISION")]
+        vision: bool,
     },
     /// Phase-2 of graph construction: backward query-side synthesis (one `chain_one_seed` pass per
     /// grounded terminal, fan-out), checkpointed for `--resume`, then finalize.
@@ -621,6 +627,7 @@ fn main() -> Result<()> {
             resume,
             force,
             dedup,
+            vision,
         } => train::run_train(
             path,
             TrainArgs {
@@ -644,6 +651,7 @@ fn main() -> Result<()> {
                 resume,
                 force,
                 dedup,
+                vision,
             },
         ),
         Cmd::Reason {
@@ -2045,6 +2053,24 @@ mod tests {
             .cmd
         {
             Cmd::Train { dedup, .. } => assert!(dedup, "bare --dedup must be on"),
+            _ => panic!("expected Cmd::Train"),
+        }
+    }
+
+    /// Train mirror of the build `--vision` switch: bare `--vision` ⇒ on, absent ⇒ off. GEPA
+    /// rollouts feed the reader `read`-tool images only when this is set, matching how `kbx eval`
+    /// and `kbx build` gate vision — so a trained prompt sees the same modality it will be served.
+    #[test]
+    fn train_vision_flag_is_a_bare_on_switch_off_by_default() {
+        match Cli::try_parse_from(["kbx", "train"]).unwrap().cmd {
+            Cmd::Train { vision, .. } => assert!(!vision, "absent --vision must be off"),
+            _ => panic!("expected Cmd::Train"),
+        }
+        match Cli::try_parse_from(["kbx", "train", "--vision"])
+            .unwrap()
+            .cmd
+        {
+            Cmd::Train { vision, .. } => assert!(vision, "bare --vision must be on"),
             _ => panic!("expected Cmd::Train"),
         }
     }
