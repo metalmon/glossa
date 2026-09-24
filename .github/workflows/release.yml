@@ -89,8 +89,15 @@ jobs:
         shell: pwsh
         run: |
           $ver = "1.28.2"
+          # Pinned SHA-256 of onnxruntime-win-x64-gpu_cuda13-1.28.2.zip (GitHub release asset
+          # digest). Verified after download so a tampered/substituted archive fails the build
+          # instead of shipping an unverified GPU dll (supply-chain integrity).
+          $sha = "4B7A2D01A3CC96B12D06C8266AF2C8F42C96365C4A0100D45FD874C71B4A2E19"
           $url = "https://github.com/microsoft/onnxruntime/releases/download/v$ver/onnxruntime-win-x64-gpu_cuda13-$ver.zip"
           Invoke-WebRequest -Uri $url -OutFile ort-gpu.zip
+          $got = (Get-FileHash ort-gpu.zip -Algorithm SHA256).Hash
+          if ($got -ne $sha) { Write-Error "ORT GPU zip SHA256 mismatch: expected $sha, got $got"; exit 1 }
+          Write-Host "ORT GPU zip SHA256 verified"
           Expand-Archive -Path ort-gpu.zip -DestinationPath ort-gpu -Force
           $dst = "target/${{ matrix.target }}/release"
           New-Item -ItemType Directory -Force -Path $dst | Out-Null
