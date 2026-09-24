@@ -347,11 +347,12 @@ mod ort_engine {
 
     /// Turns an already-filtered GPU EP name into a live `ExecutionProviderDispatch`. `device_id`
     /// (when `Some`) is threaded onto the CUDA/DirectML/ROCm builders via `with_device_id`; `None`
-    /// builds each EP with its default device. `mem_limit_mb` (when `Some`) is converted to bytes and
-    /// applied where the EP supports it: CUDA gets `with_memory_limit` + same-as-requested arena;
-    /// ROCm gets same-as-requested arena (this ort version exposes no ROCm memory cap); DirectML and
-    /// CoreML expose no memory/arena option in this ort version, so they ignore it. Both `None`
-    /// builds each EP exactly as before.
+    /// builds each EP with its default device. CUDA and ROCm ALWAYS use the `SameAsRequested` arena
+    /// strategy (non-greedy: allocate only what each inference needs, not the default power-of-two
+    /// growth) so NLI is a good VRAM citizen next to a co-located LLM by default. `mem_limit_mb`
+    /// (when `Some`) adds an optional hard cap via CUDA's `with_memory_limit` (ROCm exposes no memory
+    /// cap in this ort version); DirectML and CoreML expose no memory/arena option at all and ignore
+    /// it.
     fn dispatch_for_gpu_name(
         name: &str,
         device_id: Option<i32>,
@@ -359,14 +360,17 @@ mod ort_engine {
     ) -> Option<ExecutionProviderDispatch> {
         #[cfg(feature = "nli-cuda")]
         if name == "cuda" {
-            let mut ep = ort::ep::CUDA::default();
+            // Non-greedy allocator by DEFAULT: allocate exactly what each inference needs instead of
+            // the default power-of-two arena growth, so NLI takes only the VRAM it actually uses and
+            // coexists with a co-located LLM without a hand-set number. `ep_mem_limit_mb`, when set,
+            // adds an optional hard cap on top.
+            let mut ep = ort::ep::CUDA::default()
+                .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested);
             if let Some(id) = device_id {
                 ep = ep.with_device_id(id);
             }
             if let Some(mb) = mem_limit_mb {
-                ep = ep
-                    .with_memory_limit(mb * 1024 * 1024)
-                    .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested);
+                ep = ep.with_memory_limit(mb * 1024 * 1024);
             }
             return Some(ep.build());
         }
@@ -385,12 +389,12 @@ mod ort_engine {
         }
         #[cfg(feature = "nli-rocm")]
         if name == "rocm" {
-            let mut ep = ort::ep::ROCm::default();
+            // Same non-greedy-by-default arena as CUDA (ROCm exposes the strategy but no hard
+            // memory-limit knob in this ort version).
+            let mut ep = ort::ep::ROCm::default()
+                .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested);
             if let Some(id) = device_id {
                 ep = ep.with_device_id(id);
-            }
-            if mem_limit_mb.is_some() {
-                ep = ep.with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested);
             }
             return Some(ep.build());
         }
