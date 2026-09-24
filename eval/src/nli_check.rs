@@ -305,6 +305,47 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
         Probe::NotRun => println!("sanity         = (skipped — no scorer loaded)"),
     }
 
+    // GPU execution-provider probe: the serving scorer is fail-open (no `.error_on_failure()`), so a
+    // CUDA/DirectML build that can't load its runtime silently runs on CPU with no signal. This
+    // STRICT probe (`glossa_nli::probe_gpu_ep`) rebuilds a minimal session with `.error_on_failure()`
+    // to report whether the configured GPU EP ACTUALLY initialized. Only reachable when the real ORT
+    // scorer path is compiled — i.e. the features that pull in the direct `glossa-nli` dep (plain
+    // `nli`/default builds don't, and are CPU-only anyway) — and only run when the model weights
+    // exist to build a session from.
+    #[cfg(any(
+        feature = "nli-directml",
+        feature = "nli-coreml",
+        feature = "nli-cuda",
+        feature = "nli-rocm",
+        feature = "nli-burn",
+        feature = "nli-burn-cpu",
+    ))]
+    if let Some(md) = cfg.model_dir.as_ref().filter(|d| model_weights_present(d)) {
+        match glossa_nli::probe_gpu_ep(
+            md,
+            cfg.entail_index,
+            &cfg.execution_providers,
+            cfg.execution_provider_device,
+            cfg.execution_provider_mem_limit_mb,
+        ) {
+            Ok(Some(ep)) => println!("ep_active      = {ep} (initialized)"),
+            Ok(None) => println!("ep_active      = cpu (no GPU EP configured)"),
+            Err(e) => {
+                // On failure the probe can't return the EP name, so label it from the requested
+                // provider list (first non-cpu entry) to match "cuda REQUESTED but FAILED".
+                let requested = cfg
+                    .execution_providers
+                    .iter()
+                    .find(|p| p.as_str() != "cpu")
+                    .map(String::as_str)
+                    .unwrap_or("gpu");
+                println!(
+                    "ep_active      = {requested} REQUESTED but FAILED to init -> running on CPU: {e}"
+                );
+            }
+        }
+    }
+
     let (_, verdict) = nli_verdict(&facts);
     println!("=> {verdict}");
     Ok(())

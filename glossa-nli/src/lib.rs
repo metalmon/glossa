@@ -33,7 +33,21 @@ mod burn_engine;
 pub use burn_engine::InProcessBurnNli;
 
 #[cfg(feature = "nli-ort")]
-pub use ort_engine::InProcessNli;
+pub use ort_engine::{probe_gpu_ep, InProcessNli};
+
+/// Stub for engine builds WITHOUT ORT (the burn/wgpu engine): there is no ORT execution-provider to
+/// probe, so report "nothing to probe" (`Ok(None)`) rather than fail. Keeps `kbx nli check`
+/// compiling on every feature set; mirrors `ort_engine::probe_gpu_ep`'s signature exactly.
+#[cfg(all(feature = "nli-burn-wgpu", not(feature = "nli-ort")))]
+pub fn probe_gpu_ep(
+    _model_dir: &std::path::Path,
+    _entail_index: usize,
+    _providers: &[String],
+    _device_id: Option<i32>,
+    _mem_limit_mb: Option<usize>,
+) -> anyhow::Result<Option<String>> {
+    Ok(None)
+}
 
 #[cfg(feature = "nli-ort")]
 mod ort_engine {
@@ -212,27 +226,10 @@ mod ort_engine {
 
             let model_path = resolve_model_file(model_dir)?;
             let eps = execution_provider_dispatch(providers, device_id, mem_limit_mb);
-            // Deliberately NO `.error_on_failure()`: a GPU EP that can't register falls through to
-            // ORT's implicit CPU EP — the fail-open contract (see module doc).
-            let mut builder = Session::builder()
-                .map_err(|e| anyhow::anyhow!("onnx session builder: {e}"))?
-                .with_execution_providers(eps)
-                .map_err(|e| anyhow::anyhow!("onnx session execution providers: {e}"))?
-                .with_optimization_level(GraphOptimizationLevel::Level3)
-                .map_err(|e| anyhow::anyhow!("onnx session optimization level: {e}"))?
-                .with_intra_threads(1)
-                .map_err(|e| anyhow::anyhow!("onnx session intra-threads: {e}"))?;
-            // Under a GPU memory limit, disable the memory-pattern optimizer: it pre-plans one big
-            // contiguous arena, which fights a hard cap and inflates peak VRAM. Only applied when a
-            // limit is requested, so the unset path is byte-identical to before.
-            if mem_limit_mb.is_some() {
-                builder = builder
-                    .with_memory_pattern(false)
-                    .map_err(|e| anyhow::anyhow!("onnx session memory pattern: {e}"))?;
-            }
-            let session = builder.commit_from_file(&model_path).map_err(|e| {
-                anyhow::anyhow!("onnx session load ({}): {e}", model_path.display())
-            })?;
+            // Deliberately NO `.error_on_failure()` on these dispatches: a GPU EP that can't register
+            // falls through to ORT's implicit CPU EP — the fail-open serving contract (see module
+            // doc). `probe_gpu_ep` is the opt-in STRICT counterpart used by `kbx nli check`.
+            let session = build_session(&model_path, eps, mem_limit_mb)?;
 
             Ok(Inner {
                 tokenizer,
@@ -256,6 +253,73 @@ mod ort_engine {
                 hypotheses,
             )
         }
+    }
+
+    /// Build one ORT `Session` for `model_path` with the given execution-provider dispatch list and
+    /// optional GPU memory limit, applying the exact builder options `load` uses (opt level 3, a
+    /// single intra-thread, and the memory-pattern optimizer disabled only under a mem limit).
+    /// Shared by the fail-open [`InProcessNli::build_inner`] and the strict [`probe_gpu_ep`] — the
+    /// ONLY difference between the two is whether the caller applied `.error_on_failure()` to the
+    /// dispatches it hands in, so both paths build byte-identically otherwise.
+    fn build_session(
+        model_path: &Path,
+        eps: Vec<ExecutionProviderDispatch>,
+        mem_limit_mb: Option<usize>,
+    ) -> anyhow::Result<Session> {
+        let mut builder = Session::builder()
+            .map_err(|e| anyhow::anyhow!("onnx session builder: {e}"))?
+            .with_execution_providers(eps)
+            .map_err(|e| anyhow::anyhow!("onnx session execution providers: {e}"))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow::anyhow!("onnx session optimization level: {e}"))?
+            .with_intra_threads(1)
+            .map_err(|e| anyhow::anyhow!("onnx session intra-threads: {e}"))?;
+        // Under a GPU memory limit, disable the memory-pattern optimizer: it pre-plans one big
+        // contiguous arena, which fights a hard cap and inflates peak VRAM. Only applied when a
+        // limit is requested, so the unset path is byte-identical to before.
+        if mem_limit_mb.is_some() {
+            builder = builder
+                .with_memory_pattern(false)
+                .map_err(|e| anyhow::anyhow!("onnx session memory pattern: {e}"))?;
+        }
+        builder
+            .commit_from_file(model_path)
+            .map_err(|e| anyhow::anyhow!("onnx session load ({}): {e}", model_path.display()))
+    }
+
+    /// Strict GPU execution-provider probe for `kbx nli check`. Diagnostic-only: it never runs
+    /// inference and does NOT touch the fail-open [`InProcessNli::load`] serving path.
+    ///
+    /// Determines the FIRST configured GPU EP among `providers` that THIS build actually compiled
+    /// (reusing [`compiled_gpu_providers`]/[`dispatch_for_gpu_name`], so cuda/directml/coreml/rocm
+    /// per features), then tries to build a minimal ORT session for the model with ONLY that EP
+    /// registered and `.error_on_failure()` applied — the deterministic init probe. `device_id` and
+    /// `mem_limit_mb` are threaded through exactly as `load` uses them, so the probe matches the real
+    /// serving config. `entail_index` is unused (no inference is run); it is accepted for signature
+    /// symmetry with the rest of the API.
+    ///
+    /// - `Ok(None)` — no GPU EP is configured/compiled (CPU-only): nothing to probe.
+    /// - `Ok(Some(name))` — that GPU EP registered successfully; it really initialized.
+    /// - `Err(reason)` — the EP was REQUESTED but failed to initialize; serving would silently fall
+    ///   back to CPU. The reason is ORT's registration error.
+    pub fn probe_gpu_ep(
+        model_dir: &Path,
+        _entail_index: usize,
+        providers: &[String],
+        device_id: Option<i32>,
+        mem_limit_mb: Option<usize>,
+    ) -> anyhow::Result<Option<String>> {
+        let Some(name) = compiled_gpu_providers(providers).into_iter().next() else {
+            return Ok(None); // CPU-only (or no GPU EP compiled) — nothing to probe.
+        };
+        let Some(dispatch) = dispatch_for_gpu_name(name, device_id, mem_limit_mb) else {
+            return Ok(None);
+        };
+        let model_path = resolve_model_file(model_dir)?;
+        // `.error_on_failure()` flips the ONE bit that differs from `load`: this dispatch now returns
+        // Err (instead of silently falling back to CPU) if the EP can't register.
+        build_session(&model_path, vec![dispatch.error_on_failure()], mem_limit_mb)?;
+        Ok(Some(name.to_string()))
     }
 
     impl RawForward for InProcessNli {
