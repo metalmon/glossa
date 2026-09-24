@@ -345,7 +345,7 @@ pub fn run_agent_loop_capturing(
     // conversation's tail `prompt_tokens` into this one's first request. Both entry points funnel
     // here (`OpenAiBackend::answer` drives this loop directly; the closure-based
     // `openai::run_agent_loop` shim delegates to it), so this one reset covers every caller.
-    crate::backend::openai::reset_conversation_prefix();
+    crate::backend::accounting::reset_conversation_prefix();
 
     let temperature: Option<f64> = ep.resolve_temperature();
 
@@ -408,7 +408,7 @@ pub fn run_agent_loop_capturing(
                     // the judge can see the answer the reader gave BEFORE any closing pleasantry.
                     Ok(None) => {
                         if sim_deflected {
-                            crate::backend::openai::push_reader_dialogue_turn("assistant", &text);
+                            crate::backend::dialogue::push_reader_dialogue_turn("assistant", &text);
                         }
                         record_episode(&mut capture, system, tools, &messages, &text);
                         return Ok(text);
@@ -418,8 +418,8 @@ pub fn run_agent_loop_capturing(
                     // a round, so this is naturally capped by `max_rounds`. Record BOTH text turns
                     // (assistant + user_sim) into the dialogue the judge will later see.
                     Ok(Some(deflection)) => {
-                        crate::backend::openai::push_reader_dialogue_turn("assistant", &text);
-                        crate::backend::openai::push_reader_dialogue_turn("user", &deflection);
+                        crate::backend::dialogue::push_reader_dialogue_turn("assistant", &text);
+                        crate::backend::dialogue::push_reader_dialogue_turn("user", &deflection);
                         sim_deflected = true;
                         transport.push_assistant_turn(&mut messages, &reply);
                         messages.push(json!({ "role": "user", "content": deflection }));
@@ -428,7 +428,7 @@ pub fn run_agent_loop_capturing(
                     // Fail-open on a gate error: return the text rather than hang the run.
                     Err(_) => {
                         if sim_deflected {
-                            crate::backend::openai::push_reader_dialogue_turn("assistant", &text);
+                            crate::backend::dialogue::push_reader_dialogue_turn("assistant", &text);
                         }
                         record_episode(&mut capture, system, tools, &messages, &text);
                         return Ok(text);
@@ -485,7 +485,7 @@ pub fn run_agent_loop_capturing(
     let reply = call_with_context_retry(transport, ep, system, &mut messages, tools, temperature)?;
     let text = reply.text.unwrap_or_default();
     if sim_deflected {
-        crate::backend::openai::push_reader_dialogue_turn("assistant", &text);
+        crate::backend::dialogue::push_reader_dialogue_turn("assistant", &text);
     }
     record_episode(&mut capture, system, tools, &messages, &text);
     Ok(text)

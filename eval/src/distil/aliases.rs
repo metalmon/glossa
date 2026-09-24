@@ -15,10 +15,12 @@
 //! `reason::run::run_reason_at` (worker pool + shared `GraphWriter`/`DocIndex` + progress bar) and
 //! `reason::seed::chain_one_seed` (agent loop + `exec` closure) in shape.
 
-use crate::backend::glossa_tools;
-use crate::backend::openai::{
-    cache_is_estimated, reset_resamples, reset_tokens, run_agent_loop, token_summary, StatusTicker,
+use crate::backend::accounting::{
+    cache_is_estimated, reset_resamples, reset_tokens, token_summary,
 };
+use crate::backend::glossa_tools;
+use crate::backend::loop_compat::run_agent_loop;
+use crate::backend::progress::StatusTicker;
 use crate::backend::transport::openai::agent_chat_full;
 use crate::distil::run::DistilArgs;
 use crate::distil::seed_pool;

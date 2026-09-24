@@ -4,9 +4,10 @@
 //! `finalize` (hygiene/doctor + node-index rebuild) — mirrors `run_build`'s shape
 //! (`crate::build::run_build`) so the two pipelines stay recognizably siblings.
 
-use crate::backend::openai::{
-    cache_is_estimated, reset_resamples, reset_tokens, token_summary, StatusTicker,
+use crate::backend::accounting::{
+    cache_is_estimated, reset_resamples, reset_tokens, token_summary,
 };
+use crate::backend::progress::StatusTicker;
 use crate::checkpoint::Checkpoint;
 use crate::distil::Seed;
 use crate::lab::LabConfig;

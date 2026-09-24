@@ -396,7 +396,7 @@ fn rollout_one(
     let user_sim = gate
         .as_ref()
         .map(|g| g as &dyn crate::backend::user_sim::DialogueGate);
-    let (raw, errored) = match crate::backend::openai::run_agent_loop(
+    let (raw, errored) = match crate::backend::loop_compat::run_agent_loop(
         chat, messages, exec, nba, MAX_ROUNDS, user_sim,
     ) {
         Ok(r) => (r, false),
@@ -429,7 +429,7 @@ fn rollout_one(
         // fed to the judge — it grades the reader's substantive answer, not a closing pleasantry.
         // Empty when no user_sim gate deflected. Drained unconditionally so the exact-match path
         // below can't leak a stale buffer onto the next case scheduled on this worker.
-        let reader_dialogue = crate::backend::openai::take_reader_dialogue();
+        let reader_dialogue = crate::backend::dialogue::take_reader_dialogue();
         match &cfg.judge {
             Some(jc) => match crate::judge::judge(
                 &jc.ep,
@@ -1059,7 +1059,7 @@ pub fn run(
     // rollouts actually run under.
     let tool_ctx =
         crate::backend::openai::answer_tool_context(&cfg.work, graph.is_some(), cfg.vision);
-    let tools = crate::backend::openai::tools_schema_from_ctx(&tool_ctx);
+    let tools = crate::backend::transport::openai::tools_schema_from_ctx(&tool_ctx);
     // Full chat-completions URL, used verbatim (no suffix appended).
     let url = cfg.endpoint.clone();
 
@@ -1723,7 +1723,7 @@ mod tests {
             no_image: false,
             features: glossa::tools::registry::FeatureSet::default(),
         };
-        let tools = crate::backend::openai::tools_schema_from_ctx(&tool_ctx);
+        let tools = crate::backend::transport::openai::tools_schema_from_ctx(&tool_ctx);
         let ctx = GraphReflectContext {
             parent_prompt: "seed graph prompt".to_string(),
             parent_score: 0.25,

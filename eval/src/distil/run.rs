@@ -7,9 +7,10 @@
 //! Read-only on the graph: this module never calls `graph_upsert`. The only write anywhere in
 //! `kbx distil` is the `--out` dataset file.
 
-use crate::backend::openai::{
-    cache_is_estimated, reset_resamples, reset_tokens, token_summary, StatusTicker,
+use crate::backend::accounting::{
+    cache_is_estimated, reset_resamples, reset_tokens, token_summary,
 };
+use crate::backend::progress::StatusTicker;
 use crate::checkpoint::Checkpoint;
 use crate::distil::densify::{densify_doc, DensifyStats};
 use crate::distil::gen::{generate_one, GenOutcome, Seed};

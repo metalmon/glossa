@@ -11,7 +11,8 @@
 //! The CLI subcommand that parses flags into `TrainArgs` and calls `run_train` is a separate,
 //! later task — this module is pure engine glue.
 
-use crate::backend::openai::{reset_resamples, reset_tokens, StatusTicker};
+use crate::backend::accounting::{reset_resamples, reset_tokens};
+use crate::backend::progress::StatusTicker;
 use crate::gepa::{self, CandidateSelection};
 use crate::gepa_graph::{self, GepaGraphConfig};
 use crate::lab::{AbstentionPolicy, LabConfig};

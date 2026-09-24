@@ -19,9 +19,10 @@ pub use finalize::finalize;
 pub use incremental::{compute_delta, drop_doc_nodes, Delta};
 pub use judge::{judge_group, run_judge, JudgeStats};
 
-use crate::backend::openai::{
-    cache_is_estimated, reset_resamples, reset_tokens, token_summary, StatusTicker,
+use crate::backend::accounting::{
+    cache_is_estimated, reset_resamples, reset_tokens, token_summary,
 };
+use crate::backend::progress::StatusTicker;
 use crate::checkpoint::Checkpoint;
 use crate::lab::LabConfig;
 use crate::parallel::{run_units_parallel, GraphWriter};

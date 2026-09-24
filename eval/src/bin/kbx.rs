@@ -8,10 +8,11 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use glossa::cli_fmt;
-use kb_eval::backend::openai::{
-    cache_is_estimated, reset_resamples, reset_tokens, token_summary, OpenAiBackend, StatusTicker,
-    DEFAULT_MAX_ROUNDS,
+use kb_eval::backend::accounting::{
+    cache_is_estimated, reset_resamples, reset_tokens, token_summary,
 };
+use kb_eval::backend::openai::{OpenAiBackend, DEFAULT_MAX_ROUNDS};
+use kb_eval::backend::progress::StatusTicker;
 use kb_eval::backend::AgentBackend;
 use kb_eval::build::{run_build, BuildOpts, BuildStage};
 use kb_eval::calibrate::{self, CalibrateArgs};
@@ -1181,7 +1182,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 // same thread, so the thread-local handoff is safe even under `kbx --jobs N`. Empty
                 // when no `user_sim` gate deflected (or none is configured), so the judge grades
                 // exactly as before.
-                let reader_dialogue = kb_eval::backend::openai::take_reader_dialogue();
+                let reader_dialogue = kb_eval::backend::dialogue::take_reader_dialogue();
 
                 let golds = gold_forms(q);
                 // Endpoint-errored rollouts produced no answer — no EM/F1 sample (0.0) and the

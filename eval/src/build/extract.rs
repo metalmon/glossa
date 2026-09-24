@@ -16,7 +16,7 @@
 //! unit test; the `graph_upsert` exec arm's parse/filter/write behavior is unit-testable and
 //! covered below without a live model.
 
-use crate::backend::openai::run_agent_loop;
+use crate::backend::loop_compat::run_agent_loop;
 use crate::backend::transport::openai::agent_chat_full;
 use crate::lab::LabConfig;
 use crate::parallel::GraphWriter;
@@ -646,7 +646,8 @@ strict = true
     /// `openai::tests::loop_unproductive_streak_never_fires_when_calls_are_productive`.
     #[test]
     fn loop_distinct_graph_upsert_calls_never_trip_unproductive_streak() {
-        use crate::backend::openai::{run_agent_loop, UNPRODUCTIVE_STREAK_K};
+        use crate::backend::agent_loop::UNPRODUCTIVE_STREAK_K;
+        use crate::backend::loop_compat::run_agent_loop;
         use glossa::graph::store::GraphStore;
         use std::cell::RefCell;
 

@@ -1,14 +1,19 @@
+pub mod accounting;
 pub mod agent_loop;
 pub mod cli;
+pub mod dialogue;
 pub mod glossa_tools;
+pub mod loop_compat;
 pub mod mock;
 pub mod openai;
+pub mod progress;
 pub mod prompt;
 pub mod resample;
 pub mod resilience;
 pub mod tensorzero;
 pub mod transport;
 pub mod user_sim;
+pub mod vision;
 
 use crate::dataset::Question;
 use std::path::Path;

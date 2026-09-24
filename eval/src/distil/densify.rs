@@ -27,7 +27,7 @@
 //! same split).
 
 use crate::backend::glossa_tools;
-use crate::backend::openai::run_agent_loop;
+use crate::backend::loop_compat::run_agent_loop;
 use crate::backend::transport::openai::agent_chat_full;
 use crate::build::extract::{
     doc_chunk_ords, extract_tools_schema, parse_and_filter_upsert, upserted_node_ids,

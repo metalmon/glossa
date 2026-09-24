@@ -12,7 +12,7 @@
 //! fixed ANSWER is that terminal fact and whose new entry angle requires reasoning to reach it.
 
 use crate::backend::glossa_tools;
-use crate::backend::openai::run_agent_loop;
+use crate::backend::loop_compat::run_agent_loop;
 use crate::backend::transport::openai::agent_chat_full;
 use crate::lab::LabConfig;
 use crate::reason::schema_graph_block;

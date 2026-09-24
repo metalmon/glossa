@@ -122,7 +122,7 @@ pub fn is_degenerate(reply: &TurnReply) -> bool {
 /// [`transport_for`]. On a SUCCESS whose OUTPUT is degenerate ([`is_degenerate`]) the turn is
 /// resampled, up to `policy`'s bounds; if still degenerate after the budget, the last (best-effort)
 /// reply is returned — the agent loop's dedup/streak/`max_rounds` backstop handles persistence.
-/// Each resample bumps the process-global counter ([`crate::backend::openai::note_resample`]) so a
+/// Each resample bumps the process-global counter ([`crate::backend::accounting::note_resample`]) so a
 /// run's progress bar can surface it.
 ///
 /// With `ep.fallback` empty, `ep.rate_limit` absent, and a non-degenerate first reply this is a
@@ -161,7 +161,7 @@ pub fn call_with_resample(
             }
             length_resamples += 1;
         }
-        crate::backend::openai::note_resample();
+        crate::backend::accounting::note_resample();
         reply = attempt()?;
     }
     Ok(reply)
@@ -170,7 +170,7 @@ pub fn call_with_resample(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::openai::{resamples, reset_resamples};
+    use crate::backend::accounting::{resamples, reset_resamples};
     use crate::backend::transport::ToolCall;
     use serde_json::json;
     use std::cell::RefCell;
