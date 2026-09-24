@@ -47,11 +47,21 @@ kb search <pattern> [path] [flags]
 ## `kb read` — read a document or a search result
 
 ```
-kb read <target> [location]
+kb read <target> [n]
 ```
 
-`target` is a file path, or a number referencing the last `search`'s Nth result. `location` is an
-optional heading or `p.N` to narrow to one section/page.
+`target` resolves exactly as the MCP `read` tool does — the same copy-ready `path#N` token that
+`kb search`/`kb grep` print, so a hit round-trips straight back into `read`:
+
+- `path#N` — read the Nth chunk of a document (`N` is a 1-based chunk ordinal; for PDFs it is the
+  page number). An out-of-range `N` clamps into range.
+- a bare document path — reads chunk `#1`, or pass the chunk number as the optional `[n]` argument
+  (a `#N` baked into `target` wins over `n`).
+- a graph node id (`res:…`) — reads that node's evidence.
+- a bare number — the Nth hit of the last `kb search`.
+
+The older `p.N` page label and free-text heading location have been replaced by the `path#N` chunk
+token; address a page or section by its `#N` ordinal instead.
 
 ## `kb cat` — print a file's full extracted text
 
@@ -131,7 +141,7 @@ kb graph <action> ...
 | `query` | Read-only SQL `SELECT` over the graph (the `sql` MCP tool); empty SQL prints the schema. `[sql] [path]` |
 | `ls` | Browse nodes: per-type summary, or `--type T` to list that type. `[path]`; `-t/--type <TYPE>`; `-l/--limit <N>` (default `50`); `--as-of <DATE>`; `--now <DATE>` |
 | `generalize` | Run the deterministic derived-layer pass (closure, `SIMILAR`, communities, centrality). `[path]`; `-m/--merge` also collapses near-duplicate nodes (destructive) |
-| `doctor` | Diagnose graph health: ungrounded/stale/incomplete/dangling. `[path]`; `--prune-incomplete`; `--prune-ungrounded`; `--prune-dangling`; `--prune-stale`; `--force` (override the mass-wipe guard on `--prune-dangling`; CLI-only, not exposed over MCP); `--relink` (non-destructive: re-points `MENTIONS`+provenance for documents that were relabeled or moved between folders, matched by filename+section; backs up `graph.sqlite` first, along with its `-wal`/`-shm` siblings when present, each run's backup timestamped (`graph.sqlite.pre-relink-<epoch-seconds>`) so repeated `--relink` runs never overwrite an earlier run's backup — see [graph-lifecycle.md](graph-lifecycle.md#you-relabeled-the-corpus-or-moved-a-document-between-folders)). `--prune-ungrounded` refuses while relinkable nodes exist — run `--relink` first, or `--force` to prune anyway |
+| `doctor` | Diagnose graph health: ungrounded/stale/incomplete/dangling. `[path]`; `--prune-incomplete`; `--prune-ungrounded`; `--prune-dangling`; `--prune-stale`; `--force` (override the mass-wipe guard; CLI-only, not exposed over MCP — a destructive prune (`--prune-dangling`/`--prune-ungrounded`/`--prune-stale`) is refused when it would wipe the reasoning layer wholesale: the signature of an ontology mismatch (zero live grounded terminals, e.g. a missing or changed `ontology.toml`), an `ontology.toml` that is present but fails to parse, or a bucket exceeding half the reasoning layer — `--force` prunes anyway); `--relink` (non-destructive: re-points `MENTIONS`+provenance for documents that were relabeled or moved between folders, matched by filename+section; backs up `graph.sqlite` first, along with its `-wal`/`-shm` siblings when present, each run's backup timestamped (`graph.sqlite.pre-relink-<epoch-seconds>`) so repeated `--relink` runs never overwrite an earlier run's backup — see [graph-lifecycle.md](graph-lifecycle.md#you-relabeled-the-corpus-or-moved-a-document-between-folders)). `--prune-ungrounded` refuses while relinkable nodes exist — run `--relink` first, or `--force` to prune anyway |
 | `near` (alias `neighbors`) | Nodes reachable from a node id. `<node_id> [path]`; `-d/--depth <N>` (default `1`); `-t/--type <TYPE>` (repeatable); `--as-of <DATE>`; `--now <DATE>`; `--scope <DOC-OR-GLOB>` |
 | `node` | Show one node: type, label, provenance, outgoing edges. `<node_id> [path]`; `--as-of <DATE>`; `--now <DATE>` |
 | `reach` | Cross-document reasoning bridge (the `reach` MCP tool). `--from <ID>`; `-r/--relation <REL>`; `--to <ID>` (omit for discovery); `[path]`; `--no-bridge`; `-d/--max-depth <N>` (default `6`); `--scope <DOC-OR-GLOB>` |

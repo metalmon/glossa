@@ -208,6 +208,116 @@ The first steps prepare the graph and the question set; `eval --capture` + `expo
 captured trajectories into Unsloth-ready SFT / DPO JSONL. Format details and the on-policy (DPO)
 variant live in [finetuning-datasets.md](finetuning-datasets.md).
 
+### Train — checkpoint / resume and the three-phase bar
+
+`kbx train` is **crash-resumable**. It writes a single, stable, timestamp-free checkpoint —
+`gepa.checkpoint.json` under the workspace kbx dir (`<root>/.glossa/kbx/`) — after the
+baseline/Pareto pass and after each accepted search iteration, then candidate-by-candidate through
+the final-val pass. Interrupt a run and re-launch it and it picks up where it stopped instead of
+re-scoring completed work.
+
+A checkpoint carries a **fingerprint** of the run config, so resumption is guarded:
+
+| Flag | Behavior |
+|---|---|
+| *(none)* | A matching checkpoint resumes automatically; a checkpoint whose fingerprint no longer matches the current config **errors**, telling you to pass `--force` or `--resume`. |
+| `--resume` | Resume from the on-disk checkpoint **even if the fingerprint drifted**. Errors if there is nothing on disk to resume. |
+| `--force` | Discard any existing checkpoint and start a fresh run (overwrites it as it proceeds). Mutually exclusive with `--resume`. |
+
+The progress bar runs in **three phases**, each with its own elapsed/ETA: **baseline** (score the
+seed prompt over the validation split + build the Pareto set), **search** (the reflect→mutate
+budget), and **final-val** (re-score every pool candidate to pick the winner). A resumed run skips
+whatever the checkpoint already covered. `--no-progress` hides the bar (non-TTY / logging).
+
+### Train knobs — rollout averaging, vision, dedup, cross-model
+
+| Knob | Where | Meaning |
+|---|---|---|
+| `[tuning] gepa_rollout_samples` | `lab.toml` | `K`-sample rollout averaging (default `1`). `K>1` rolls each question `K` times and averages the score, so every accept / Pareto / apply-gate decision rests on a less noisy estimate — cutting a weak, high-variance reader's per-rollout noise at `K×` the model-call cost. Floored at 1. |
+| `--vision` (env `GLOSSA_VISION`) | `kbx train` | Feed the reader `read`-tool images (page rasters / embedded figures) as vision input during GEPA rollouts. **Off by default** (text-only rollouts). |
+| `--dedup` (env `GLOSSA_MCP_DEDUP`) | `kbx train` | Gate the reader anti-loop (repeat / streak / **plateau** markers on the retrieval tools) in train rollouts. **Off by default** (`config::defaults::DEDUP`). With dedup off, GEPA and fine-tuning never see the plateau training signal — pass `--dedup` for a run that wants to optimize on it or reproduce a `--dedup` deployment. |
+| `--lab <path>` | `kbx train` | Override the `lab.toml` path (default `<root>/.glossa/kbx/lab.toml`). Enables a **cross-model** job: point `train` at e.g. `lab.35b.toml` while a concurrent `kbx eval` uses `lab.9b.toml`. Prompt files still come from the workspace. |
+
+### Vision and dedup in the eval reader
+
+`kbx eval run` carries the same two switches, symmetric to `kbx train` and the MCP server, so an
+eval reproduces a given deployment exactly:
+
+- `--vision` (env `GLOSSA_VISION`) — advertise `read(page_image)` and feed returned page images to
+  the model. Off by default. Matches an MCP server launched with `--vision`.
+- `--dedup` (env `GLOSSA_MCP_DEDUP`) — enable the retrieval anti-loop (repeat / streak / plateau
+  markers) in the eval reader. Off by default (`config::defaults::DEDUP`); a bare `--dedup` turns it
+  on. Mirrors the MCP server's `--dedup`.
+
+### Judge — dialogue-aware grading and majority voting
+
+The evidence-grounded judge grades an answer against the retrieved source evidence, not only the
+gold string, and it is **dialogue-aware**: with a `[user_sim]` endpoint configured in `lab.toml`, a
+patient simulated user deflects a bare non-answer back into the reader loop instead of letting a
+text-only turn end it (train and eval share the same dynamics).
+
+Judge voting is **intrinsic**: every `judge()` call samples the endpoint several times with the same
+message and returns the **majority verdict** (ties break by mode, then severity), taming the model's
+run-to-run flip-flopping. The default is **5 samples**; there is no per-call opt-out. Override the
+count for a whole run with the `KB_EVAL_JUDGE_VOTES` environment variable.
+
+### Verifier calibration and NLI support-verifier
+
+The answer-grounding gate's verify threshold is calibrated by `kbx eval calibrate`. Alongside the
+default sweep over a past run's graded cases, `--from-dataset <path>` builds a **run-free bootstrap
+prior** straight from a dataset — it scores the **gold** answers (clean), not the reader's own
+outputs, so you can calibrate before you have a single scored run. Positives = answerable golds vs
+their `source` (or a retrieved proxy); negatives = unanswerable golds vs the top hit **plus** hard
+retrieval distractors. The negative set is **denoised** — it skips the false-negative-prone top hits
+and drops any distractor the answer already grounds well — and a **reliability gate** reports the
+AUROC separation of positives vs negatives per signal (grounding/AC and NLI); trust the prior only
+when that AUROC sits comfortably above chance. A minimum class count is enforced so a tiny pool
+errors instead of writing a garbage prior.
+
+Verify mode is selected by `[verify] mode` in the corpus `ontology.toml` (env `GLOSSA_VERIFY_MODE`
+overrides; precedence env > ontology > default):
+
+| `mode` | Behavior |
+|---|---|
+| `ac` | Answer-coverage grounding only. The **default** — a corpus that sets nothing is unchanged. |
+| `nli` | NLI support-verifier: per-claim entailment against the retrieved evidence. Needs a wired model dir **and** calibrated thresholds to actually fire, else it fails open to AC. |
+| `combined` | Calibrated z-score consensus of AC and NLI. Needs both buckets calibrated, else fails open per-call. |
+
+**Wiring the NLI model** — the `kbx nli` group:
+
+```bash
+kbx nli download --repo <hf-repo> --to <dir>     # fetch the exported model
+kbx nli set --model-dir <dir> --scorer in_process [--mode nli] [--ep cuda,cpu]
+kbx nli check [PATH]                              # will the verifier run, or why it fails open to AC?
+```
+
+`nli set` writes `[verify.nli]` (`model_dir`, `scorer`, optional `entail_index`, `execution_providers`,
+and — only if given — `[verify] mode`) into `ontology.toml`, preserving the rest of the file.
+`--ep` is an ordered GPU execution-provider preference list (repeat the flag or comma-join). `nli
+check` reports the compiled engine and whether every precondition is met.
+
+The NLI engine is compiled in at build time — exactly one per binary: the **ORT** engine
+(`model.onnx`) or a **pure-Rust burn** engine (`.safetensors`), the latter as `burn-wgpu (vulkan)`
+on the GPU or `burn (ndarray/cpu)`. `nli check` prints which engine the binary carries.
+
+### Dataset file operations (`kbx dataset`)
+
+Pure, offline operations over `dataset.toml`-shape files (the `[[case]]` format) — every op reads
+through the single case parser, so no field (`hop_type` / `needs_graph` / `source` / `answerable`)
+is silently dropped:
+
+| Command | Does |
+|---|---|
+| `kbx dataset stat <file>` | Read-only counts / breakdowns: `hop_type`, `answerable` vs `unanswerable`, `needs_graph`, alias coverage, duplicate/blank counts, question/answer length min/median/max — plus an **answer-reachability** table when a graph is present. |
+| `kbx dataset merge --from <a> --into <b>` | Append `a`'s cases into `b`, deduped by normalized question, re-id-ing colliding ids; backs `b` up to `<b>.bak` first. |
+| `kbx dataset validate <file>` | Check non-empty q/a, valid `hop_type`, unique ids; exits non-zero on any issue. |
+| `kbx dataset dedup <file>` | Remove normalized-duplicate questions (keep first); backs up to `<file>.bak`. |
+| `kbx dataset sample <file> -n N [--seed S]` | Print `N` cases chosen with a seeded (reproducible) RNG; `--seed` default `0`, `N ≥ total` prints all. |
+
+`answerable` / `unanswerable` is the gate marker: an `answerable=false` case is an **abstention
+test** (correct = the reader declines / says it is not in the KB), scored as such by `kbx eval run`
+when a `[judge]` endpoint is configured.
+
 The remainder of this guide is the earlier **TensorZero-gateway apparatus** — the `kb-eval` /
 `kb-train` binaries, the `enrich` silver-graph path, and GEPA over the four retrieval micro-tasks.
 It remains supported for that research workflow; `kbx` is the current self-contained path.

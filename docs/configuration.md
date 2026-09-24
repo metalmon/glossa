@@ -52,10 +52,10 @@ ignored) — set it via `--auth-token` or `GLOSSA_MCP_TOKEN` instead. See
 are already off unless `--vision`/`GLOSSA_VISION` is set, so it has no effect and is not listed
 above as a knob to reach for.
 
-Two retrieval-tuning env vars are corpus-level, not server-level, and documented alongside the
-ontology `[retrieval]` table rather than here: `GLOSSA_PPR_SIM_WEIGHT` and
-`GLOSSA_PPR_SPINE_WEIGHT` — see
-[graph-and-ontology.md § Retrieval tuning](graph-and-ontology.md#retrieval-tuning).
+Two retrieval-tuning env vars are corpus-level, not server-level: `GLOSSA_PPR_SIM_WEIGHT` and
+`GLOSSA_PPR_SPINE_WEIGHT` (plus `GLOSSA_PPR_BRIDGE`). They override the matching `[retrieval]`
+keys in the corpus's `ontology.toml` — see [Corpus config (`ontology.toml`)](#corpus-config-ontologytoml)
+below and [graph-and-ontology.md § Retrieval tuning](graph-and-ontology.md#retrieval-tuning).
 
 ## Corpus roots and document keys
 
@@ -131,6 +131,59 @@ exempt from "file" as a valid source is the bearer token: it is **env/flag only*
 file that tries to set it fails to load rather than being silently ignored. See
 [security-and-operations.md](security-and-operations.md) for the full authentication, TLS, and
 hardening picture this configuration surface supports.
+
+## Corpus config (`ontology.toml`)
+
+The deployment `--config` file above is server-role settings. Retrieval and answer-grounding
+tuning instead live **per corpus** in that corpus's `ontology.toml` (under its `.glossa/`), read by
+both `kb` and the `kbx` toolkit. Every key below is optional; an unset key falls back to the
+built-in engine default. The matching env vars (where listed) override the file for one-off sweeps.
+
+### `[retrieval]`
+
+| Key | Values / default | Meaning |
+|-----|------------------|---------|
+| `sim_weight` | float ≥ 0 · default `0.1` | PPR transition weight of a mechanical `SIMILAR` edge relative to a reasoning edge (`1.0`). Lower = leaner similarity mass (suits a stronger reader); higher = heavier (suits a weaker reader). Env `GLOSSA_PPR_SIM_WEIGHT`. |
+| `spine_weight` | float ≥ 0 · default `1.0` | PPR transition weight of a reasoning-spine (`Chaining`-role) edge relative to a plain reasoning edge (`1.0`, a no-op). `> 1.0` boosts the spine so a load-bearing bridge edge isn't diluted by out-degree against grounding/descriptive edges. Env `GLOSSA_PPR_SPINE_WEIGHT`. |
+| `bridge` | `"off"` \| `"geomean"` · default `"off"` | Dual-seed combination mode for composed PPR (query-time seeding only). Env `GLOSSA_PPR_BRIDGE`. |
+
+### `[verify]` — answer-grounding gate
+
+The model-free grounding verifier behind the `verify` MCP tool. It stays withheld until it is both
+enabled here and has a calibrated threshold.
+
+| Key | Values / default | Meaning |
+|-----|------------------|---------|
+| `enabled` | bool · default `false` | Turn the gate on. |
+| `mode` | `"ac"` \| `"nli"` \| `"combined"` · default `"ac"` | How the lexical/anomaly ("AC") and NLI verdicts combine. |
+| `[verify.threshold]` | `single`, `multi` floats | Calibrated grounding thresholds by hop bucket; an unset table (or field) means uncalibrated — the gate abstains rather than guess. Legacy location, superseded by `[verify.ac.threshold]` when present. |
+| `[verify.ac.threshold]` | `single`, `multi` floats | The AC verifier's own threshold table (preferred over `[verify.threshold]`). |
+| `[verify.nli.threshold]` | `single`, `multi` floats | The NLI verifier's calibrated thresholds by bucket. |
+
+### `[verify.nli]` — NLI support-verifier
+
+| Key | Values / default | Meaning |
+|-----|------------------|---------|
+| `scorer` | `"in_process"` \| `"http"` | NLI scorer implementation (`http` is not built yet). Unset ⇒ no scorer ⇒ AC-only. |
+| `model_dir` | path | Exported NLI model directory (in-process scorer only). |
+| `entail_index` | integer | Softmax index of the entailment class in the model's output (model-export-specific). |
+| `execution_providers` | ordered list · default `["cpu"]` | ONNX Runtime execution-provider preference for the `nli-ort` engine, tried in order; first available wins. Recognized GPU names: `"cuda"`, `"directml"`, `"coreml"`, `"rocm"`; `"cpu"` and unknown names fall through to ORT's implicit CPU EP. A GPU EP works only in a build that compiled it in. |
+
+## Eval-harness config (`lab.toml`)
+
+The `kbx` eval/train toolkit reads its own `lab.toml`. Two knobs worth calling out here:
+
+- **Per-endpoint `headers`.** Each `[model]` / `[judge]` / `[bridge]` endpoint may carry a
+  `headers` table of extra request headers sent with every call to that endpoint. A value may
+  contain the `${{session}}` placeholder, which is substituted per call with the active trace/episode
+  session id (for gateways that require a prompt-cache / session header, e.g. OpenCode's
+  `x-opencode-session`). If no session is available to fill it, that header is dropped rather than
+  sent with a literal placeholder; headers without the placeholder pass through unchanged.
+- **`[tuning] reasoning_only`.** A reasoning-scope **allowlist** for graph construction: when
+  non-empty, `kbx build` mines only documents whose corpus-relative path contains one of these
+  substrings (its inverse, `reasoning_exclude`, is a denylist, and exclude wins over only). It
+  merges with the `--only` CLI flag. Use it when the support docs are few enough that listing them
+  is shorter than excluding every reference doc.
 
 ## See also
 

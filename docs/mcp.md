@@ -40,6 +40,7 @@ Original-file delivery (`get_source_file`) is likewise **off by default** and op
 | `glossary` | ✓ | ✓ | ✓ | Resolve concept → reasoning chain + anchors. Pass `query` (the full question) to rank the composed neighborhood by what the question actually needs |
 | `reach` | ✓ | ✓ | ✓ | Cross-document reasoning bridge — walk a relation from a node (discovery), or add a candidate to verify the connection. Replaces the old `path` tool (`bridge: false` = in-document connectivity only) |
 | `sql` | ✓ | ✓ | ✓ | Read-only SQL SELECT over the reasoning graph — for a ranking or extreme ('which / earliest / largest / first'). Call with an empty query to get the schema and this graph's real edge/node vocabulary |
+| `verify` | ✓‡ | ✓‡ | ✓‡ | Answer-grounding gate: pass the final `answer` and the `chunk_paths` it cites; returns serve/abstain. **‡ Advertised in every profile but withheld until the corpus both enables the gate (`[verify].enabled`) and has a calibrated threshold — an uncalibrated gate can only ever abstain, so the route is not served** |
 | `related` | | ✓ | ✓ | SIMILAR / COMMUNITY siblings after glossary |
 | `neighbors` | | ✓ | ✓ | A node's direct structural edges (typed, 1-hop, with direction) |
 | `resolve` | | ✓ | ✓ | Entity resolution by name |
@@ -54,7 +55,7 @@ Original-file delivery (`get_source_file`) is likewise **off by default** and op
 | `graph_delete` | | ✓ | ✓ | Remove nodes/edges by label |
 | `graph_update` | | ✓ | ✓ | Rename or retype a node in place |
 | `graph_generalize` | | ✓ | ✓ | Recompute derived layer (non-destructive; no longer reports ungrounded) |
-| `graph_doctor` | | ✓ | ✓ | Report ungrounded, stale, incomplete, and dangling nodes (report-only today; pruning is CLI-only via `kb graph doctor` — doubt-scoped `prune_*` for the agent is planned) |
+| `graph_doctor` | | ✓ | ✓ | Diagnose the four graph doubts — ungrounded, stale, incomplete, and dangling nodes — and, opt-in per bucket (`prune_incomplete` / `prune_ungrounded` / `prune_dangling` / `prune_stale`), delete that bucket; the response then echoes the pruned counts. Report-only unless a `prune_*` flag is set. A destructive bucket that would wipe the reasoning layer wholesale — the ontology-mismatch symptom — is **REFUSED** (the server never force-overrides); the response says so and points at the human override, `kb graph doctor <path> --prune-<bucket> --force` |
 | `graph_stats` | | ✓ | ✓ | Node/edge counts and community overview |
 | `purge` | | | ✓ | Delete entire `.glossa/` |
 
@@ -80,6 +81,12 @@ Responses are human-readable for the model:
 - **`REJECTED — nothing written`** — validation failed (ontology, missing chunk, bad endpoints); fix and retry
 
 Reference endpoints by **node id** (e.g. `sym:...`) or by label. Do not paste ids into `label` fields.
+
+## Retrieval anti-loop (`--dedup`)
+
+Off by default. Start the server with `--dedup` (env `GLOSSA_MCP_DEDUP`, truthy = on) to enable per-session anti-loop signals on the retrieval tools. When a reader re-fetches results it has already seen, the response carries a neutral repeat/streak/plateau marker — or, for a governed repeat, a next-best-action recovery response — in place of the duplicate body, curbing context bloat for a weak reasoning loop. With dedup off (`config::defaults::DEDUP`), retrieval responses pass straight through unchanged and the session tracker is never consulted.
+
+A per-call `raw: true` bypasses the anti-loop even when dedup is enabled: display and programmatic fetches always receive the full body and never touch the tracker. Each streamable-http session gets its own tracker, so one client's history never governs another's.
 
 ## Transports
 
@@ -153,7 +160,7 @@ See [connect-to-agents.md](connect-to-agents.md) for Claude Desktop and other cl
 
 Every read tool calls `ensure_fresh` (throttled) so new files on disk appear without a manual `index`. Editor instances run a debounced **`graph_generalize`** maintenance loop after index changes, guarded by `.glossa/generalize.lock` across processes. Notebook writes (`note`, `del`) use `.glossa/notebook.lock` the same way.
 
-**What an agent maintains.** An agent authors and tends its *own* nodes: create (`graph_upsert`), edit (`graph_update`), delete one (`graph_delete`), and diagnose (`graph_doctor`). Two blunt, corpus-wide operations are deliberately **terminal-only** and have no MCP tool — `generalize --merge` (destructive near-duplicate collapse) and `prune -t <Type>` (wipe a whole node type) — so an agent cannot mass-mutate the graph; a human runs those from `kb`. The full create/maintain lifecycle is in [graph-lifecycle.md](graph-lifecycle.md).
+**What an agent maintains.** An agent authors and tends its *own* nodes: create (`graph_upsert`), edit (`graph_update`), delete one (`graph_delete`), and diagnose — and, per doubt bucket, prune — with (`graph_doctor`). That doubt-scoped pruning still refuses any bucket that would wipe the reasoning layer wholesale (the ontology-mismatch symptom); the server never force-overrides. Two blunt, corpus-wide operations are deliberately **terminal-only** and have no MCP tool — `generalize --merge` (destructive near-duplicate collapse) and `prune -t <Type>` (wipe a whole node type) — so an agent cannot mass-mutate the graph; a human runs those from `kb`. The full create/maintain lifecycle is in [graph-lifecycle.md](graph-lifecycle.md).
 
 Index (re)builds are serialized across processes by `.glossa/index.lock`: `index` (incremental, `force`, or single-`path`) and the `ensure_fresh` background scan hold it for the whole rebuild. If another process already holds it, the call skips with a no-op stat instead of racing it — clearing and reopening `.glossa/index` concurrently would otherwise fail on Windows ("Access is denied"). The index is cooperative, so whoever wins the lock leaves it correct.
 

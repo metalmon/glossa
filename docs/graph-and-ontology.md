@@ -82,6 +82,33 @@ Grounding is **transitive** — on a spine only the grounding node (e.g. `Resolu
 
 **Grounding convention.** Document-extracted concrete nouns — a `Product` or `Parameter` named in source text — are marked `requires_grounding = true`. Each grounds to its own `MENTIONS` span. By contrast, synthesized reasoning nodes like a broad `Symptom` label or a `Task` intent carry no direct `MENTIONS` edge; they ground *transitively* through the grounding terminal of their reasoning spine — e.g. a `Task` grounds via its `RESOLVED_BY` Resolution, which grounds through `MENTIONS`. Abstract carriers (`Literal` nodes in constraint graphs) and constraint-type nodes (`Range`, `Enum`, `Required`, etc.) are never grounded and never marked `requires_grounding = true`. Each preset marks exactly **one** grounded terminal/subject per reasoning shape — there is no separate `Evidence` or citation-proxy node type; that would be redundant with `MENTIONS`, since the cited section *is* the evidence. The `get_ontology` MCP tool advertises these requirements per entity so an enricher can prepare `MENTIONS` edges upfront, rather than waiting for a `graph_upsert` rejection.
 
+### Terminal-as-sink (a backward-reasoning requirement)
+
+Backward reasoning writes edges *toward* the grounded terminal. `kbx reason` and `kbx distil
+--densify` both synthesize `query-side --Chaining--> terminal` edges — a symptom, task, or cause on
+the `from` side, the grounded answer on the `to` side. So for either pass to produce anything, a
+grounded terminal type (one marked `requires_grounding = true`) must be an eligible **sink** of some
+`Chaining`-role relation: it has to appear on the `to` side of a Chaining relation. (A Chaining
+relation with an empty or `*` `to` accepts any sink and clears the requirement.) Edge validation
+rejects a Chaining edge whose `to` type is not an allowed sink, so an ontology whose grounded type
+sits only on the `from` side of every Chaining relation can never have a reasoning chain written to
+it.
+
+In the support example this holds: `Symptom/Cause/Task --RESOLVED_BY--> Resolution` puts the
+grounded `Resolution` on the `to` side, so it is a valid sink. An ontology that instead grounded the
+*subject* of its spine — the grounded type appearing only as the `from` of its relations — would
+satisfy grounding but not terminal-as-sink, and would reason nothing.
+
+Both passes check this up front rather than silently emitting an empty layer:
+
+- **No grounded terminal is a Chaining sink** — the pass **fails loud** with an error naming the
+  grounded types that have no Chaining `to`, so the ontology can be fixed.
+- **Some but not all** grounded types are sinks — the pass **warns**, listing the types that will
+  yield no chains, and proceeds for the ones that can be reasoned.
+
+When authoring or adapting an ontology, make sure at least one grounded terminal is the `to` of a
+Chaining relation. See [troubleshooting.md](troubleshooting.md) if `kbx reason` reports zero nodes.
+
 ### Valid-time
 
 A reasoning node can carry a **validity interval** — the span of time the fact

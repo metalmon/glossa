@@ -125,11 +125,19 @@ kb graph doctor && kb graph stats                       # 4. verify: expect 0/0/
 reasoning nodes, so it never risks merging a good node into one that was about to be pruned. (The
 final graph is nearly identical either way — prune-first is simply the more principled default.)
 
-The prune is **guarded**: if it would clear the whole reasoning layer or looks like an ontology
-mismatch (zero live terminals), it refuses — pass `--force` to override (human-only, never over
-MCP). So the ontology (`.glossa/ontology.toml`) **must be present**, or the doctor mis-classifies
-every node as dangling. `generalize --merge` also recomputes the derived layer (similarity,
-communities, centrality); those edges are read-excluded, so the recompute is harmless.
+The prune is **guarded** against a mass-wipe — the signature of an ontology mismatch rather than
+genuine per-node rot. Each destructive bucket (`--prune-ungrounded`, `--prune-stale`,
+`--prune-dangling`) is refused when either the ontology recognizes **no live grounded terminal** in
+the graph, or the bucket is **over half the reasoning layer**; the refused bucket is skipped while
+the others proceed. Separately, a `.glossa/ontology.toml` that is **present but fails to parse**
+refuses *all* destructive prune outright — the graph has silently fallen back to the default
+ontology, so its type/grounding classifications no longer describe this corpus. (A *missing*
+ontology file is not itself refused — running on the default ontology is a legitimate setup — but if
+that default doesn't recognize your corpus's grounded types you'll hit the no-live-terminal refusal
+above, so keep the corpus's own ontology present and valid.) Pass `--force` to override any of these
+refusals — human-only on the CLI; the MCP server never force-overrides. `generalize --merge` also
+recomputes the derived layer (similarity, communities, centrality); those edges are read-excluded,
+so the recompute is harmless.
 
 ---
 
@@ -272,6 +280,12 @@ documents, not orphans, so pruning them would silently destroy recoverable reaso
 exits with an error pointing at `kb graph doctor --relink` instead of deleting. Run `--relink`
 first; `--force` overrides the refusal only if you genuinely intend to delete relocatable nodes
 without recovering them.
+
+**`--relink` runs on its own, not alongside `--prune-*`.** A single invocation that combines
+`--relink` with any `--prune-*` flag is refused up front: the prune would run against the report
+computed *before* relink re-grounded anything, deleting the very nodes relink just recovered. Run
+`kb graph doctor --relink` first, then a separate `kb graph doctor --prune-*` pass to clear what
+genuinely remains.
 
 **Current limit: relink follows a relabel or a folder move, not a rename.** The match key is
 filename + section, so as long as `manual.pdf#12` keeps that name somewhere under the corpus,

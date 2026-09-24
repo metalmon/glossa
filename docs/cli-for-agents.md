@@ -15,7 +15,7 @@ and go.
 | `kb cat <file>` | Print a file's **whole** extracted text, straight from disk. A `cat` that understands `.pdf` / `.docx` / `.xlsx` / `.pptx` / `.md`. | none |
 | `kb grep <pattern> [dir]` | Ripgrep-style regex/literal search **inside** the extracted text of every document — including binary Office/PDF. | auto |
 | `kb search <keywords> [dir]` | BM25-ranked keyword search over a folder (morphology-aware). Prints `#n path · snippet`. | auto |
-| `kb read <target> [location]` | Read a document by path (optionally a heading / `p.N`), **or** a result number from the last `search`. Index/graph-aware. | auto |
+| `kb read <target> [n]` | Read a document by path, by a `path#N` chunk token (the same copy-ready ref `search`/`grep` print), **or** a result number from the last `search`. Index/graph-aware. | auto |
 | `kb glob <pattern> [dir]` | List documents whose **path** matches a shell glob. | auto |
 
 ### `cat` vs `read`
@@ -26,10 +26,10 @@ They look similar but have different contracts — pick by intent:
   dumps the entire extracted text. It never builds an index and never resolves
   anything but a real file. Use it to pipe a document into your agent, `grep`,
   or `head`.
-- **`kb read <target>`** is the omnivorous, corpus-aware reader: a path with an
-  optional `location`, a numbered hit from the last search, or (over MCP) a
-  graph node id / notebook note. Use it while navigating an indexed knowledge
-  base.
+- **`kb read <target>`** is the omnivorous, corpus-aware reader: a path
+  (optionally with a `#N` chunk ordinal — for PDFs the page number), a numbered
+  hit from the last search, or (over MCP) a graph node id / notebook note. Use it
+  while navigating an indexed knowledge base.
 
 ## Frictionless examples
 
@@ -45,9 +45,9 @@ kb grep -i "\bEBITDA\b" reports/2024/         # case-insensitive, word boundary
 kb search "data retention policy" ./policies
 kb read 1                                      # opens the #1 hit from that search
 
-# Pull just one page/section
-kb read spec.pdf "p.12"
-kb read handbook.docx "Onboarding"
+# Pull just one page/section by its path#N chunk token (N = chunk ordinal; the page number for PDFs)
+kb read spec.pdf#12          # page 12 of a PDF
+kb read handbook.docx#3      # the 3rd chunk of a Word doc
 ```
 
 Output goes to stdout with a header only when writing to a terminal; piped or

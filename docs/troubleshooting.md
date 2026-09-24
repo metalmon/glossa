@@ -84,6 +84,39 @@ collapsed-output example, and the rename limitation:
 [graph-lifecycle.md § You relabeled the corpus, or moved a document between
 folders](graph-lifecycle.md#you-relabeled-the-corpus-or-moved-a-document-between-folders).
 
+## `kbx reason` (or `kbx distil --densify`) produces 0 nodes / 0 edges
+
+Backward reasoning writes edges *toward* a grounded terminal — `query-side --Chaining--> terminal` —
+so a grounded terminal type (one marked `requires_grounding = true`) has to be an eligible **sink**
+of some `Chaining`-role relation, i.e. appear on the `to` side of a Chaining relation. If your
+grounded type sits only on the `from` side of every relation, edge validation rejects every edge the
+pass tries to write and it synthesizes nothing.
+
+Both passes now check this before running instead of silently emitting an empty layer: `kbx reason`
+and `kbx distil --densify` **fail loud** when no grounded terminal is a Chaining sink (the error
+names the offending types) and **warn** when only some grounded types qualify. Fix the ontology so a
+Chaining relation lists a grounded type on its `to` side (a relation with an empty or `*` `to`
+accepts any sink). See
+[graph-and-ontology.md § Terminal-as-sink](graph-and-ontology.md#terminal-as-sink-a-backward-reasoning-requirement).
+
+## `kb graph doctor --prune-*` refused
+
+A destructive prune is refused when it looks like an **ontology mismatch** rather than genuine
+per-node rot, so a misconfigured ontology can't silently wipe your reasoning layer:
+
+- **No live grounded terminal**, or the bucket is **over half the reasoning layer** — that bucket
+  (`ungrounded`/`stale`/`dangling`) is skipped and the others proceed. Usually the ontology doesn't
+  match the corpus (a missing or wrong `.glossa/ontology.toml`), so the doctor can't tell real
+  answers from noise.
+- **`.glossa/ontology.toml` present but unparseable** — *all* destructive prune is refused; the
+  graph fell back to the default ontology, so every type/grounding classification is untrustworthy.
+  Fix the file and re-run.
+
+Re-run with `--force` to override — but only once you've confirmed the deletions are what you want;
+the guard exists precisely to catch the case where they aren't. The MCP `graph_doctor` tool never
+force-overrides. See
+[graph-lifecycle.md § Deep-clean a noisy reasoning layer](graph-lifecycle.md#deep-clean-a-noisy-reasoning-layer-prune--merge).
+
 ## `[tls]` section rejected / TLS flags have no effect
 
 The **default build has no TLS crypto surface** (smaller binary, no extra CVE exposure) — it
