@@ -2090,14 +2090,40 @@ impl GlossaServer {
         let report = crate::graph::doctor::doctor(&g, &ont, &self.roots).map_err(internal)?;
         let mut out = crate::graph::ops::fmt_doctor_report(&report);
         let prune_incomplete = a.prune_incomplete.unwrap_or(false);
-        let prune_ungrounded = a.prune_ungrounded.unwrap_or(false);
+        let mut prune_ungrounded = a.prune_ungrounded.unwrap_or(false);
         let mut prune_dangling = a.prune_dangling.unwrap_or(false);
-        let prune_stale = a.prune_stale.unwrap_or(false);
-        let mut refusal: Option<String> = None;
+        let mut prune_stale = a.prune_stale.unwrap_or(false);
+        // Mass-wipe guards (ontology-mismatch symptom): refuse a destructive bucket that would wipe
+        // the reasoning layer wholesale. Same checks the CLI applies; MCP never force-overrides.
+        let mut refusals: Vec<String> = Vec::new();
+        if prune_ungrounded {
+            if let Some(reason) = crate::graph::doctor::bucket_prune_risk(
+                report.ungrounded.len(),
+                "ungrounded",
+                &report,
+                &g,
+                &ont,
+            ) {
+                prune_ungrounded = false;
+                refusals.push(reason);
+            }
+        }
+        if prune_stale {
+            if let Some(reason) = crate::graph::doctor::bucket_prune_risk(
+                report.stale.len(),
+                "stale",
+                &report,
+                &g,
+                &ont,
+            ) {
+                prune_stale = false;
+                refusals.push(reason);
+            }
+        }
         if prune_dangling {
             if let Some(reason) = crate::graph::doctor::dangling_prune_risk(&report, &g, &ont) {
                 prune_dangling = false;
-                refusal = Some(reason);
+                refusals.push(reason);
             }
         }
         if prune_incomplete || prune_ungrounded || prune_dangling || prune_stale {
@@ -2116,9 +2142,9 @@ impl GlossaServer {
                 "pruned: incomplete={inc} ungrounded={ung} dangling={dang} stale={stale}\n"
             ));
         }
-        if let Some(reason) = refusal {
+        for reason in refusals {
             out.push_str(&format!(
-                "dangling prune REFUSED: {reason}. A human can override with: kb graph doctor <path> --prune-dangling --force\n"
+                "prune REFUSED: {reason}. A human can override with: kb graph doctor <path> --prune-<bucket> --force\n"
             ));
         }
         Ok(CallToolResult::success(vec![Content::text(out)]))

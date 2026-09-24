@@ -2327,9 +2327,9 @@ fn main() -> anyhow::Result<()> {
             GraphAction::Doctor {
                 path,
                 prune_incomplete,
-                prune_ungrounded,
+                mut prune_ungrounded,
                 mut prune_dangling,
-                prune_stale,
+                mut prune_stale,
                 force,
                 relink,
             } => {
@@ -2353,7 +2353,8 @@ fn main() -> anyhow::Result<()> {
                 }
                 let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
                 let g = glossa::graph::store::GraphStore::open(&rr.state_base)?;
-                let ont = glossa::graph::ontology::Ontology::load_or_default(&rr.state_base);
+                let (ont, ont_origin) =
+                    glossa::graph::ontology::Ontology::load_or_default_checked(&rr.state_base);
                 // `doctor()` loads every node/edge, re-stats each grounded doc for staleness, and
                 // classifies relink candidates -- on a large graph that's real wall-clock time with
                 // no output until it's done. Shares the same kbx-style spinner as `eval` via
@@ -2408,6 +2409,46 @@ fn main() -> anyhow::Result<()> {
                         "relinked: {} edges ({} duplicate edges dropped)",
                         applied.repointed, applied.dropped
                     ));
+                }
+                // A present-but-broken `.glossa/ontology.toml` silently defaulted the ontology, so
+                // every type/grounding/terminal classification the report is built on is garbage —
+                // refuse ALL destructive buckets outright (a missing file is fine: that's the legit
+                // default-ontology case, guarded per-bucket below by the symptom checks).
+                if (prune_incomplete || prune_ungrounded || prune_dangling || prune_stale) && !force
+                {
+                    if let Some(reason) =
+                        glossa::graph::doctor::ontology_defaulted_prune_risk(ont_origin)
+                    {
+                        anyhow::bail!("{reason}");
+                    }
+                }
+                if prune_ungrounded && !force {
+                    if let Some(reason) = glossa::graph::doctor::bucket_prune_risk(
+                        report.ungrounded.len(),
+                        "ungrounded",
+                        &report,
+                        &g,
+                        &ont,
+                    ) {
+                        prune_ungrounded = false;
+                        glossa::cli_fmt::note(&format!(
+                            "ungrounded prune REFUSED: {reason}\nre-run with --force to override."
+                        ));
+                    }
+                }
+                if prune_stale && !force {
+                    if let Some(reason) = glossa::graph::doctor::bucket_prune_risk(
+                        report.stale.len(),
+                        "stale",
+                        &report,
+                        &g,
+                        &ont,
+                    ) {
+                        prune_stale = false;
+                        glossa::cli_fmt::note(&format!(
+                            "stale prune REFUSED: {reason}\nre-run with --force to override."
+                        ));
+                    }
                 }
                 if prune_dangling && !force {
                     if let Some(reason) =

@@ -115,6 +115,37 @@ fn run_reason_at(paths: KbxPaths, args: ReasonArgs) -> Result<()> {
         .with_context(|| format!("loading {}", paths.lab.display()))?;
     let ontology = Ontology::load_or_default(&paths.root);
 
+    // Terminal-as-sink guard. Backward reasoning writes `query-side --Chaining--> terminal` edges,
+    // so a grounded terminal type must be an eligible SINK of some Chaining relation (appear on its
+    // `to` side, or a `*`/empty wildcard). When it isn't, `validate_edge` rejects every synthesized
+    // edge and this pass silently produces "N seeds, 0 nodes, 0 edges" — a confusing no-op. Fail
+    // loud instead: hard-bail when nothing can be chained, warn when only some types can. See
+    // `Ontology::grounded_types_missing_chaining_sink`.
+    let missing_sinks = ontology.grounded_types_missing_chaining_sink();
+    match args.seed_type.as_deref() {
+        Some(st) if missing_sinks.iter().any(|t| t == st) => bail!(
+            "kbx reason: seed type '{st}' is a grounding-required terminal, but no Chaining \
+             relation targets it (it never appears on a relation's `to` side), so backward \
+             reasoning can attach nothing to it — every synthesized edge would be rejected. Fix \
+             the ontology so a Chaining relation lists '{st}' as a `to` type (terminal-as-sink), \
+             or choose a different --seed-type."
+        ),
+        None if !ontology.supports_backward_reasoning() => bail!(
+            "kbx reason: this ontology has no grounded terminal that any Chaining relation targets \
+             (terminal-as-sink), so backward reasoning would synthesize nothing. Grounded types \
+             with no Chaining `to`: [{}]. Fix the ontology so a Chaining relation lists a grounded \
+             type on its `to` side.",
+            missing_sinks.join(", ")
+        ),
+        _ if !missing_sinks.is_empty() => glossa::cli_fmt::note(&format!(
+            "kbx reason: {} grounded type(s) have no Chaining relation targeting them and will \
+             yield no chains: [{}]. Only terminal-as-sink types are reasoned.",
+            missing_sinks.len(),
+            missing_sinks.join(", ")
+        )),
+        _ => {}
+    }
+
     // Corpus content lives at `paths.root`; on-disk state (index/graph/`.glossa`) lives at
     // `paths.state_base` — identical path in the co-located default, split under `--state-dir`.
     let roots = [glossa::root::Root {

@@ -452,6 +452,36 @@ mod tests {
     }
 
     #[test]
+    fn terminal_as_sink_violators_are_pinned() {
+        use crate::graph::ontology::Ontology;
+        // Backward reasoning (`kbx reason`) and densify write `query-side --Chaining--> terminal`
+        // edges, so a grounded terminal must be an eligible SINK of some Chaining relation. A preset
+        // whose grounded type sits only on the `from` side can't be reasoned — reason/densify now
+        // guard it (fail loud instead of a silent no-op). These presets are known non-reason-capable
+        // today. Pinned so a NEW preset that regresses the topology fails the build, and fixing one
+        // of these to be reason-capable is a deliberate edit to this list.
+        let mut got: Vec<&str> = TEMPLATES
+            .iter()
+            .filter(|(_, toml)| !Ontology::parse(toml).unwrap().supports_backward_reasoning())
+            .map(|(name, _)| *name)
+            .collect();
+        got.sort_unstable();
+        let expected = [
+            "access-governance",
+            "audit",
+            "data-privacy",
+            "decision-log",
+            "okr",
+            "vendor",
+        ];
+        assert_eq!(
+            got, expected,
+            "terminal-as-sink violator set changed — a new preset regressed its topology, or one \
+             was made reason-capable (update this pin if the change is intentional)"
+        );
+    }
+
+    #[test]
     fn presets_are_thin_reasoning_skeletons() {
         use crate::graph::ontology::Ontology;
         let ground_count = |p: &str| {

@@ -3,7 +3,7 @@
 //! the one derived-layer doubt owned here (structural reachability over the other three).
 
 use crate::graph::generalize::hygiene;
-use crate::graph::ontology::{Ontology, RelationRole};
+use crate::graph::ontology::{Ontology, OntologyOrigin, RelationRole};
 use crate::graph::store::GraphStore;
 use crate::index::manifest::FileSig;
 use std::collections::HashSet;
@@ -379,28 +379,10 @@ pub fn dangling_prune_risk(
     if report.dangling.is_empty() {
         return None;
     }
-    let structural: HashSet<String> = ont.structural().into_iter().collect();
-    let non_structural = g
-        .all_nodes()
-        .map(|nodes| {
-            nodes
-                .iter()
-                .filter(|n| !structural.contains(&n.node_type))
-                .count()
-        })
-        .unwrap_or(0);
-    if non_structural > 0 && report.live_terminal_count == 0 {
-        return Some(
-            "the ontology recognizes no live grounded terminal in this graph — likely a missing \
-             or mismatched .glossa/ontology.toml; refusing to prune the whole reasoning layer"
-                .to_string(),
-        );
-    }
-    if report.dangling.len() * 2 > non_structural {
-        return Some(format!(
-            "dangling ({}) is over half the reasoning layer ({non_structural}) — refusing a mass delete",
-            report.dangling.len()
-        ));
+    // Triggers 1 & 2 (no live grounded terminal; bucket over half the reasoning layer) are shared
+    // with the other destructive buckets (`ungrounded`, `stale`) — see `bucket_prune_risk`.
+    if let Some(reason) = bucket_prune_risk(report.dangling.len(), "dangling", report, g, ont) {
+        return Some(reason);
     }
     // 3. A large dangling set that is mostly "never-built" — query-side anchors with no outgoing
     //    reasoning (chaining) edge at all — is the signature of a graph `kbx reason` hasn't finished
@@ -437,10 +419,76 @@ pub fn dangling_prune_risk(
     None
 }
 
+/// The `dangling` mass-wipe guard, generalized to any destructive bucket (`ungrounded`, `stale`,
+/// and `dangling` itself). Returns `Some(reason)` when deleting `bucket_len` nodes for `bucket`
+/// would wipe the reasoning layer wholesale — the signature of an ontology mismatch (missing or
+/// changed `.glossa/ontology.toml`) rather than genuine per-node rot. Two triggers, mirroring the
+/// first two of [`dangling_prune_risk`]:
+///   1. non-structural nodes exist but the ontology recognizes NO live grounded terminal
+///      (`report.live_terminal_count == 0`) — every reasoning node then looks prunable;
+///   2. the bucket exceeds ~50% of the non-structural (reasoning) layer.
+///
+/// `None` = safe. Gates only the DELETE; `doctor()` keeps reporting the bucket. `--force` overrides.
+pub fn bucket_prune_risk(
+    bucket_len: usize,
+    bucket: &str,
+    report: &DoctorReport,
+    g: &GraphStore,
+    ont: &Ontology,
+) -> Option<String> {
+    if bucket_len == 0 {
+        return None;
+    }
+    let structural: HashSet<String> = ont.structural().into_iter().collect();
+    let non_structural = g
+        .all_nodes()
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter(|n| !structural.contains(&n.node_type))
+                .count()
+        })
+        .unwrap_or(0);
+    if non_structural > 0 && report.live_terminal_count == 0 {
+        return Some(format!(
+            "the ontology recognizes no live grounded terminal in this graph — likely a missing \
+             or mismatched .glossa/ontology.toml; refusing to prune the whole reasoning layer \
+             ({bucket})"
+        ));
+    }
+    if bucket_len * 2 > non_structural {
+        return Some(format!(
+            "{bucket} ({bucket_len}) is over half the reasoning layer ({non_structural}) — \
+             refusing a mass delete"
+        ));
+    }
+    None
+}
+
+/// Returns `Some(reason)` when the ontology was silently defaulted from an UNPARSEABLE
+/// `.glossa/ontology.toml` — a present-but-broken file, which is never intentional. Under a broken
+/// ontology every type / grounding / terminal classification is garbage, so ANY destructive prune
+/// bucket can delete real nodes. Refuses the prune (the caller directs the operator to fix the file,
+/// or `--force` to override). `Missing` is deliberately NOT flagged: running on the default ontology
+/// (no `.glossa/ontology.toml`) is a legitimate setup, and the symptom-based [`bucket_prune_risk`] /
+/// [`dangling_prune_risk`] guards still protect it. `Loaded` is always safe here.
+pub fn ontology_defaulted_prune_risk(origin: OntologyOrigin) -> Option<String> {
+    match origin {
+        OntologyOrigin::Unparseable => Some(
+            ".glossa/ontology.toml is present but failed to parse — the graph fell back to the \
+             default ontology, so type/grounding classifications no longer reflect this corpus; \
+             refusing a destructive prune. Fix the ontology file, then re-run (or --force to \
+             override)."
+                .to_string(),
+        ),
+        OntologyOrigin::Loaded | OntologyOrigin::Missing => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::ontology::Ontology;
+    use crate::graph::ontology::{Ontology, OntologyOrigin};
     use crate::graph::store::{Edge, GraphStore, Node, Provenance};
     use crate::index::store::file_sig;
 
@@ -1045,6 +1093,69 @@ strict = false
         let ont = Ontology::parse(ONT).unwrap();
         let rep = DoctorReport::default(); // dangling empty by construction
         assert!(dangling_prune_risk(&rep, &g, &ont).is_none());
+    }
+
+    #[test]
+    fn ontology_defaulted_prune_risk_flags_only_unparseable() {
+        // A present-but-broken ontology.toml is never intentional → refuse. A missing file is the
+        // legitimate default-ontology case → allow (symptom guards still protect it). Loaded → safe.
+        assert!(
+            ontology_defaulted_prune_risk(OntologyOrigin::Unparseable).is_some(),
+            "an unparseable ontology.toml must refuse destructive prune"
+        );
+        assert!(ontology_defaulted_prune_risk(OntologyOrigin::Missing).is_none());
+        assert!(ontology_defaulted_prune_risk(OntologyOrigin::Loaded).is_none());
+    }
+
+    #[test]
+    fn bucket_prune_risk_none_for_empty_bucket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(tmp.path()).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+        let rep = DoctorReport::default();
+        assert!(bucket_prune_risk(0, "ungrounded", &rep, &g, &ont).is_none());
+    }
+
+    #[test]
+    fn bucket_prune_risk_generalizes_zero_live_terminal_to_other_buckets() {
+        // Same fixture as the dangling zero-live-terminal test: the only grounded terminal (res:1)
+        // went stale, so live_terminal_count == 0 while non-structural nodes exist. The mass-wipe
+        // guard must now fire for the `ungrounded` and `stale` buckets too — not just `dangling` —
+        // and name the bucket in the message.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let g = GraphStore::open(root).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        let doc = root.join("doc.md");
+        std::fs::write(&doc, b"v1").unwrap();
+        let sig0 = file_sig(&doc).unwrap();
+
+        let nodes = vec![
+            node("sym:1", "Symptom", "S", prov("doc.md", None)),
+            node("cau:1", "Cause", "C", prov("doc.md", None)),
+            node("res:1", "Resolution", "R", prov("doc.md", Some(sig0))),
+            node("sec:1", "Section", "Sec", prov("doc.md", None)),
+        ];
+        let edges = vec![
+            edge("sym:1", "CAUSED_BY", "cau:1", prov("doc.md", None)),
+            edge("cau:1", "RESOLVED_BY", "res:1", prov("doc.md", None)),
+            edge("res:1", "MENTIONS", "sec:1", prov("doc.md", None)),
+        ];
+        g.upsert(&ont, &nodes, &edges).unwrap();
+        std::fs::write(&doc, b"v2-longer").unwrap(); // res:1 -> stale -> zero live terminals
+
+        let rep = doctor(&g, &ont, &single_root(root)).unwrap();
+        assert_eq!(rep.live_terminal_count, 0);
+        for bucket in ["ungrounded", "stale"] {
+            let risk = bucket_prune_risk(1, bucket, &rep, &g, &ont);
+            let msg = risk.unwrap_or_else(|| panic!("{bucket}: zero live terminals must refuse"));
+            assert!(msg.contains("no live grounded terminal"));
+            assert!(
+                msg.contains(bucket),
+                "message must name the {bucket} bucket"
+            );
+        }
     }
 
     #[test]

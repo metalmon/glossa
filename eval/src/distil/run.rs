@@ -544,6 +544,29 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
         .with_context(|| format!("loading {}", paths.lab.display()))?;
     let ontology = Ontology::load_or_default(&paths.root);
 
+    // Terminal-as-sink guard (same rationale as `kbx reason`): densify synthesizes
+    // `--Chaining--> terminal` reasoning edges, which `validate_edge` rejects when no grounded
+    // terminal is an eligible Chaining sink — a silent no-op ("0 nodes, 0 edges"). Fail loud when
+    // nothing can be chained; warn on a partial ontology. See
+    // `Ontology::grounded_types_missing_chaining_sink`.
+    let missing_sinks = ontology.grounded_types_missing_chaining_sink();
+    if !ontology.supports_backward_reasoning() {
+        anyhow::bail!(
+            "kbx distil --densify: this ontology has no grounded terminal that any Chaining \
+             relation targets (terminal-as-sink), so densify would synthesize no reasoning edges. \
+             Grounded types with no Chaining `to`: [{}]. Fix the ontology so a Chaining relation \
+             lists a grounded type on its `to` side.",
+            missing_sinks.join(", ")
+        );
+    } else if !missing_sinks.is_empty() {
+        glossa::cli_fmt::note(&format!(
+            "kbx distil --densify: {} grounded type(s) have no Chaining relation targeting them \
+             and will get no reasoning edges: [{}]. Only terminal-as-sink types are densified.",
+            missing_sinks.len(),
+            missing_sinks.join(", ")
+        ));
+    }
+
     // Corpus content lives at `paths.root`; on-disk state (index/graph/`.glossa`) lives at
     // `paths.state_base` — identical path in the co-located default, split under `--state-dir`.
     let roots = [glossa::root::Root {

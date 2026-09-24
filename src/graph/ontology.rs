@@ -24,6 +24,21 @@ pub enum RelationRole {
     Attribute,
 }
 
+/// Where [`Ontology::load_or_default_checked`] obtained its `Ontology` from. The prune path
+/// (`graph::doctor`) uses this as a data-loss guard: under a silently-defaulted ontology, node
+/// type / grounding / terminal classifications don't reflect the corpus, so a destructive prune
+/// can wipe the reasoning layer wholesale. `Missing` is a legitimate setup (default ontology, no
+/// file); `Unparseable` is always an operator error and blocks destructive prune without `--force`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OntologyOrigin {
+    /// `.glossa/ontology.toml` was present and parsed cleanly.
+    Loaded,
+    /// No `.glossa/ontology.toml` at the corpus root — fell back to `Ontology::default()`.
+    Missing,
+    /// `.glossa/ontology.toml` existed but failed to parse — fell back to `Ontology::default()`.
+    Unparseable,
+}
+
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct RawRelation {
     #[serde(default)]
@@ -652,6 +667,50 @@ impl Ontology {
         self.validity_types.contains(node_type)
     }
 
+    /// Grounding-required entity types that are NOT an eligible sink of any Chaining relation —
+    /// i.e. no Chaining relation lists them (or a wildcard) on its `to` side. Backward reasoning
+    /// (`kbx reason`) and densify write `query-side --Chaining--> terminal` edges, so a grounded
+    /// terminal that no Chaining relation can target is never a valid sink: `validate_edge` rejects
+    /// every such edge and the pass silently produces nothing. A Chaining relation with an empty or
+    /// `*` `to` accepts ANY sink (mirrors `validate_edge`'s wildcard), so it clears every grounded
+    /// type. Result is sorted and deduped. See [`Ontology::supports_backward_reasoning`].
+    pub fn grounded_types_missing_chaining_sink(&self) -> Vec<String> {
+        let mut wildcard_sink = false;
+        let mut chaining_sinks: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for rel in self.relations.values() {
+            if rel.role != RelationRole::Chaining {
+                continue;
+            }
+            if rel.to.is_empty() || rel.to.iter().any(|t| t == "*") {
+                wildcard_sink = true;
+            } else {
+                chaining_sinks.extend(rel.to.iter().cloned());
+            }
+        }
+        if wildcard_sink {
+            return Vec::new();
+        }
+        let mut out: Vec<String> = self
+            .grounding_types
+            .iter()
+            .filter(|t| !chaining_sinks.contains(*t))
+            .cloned()
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Whether this ontology can support backward reasoning / densify: it declares at least one
+    /// grounding-required type AND at least one of those types is a Chaining sink (see
+    /// [`Ontology::grounded_types_missing_chaining_sink`]). When `false`, `kbx reason` / densify
+    /// would silently synthesize nothing — callers surface a guard instead of the silent no-op.
+    pub fn supports_backward_reasoning(&self) -> bool {
+        !self.grounding_types.is_empty()
+            && self.grounded_types_missing_chaining_sink().len() < self.grounding_types.len()
+    }
+
     /// The reasoning spines — the valid shapes a node must lie on a complete instance of to
     /// survive the hygiene prune. Malformed entries (empty anchor or relations) are dropped.
     /// Empty when unset.
@@ -748,10 +807,27 @@ impl Ontology {
     }
 
     pub fn load_or_default(root: &std::path::Path) -> Ontology {
+        Self::load_or_default_checked(root).0
+    }
+
+    /// Like [`Ontology::load_or_default`] but also reports WHERE the ontology came from — loaded
+    /// cleanly from `.glossa/ontology.toml`, or silently defaulted because that file is missing or
+    /// unparseable. Every existing caller keeps using `load_or_default` (which discards the origin);
+    /// the prune path (`graph::doctor`) uses the origin as a data-loss guard: an `Unparseable`
+    /// ontology file means every grounded/terminal/type classification is untrustworthy, so a
+    /// destructive prune under it is refused. `Missing` is NOT treated as an error — running on the
+    /// default ontology (no `.glossa/ontology.toml`) is a legitimate, common setup, and the
+    /// symptom-based mass-wipe guards still protect it.
+    pub fn load_or_default_checked(root: &std::path::Path) -> (Ontology, OntologyOrigin) {
         let p = root.join(".glossa").join("ontology.toml");
         match std::fs::read_to_string(&p) {
-            Ok(s) => Ontology::parse(&s).unwrap_or_default(),
-            Err(_) => Ontology::default(),
+            Ok(s) => match Ontology::parse(&s) {
+                Ok(ont) => (ont, OntologyOrigin::Loaded),
+                // A present-but-broken ontology.toml is never intentional: fall back to the default
+                // (unchanged behavior) but flag it so prune can refuse a wipe against garbage types.
+                Err(_) => (Ontology::default(), OntologyOrigin::Unparseable),
+            },
+            Err(_) => (Ontology::default(), OntologyOrigin::Missing),
         }
     }
 
@@ -1256,6 +1332,86 @@ props = []
         let o2 = Ontology::load_or_default(dir.path());
         assert!(o2.validate_node("Person").is_ok());
         assert!(o2.validate_node("Alien").is_err());
+    }
+
+    #[test]
+    fn load_or_default_checked_reports_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        // No file → Missing (a legitimate default-ontology setup, not an error).
+        assert_eq!(
+            Ontology::load_or_default_checked(dir.path()).1,
+            OntologyOrigin::Missing
+        );
+        // Present but broken → Unparseable (defaults, but flagged so prune can refuse).
+        std::fs::create_dir_all(dir.path().join(".glossa")).unwrap();
+        std::fs::write(
+            dir.path().join(".glossa/ontology.toml"),
+            "this is not valid toml = = =\n[unterminated",
+        )
+        .unwrap();
+        assert_eq!(
+            Ontology::load_or_default_checked(dir.path()).1,
+            OntologyOrigin::Unparseable
+        );
+        // Present and valid → Loaded.
+        std::fs::write(
+            dir.path().join(".glossa/ontology.toml"),
+            "[entities.Person]\nprops=[]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            Ontology::load_or_default_checked(dir.path()).1,
+            OntologyOrigin::Loaded
+        );
+    }
+
+    #[test]
+    fn terminal_as_sink_detection() {
+        // Terminal-as-SINK: grounded Resolution is the `to` of a Chaining relation -> supported.
+        let sink = Ontology::parse(
+            "[entities.Symptom]\n[entities.Resolution]\nrequires_grounding = true\n\
+             [relations.RESOLVED_BY]\nfrom = [\"Symptom\"]\nto = [\"Resolution\"]\nrole = \"chaining\"\n",
+        )
+        .unwrap();
+        assert!(sink.grounded_types_missing_chaining_sink().is_empty());
+        assert!(sink.supports_backward_reasoning());
+
+        // Terminal-as-SOURCE: grounded Grant appears only on the `from` side -> never a sink ->
+        // flagged, and the ontology can't back backward reasoning at all.
+        let source = Ontology::parse(
+            "[entities.Grant]\nrequires_grounding = true\n[entities.Resource]\n\
+             [relations.GRANTS]\nfrom = [\"Grant\"]\nto = [\"Resource\"]\nrole = \"chaining\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            source.grounded_types_missing_chaining_sink(),
+            vec!["Grant".to_string()]
+        );
+        assert!(!source.supports_backward_reasoning());
+
+        // A Chaining relation with an empty `to` is a wildcard sink (mirrors `validate_edge`), so
+        // every grounded type is reachable as a sink -> supported.
+        let wild = Ontology::parse(
+            "[entities.Thing]\nrequires_grounding = true\n\
+             [relations.REL]\nfrom = [\"Thing\"]\nto = []\nrole = \"chaining\"\n",
+        )
+        .unwrap();
+        assert!(wild.grounded_types_missing_chaining_sink().is_empty());
+        assert!(wild.supports_backward_reasoning());
+
+        // A grounding relation targeting the grounded type does NOT make it a chaining sink: only
+        // Chaining edges are written query-side->terminal, so a Grounding `to` must not count.
+        let grounding_only = Ontology::parse(
+            "[entities.Doc]\n[entities.Fact]\nrequires_grounding = true\n\
+             [relations.MENTIONS]\nfrom = [\"Fact\"]\nto = [\"Doc\"]\nrole = \"grounding\"\n\
+             [relations.SUPPORTS]\nfrom = [\"Fact\"]\nto = [\"Doc\"]\nrole = \"grounding\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            grounding_only.grounded_types_missing_chaining_sink(),
+            vec!["Fact".to_string()]
+        );
+        assert!(!grounding_only.supports_backward_reasoning());
     }
 
     #[test]
