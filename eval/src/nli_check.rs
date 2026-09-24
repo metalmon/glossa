@@ -274,6 +274,12 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
         ),
         None => println!("model_dir      = (unset)"),
     }
+    if let Some(id) = cfg.execution_provider_device {
+        println!("ep_device      = {id}");
+    }
+    if let Some(mb) = cfg.execution_provider_mem_limit_mb {
+        println!("ep_mem_limit   = {mb} MB");
+    }
     println!(
         "ORT_DYLIB_PATH = {}",
         match &dylib_path {
@@ -305,11 +311,13 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
 }
 
 /// `kbx nli set <path> --model-dir <dir> [--scorer ...] [--entail-index N] [--mode ...] [--ep
-/// ...]`: resolve the glossa dir the same way [`nli_check`] does, then write `[verify.nli]` into
-/// the corpus `ontology.toml` via [`write_nli_config`] and print what was written + a `kbx nli
-/// check` hint. Completes the `download` -> `set` -> `check` workflow so a user never hand-edits
-/// TOML. `execution_providers` is written only when non-empty — an empty list leaves the ontology
-/// key untouched (mirrors `entail_index`/`mode`'s `Option` "only if given" convention).
+/// ...] [--ep-device N] [--ep-mem-limit-mb N]`: resolve the glossa dir the same way [`nli_check`]
+/// does, then write
+/// `[verify.nli]` into the corpus `ontology.toml` via [`write_nli_config`] and print what was
+/// written + a `kbx nli check` hint. Completes the `download` -> `set` -> `check` workflow so a user
+/// never hand-edits TOML. `execution_providers` is written only when non-empty — an empty list
+/// leaves the ontology key untouched (mirrors `entail_index`/`mode`/`ep_device`'s `Option` "only if
+/// given" convention).
 pub fn nli_set(
     path: Option<PathBuf>,
     model_dir: PathBuf,
@@ -317,6 +325,8 @@ pub fn nli_set(
     entail_index: Option<usize>,
     mode: Option<String>,
     execution_providers: Vec<String>,
+    ep_device: Option<i32>,
+    ep_mem_limit_mb: Option<usize>,
 ) -> Result<()> {
     let kbx_paths = crate::workspace::resolve(path);
     let glossa_dir = crate::workspace::glossa_dir(&kbx_paths.root);
@@ -332,6 +342,8 @@ pub fn nli_set(
         entail_index,
         mode.as_deref(),
         eps,
+        ep_device,
+        ep_mem_limit_mb,
     )?;
 
     let ontology_path = glossa_dir.join("ontology.toml");
@@ -349,12 +361,19 @@ pub fn nli_set(
     if let Some(eps) = eps {
         println!("wrote [verify.nli] execution_providers = {eps:?}");
     }
+    if let Some(id) = ep_device {
+        println!("wrote [verify.nli] ep_device = {id}");
+    }
+    if let Some(mb) = ep_mem_limit_mb {
+        println!("wrote [verify.nli] ep_mem_limit_mb = {mb}");
+    }
     println!("run `kbx nli check` to confirm readiness.");
     Ok(())
 }
 
 /// Write `[verify.nli].{scorer,model_dir}` (+ `entail_index` when given, + `[verify].mode` when
-/// given, + `execution_providers` when given) into `<glossa_dir>/ontology.toml`, preserving every
+/// given, + `execution_providers` when given, + `ep_device` when given, + `ep_mem_limit_mb` when
+/// given) into `<glossa_dir>/ontology.toml`, preserving every
 /// other table/comment. Mirrors `calibrate::write_threshold`'s established preserve-other-keys
 /// pattern: parse the existing file (or start from an empty document when absent) into a
 /// `toml_edit::DocumentMut`, mutate only the keys this function owns, then write the whole
@@ -367,6 +386,8 @@ pub fn write_nli_config(
     entail_index: Option<usize>,
     mode: Option<&str>,
     execution_providers: Option<&[String]>,
+    ep_device: Option<i32>,
+    ep_mem_limit_mb: Option<usize>,
 ) -> Result<()> {
     use toml_edit::{value, Array, DocumentMut, Item, Table};
 
@@ -403,6 +424,12 @@ pub fn write_nli_config(
     if let Some(eps) = execution_providers {
         let arr: Array = eps.iter().map(String::as_str).collect();
         nli["execution_providers"] = value(arr);
+    }
+    if let Some(id) = ep_device {
+        nli["ep_device"] = value(id as i64);
+    }
+    if let Some(mb) = ep_mem_limit_mb {
+        nli["ep_mem_limit_mb"] = value(mb as i64);
     }
 
     std::fs::create_dir_all(glossa_dir)?;
@@ -573,6 +600,8 @@ mod tests {
             Some(2),
             Some("nli"),
             None,
+            None,
+            None,
         )
         .unwrap();
         let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
@@ -601,7 +630,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let glossa = dir.path().join(".glossa");
         let win_path = PathBuf::from(r"C:\models\rubert-nli");
-        write_nli_config(&glossa, &win_path, "in_process", None, None, None).unwrap();
+        write_nli_config(
+            &glossa,
+            &win_path,
+            "in_process",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         let cfg = VerifyConfig::resolve(&glossa);
         assert_eq!(cfg.model_dir, Some(win_path));
@@ -619,11 +658,14 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
         let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
         assert!(o.contains("scorer = \"in_process\""));
         assert!(!o.contains("entail_index"));
+        assert!(!o.contains("ep_device"));
         assert!(!o.contains("mode ="));
         assert!(!o.contains("execution_providers"));
     }
@@ -645,6 +687,8 @@ mod tests {
             &glossa,
             Path::new("/models/rubert-nli"),
             "in_process",
+            None,
+            None,
             None,
             None,
             None,
@@ -677,6 +721,8 @@ mod tests {
             None,
             None,
             Some(&["cuda".to_string(), "cpu".to_string()]),
+            None,
+            None,
         )
         .unwrap();
         let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
@@ -688,5 +734,53 @@ mod tests {
             cfg.execution_providers,
             vec!["cuda".to_string(), "cpu".to_string()]
         );
+    }
+
+    /// `write_nli_config`'s `ep_device` param writes `[verify.nli].ep_device` and round-trips
+    /// through `VerifyConfig::resolve` (the runtime gate's read path); `None` writes no key.
+    #[test]
+    fn write_nli_config_ep_device_roundtrips_into_ontology() {
+        let dir = tempfile::tempdir().unwrap();
+        let glossa = dir.path().join(".glossa");
+        write_nli_config(
+            &glossa,
+            Path::new("/models/rubert-nli"),
+            "in_process",
+            None,
+            None,
+            None,
+            Some(1),
+            None,
+        )
+        .unwrap();
+        let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
+        assert!(o.contains("ep_device = 1"));
+
+        let cfg = VerifyConfig::resolve(&glossa);
+        assert_eq!(cfg.execution_provider_device, Some(1));
+    }
+
+    /// `write_nli_config`'s `ep_mem_limit_mb` param writes `[verify.nli].ep_mem_limit_mb` and
+    /// round-trips through `VerifyConfig::resolve`; `None` writes no key.
+    #[test]
+    fn write_nli_config_ep_mem_limit_mb_roundtrips_into_ontology() {
+        let dir = tempfile::tempdir().unwrap();
+        let glossa = dir.path().join(".glossa");
+        write_nli_config(
+            &glossa,
+            Path::new("/models/rubert-nli"),
+            "in_process",
+            None,
+            None,
+            None,
+            None,
+            Some(512),
+        )
+        .unwrap();
+        let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
+        assert!(o.contains("ep_mem_limit_mb = 512"));
+
+        let cfg = VerifyConfig::resolve(&glossa);
+        assert_eq!(cfg.execution_provider_mem_limit_mb, Some(512));
     }
 }

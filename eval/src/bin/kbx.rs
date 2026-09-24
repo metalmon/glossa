@@ -466,6 +466,15 @@ enum NliCmd {
         /// `[verify.nli].execution_providers` only if given.
         #[arg(long = "ep")]
         ep: Vec<String>,
+        /// GPU device id the CUDA/DirectML/ROCm EP binds to. Written to `[verify.nli].ep_device`
+        /// only if given; unset leaves the EP on its default device (today's behavior).
+        #[arg(long = "ep-device")]
+        ep_device: Option<i32>,
+        /// GPU arena memory cap in MB for the NLI EP, so NLI can share a GPU with an LLM. Written to
+        /// `[verify.nli].ep_mem_limit_mb` only if given. Effective on CUDA (memory limit + arena);
+        /// ROCm honors only arena growth; DirectML/CoreML expose no memory option in this ort build.
+        #[arg(long = "ep-mem-limit-mb")]
+        ep_mem_limit_mb: Option<usize>,
     },
 }
 
@@ -764,6 +773,8 @@ fn main() -> Result<()> {
                     entail_index,
                     mode,
                     ep,
+                    ep_device,
+                    ep_mem_limit_mb,
                 },
         } => {
             // Each `--ep` occurrence may itself be comma-joined (`--ep cuda,cpu`); flatten both
@@ -775,7 +786,16 @@ fn main() -> Result<()> {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .collect();
-            kb_eval::nli_check::nli_set(path, model_dir, scorer, entail_index, mode, ep)
+            kb_eval::nli_check::nli_set(
+                path,
+                model_dir,
+                scorer,
+                entail_index,
+                mode,
+                ep,
+                ep_device,
+                ep_mem_limit_mb,
+            )
         }
     }
 }

@@ -65,7 +65,13 @@ pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
         return None;
     }
     let dir = cfg.model_dir.as_ref()?;
-    match glossa_nli::InProcessNli::load(dir, cfg.entail_index, &cfg.execution_providers) {
+    match glossa_nli::InProcessNli::load(
+        dir,
+        cfg.entail_index,
+        &cfg.execution_providers,
+        cfg.execution_provider_device,
+        cfg.execution_provider_mem_limit_mb,
+    ) {
         Ok(s) => Some(Box::new(s)),
         Err(e) => {
             eprintln!("nli scorer load failed ({}): {e}", dir.display());

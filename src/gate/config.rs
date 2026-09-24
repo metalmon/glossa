@@ -52,6 +52,18 @@ pub struct VerifyConfig {
     /// non-empty after `resolve`: an unset/empty/all-unknown list defaults to `["cpu"]`, which the
     /// runtime treats exactly as today (CPU-only, no behavior change).
     pub execution_providers: Vec<String>,
+    /// Which GPU (device id) the CUDA/DirectML/ROCm EP binds to. `None` (unset) ⇒ each EP uses its
+    /// own default (device 0), i.e. exactly today's behavior. Sourced from env
+    /// `GLOSSA_VERIFY_NLI_EP_DEVICE` (i32; non-integer ignored with a warning) else ontology
+    /// `[verify.nli].ep_device`. CoreML ignores it (no device-id concept).
+    pub execution_provider_device: Option<i32>,
+    /// GPU arena memory cap in megabytes for the NLI EP. `None` (unset) ⇒ no memory options set, i.e.
+    /// exactly today's behavior. `Some(mb)` caps CUDA's arena (`with_memory_limit`, converted to
+    /// bytes) + same-as-requested arena growth + disables the session memory-pattern optimizer, so
+    /// NLI can share a GPU with an LLM. ROCm gets only the arena-growth change; DirectML/CoreML
+    /// expose no memory option in this ort version and ignore it. Sourced from env
+    /// `GLOSSA_VERIFY_NLI_EP_MEM_LIMIT_MB` else ontology `[verify.nli].ep_mem_limit_mb`.
+    pub execution_provider_mem_limit_mb: Option<usize>,
 }
 
 /// Execution providers the runtime actually knows how to register — exactly the EPs `glossa-nli`
@@ -129,6 +141,23 @@ fn env_bool(key: &str) -> Option<bool> {
 fn env_string(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
+/// Parse an env var as `i32`. Absent/empty ⇒ `None`; a set-but-non-integer value is ignored with a
+/// warning (fail-open — a typo'd device id should never take the gate down, it just falls back to
+/// the default device).
+fn env_i32(key: &str) -> Option<i32> {
+    let raw = std::env::var(key).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.parse::<i32>() {
+        Ok(n) => Some(n),
+        Err(_) => {
+            tracing::warn!(key, value = %raw, "non-integer NLI EP device id ignored");
+            None
+        }
+    }
+}
 
 impl VerifyConfig {
     /// `glossa_dir` is the corpus `.glossa` dir; ontology loads from its parent.
@@ -201,6 +230,14 @@ impl VerifyConfig {
                 }
                 .into_iter(),
             ),
+            // GPU device id: env wins, else ontology `[verify.nli].ep_device`, else None (default
+            // device — today's behavior). Non-integer env value is dropped by `env_i32`.
+            execution_provider_device: env_i32("GLOSSA_VERIFY_NLI_EP_DEVICE")
+                .or_else(|| ont.as_ref().and_then(|o| o.verify_nli_ep_device())),
+            // GPU memory cap (MB): env wins, else ontology `[verify.nli].ep_mem_limit_mb`, else None
+            // (no memory options — today's behavior). Non-integer env value is dropped by env_usize.
+            execution_provider_mem_limit_mb: env_usize("GLOSSA_VERIFY_NLI_EP_MEM_LIMIT_MB")
+                .or_else(|| ont.as_ref().and_then(|o| o.verify_nli_ep_mem_limit_mb())),
         }
     }
 
@@ -456,6 +493,64 @@ mod tests {
             c.execution_providers,
             vec!["cuda".to_string(), "cpu".to_string()]
         );
+    }
+
+    #[test]
+    fn ep_device_round_trips_from_ontology() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_VERIFY_NLI_EP_DEVICE");
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[verify]\nenabled=true\n[verify.nli]\nep_device=1\n",
+        )
+        .unwrap();
+        let c = VerifyConfig::resolve(&g);
+        assert_eq!(c.execution_provider_device, Some(1));
+    }
+
+    #[test]
+    fn ep_device_none_when_absent() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_VERIFY_NLI_EP_DEVICE");
+        let dir = tempfile::tempdir().unwrap(); // no .glossa/ontology.toml
+        let c = VerifyConfig::resolve(dir.path());
+        assert_eq!(c.execution_provider_device, None);
+    }
+
+    #[test]
+    fn ep_mem_limit_mb_round_trips_from_ontology() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_VERIFY_NLI_EP_MEM_LIMIT_MB");
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[verify]\nenabled=true\n[verify.nli]\nep_mem_limit_mb=512\n",
+        )
+        .unwrap();
+        let c = VerifyConfig::resolve(&g);
+        assert_eq!(c.execution_provider_mem_limit_mb, Some(512));
+    }
+
+    #[test]
+    fn ep_mem_limit_mb_none_when_absent() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_VERIFY_NLI_EP_MEM_LIMIT_MB");
+        let dir = tempfile::tempdir().unwrap(); // no .glossa/ontology.toml
+        let c = VerifyConfig::resolve(dir.path());
+        assert_eq!(c.execution_provider_mem_limit_mb, None);
     }
 
     #[test]

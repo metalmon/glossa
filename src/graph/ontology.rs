@@ -139,6 +139,14 @@ struct RawVerifyNli {
     /// registration; `None`/absent when unset (see [`Ontology::verify_nli_execution_providers`]).
     #[serde(default)]
     execution_providers: Option<Vec<String>>,
+    /// Which GPU (device id) the CUDA/DirectML/ROCm EP binds to; `None`/absent ⇒ default device
+    /// (see [`Ontology::verify_nli_ep_device`]).
+    #[serde(default)]
+    ep_device: Option<i32>,
+    /// GPU arena memory cap in megabytes for the NLI EP; `None`/absent ⇒ no memory options
+    /// (see [`Ontology::verify_nli_ep_mem_limit_mb`]).
+    #[serde(default)]
+    ep_mem_limit_mb: Option<usize>,
 }
 
 /// `[verify.combined]` overlay: per-bucket z-score consensus calibration (see
@@ -421,6 +429,12 @@ pub struct Ontology {
     /// Per-corpus `[verify.nli].execution_providers` ordered EP preference list, empty when unset.
     /// See [`Ontology::verify_nli_execution_providers`].
     verify_nli_execution_providers: Vec<String>,
+    /// Per-corpus `[verify.nli].ep_device` GPU device id, or `None` when unset.
+    /// See [`Ontology::verify_nli_ep_device`].
+    verify_nli_ep_device: Option<i32>,
+    /// Per-corpus `[verify.nli].ep_mem_limit_mb` GPU memory cap (MB), or `None` when unset.
+    /// See [`Ontology::verify_nli_ep_mem_limit_mb`].
+    verify_nli_ep_mem_limit_mb: Option<usize>,
     /// Per-corpus `[verify.combined.<bucket>]` z-score consensus calibration (Task CZ-2's output).
     /// `None` when the bucket's table is absent OR only partially populated — see
     /// [`Ontology::verify_combined_single`].
@@ -605,6 +619,8 @@ impl Ontology {
                 .as_ref()
                 .and_then(|n| n.execution_providers.clone())
                 .unwrap_or_default(),
+            verify_nli_ep_device: raw.verify.nli.as_ref().and_then(|n| n.ep_device),
+            verify_nli_ep_mem_limit_mb: raw.verify.nli.as_ref().and_then(|n| n.ep_mem_limit_mb),
             verify_combined_single: raw
                 .verify
                 .combined
@@ -926,6 +942,20 @@ impl Ontology {
     /// `gate::config::VerifyConfig::resolve` applies its engine default (`["cpu"]`).
     pub fn verify_nli_execution_providers(&self) -> &[String] {
         &self.verify_nli_execution_providers
+    }
+
+    /// Per-corpus `[verify.nli].ep_device` GPU device id (which GPU the CUDA/DirectML/ROCm EP binds
+    /// to), or `None` when unset — in which case `gate::config::VerifyConfig` leaves it `None` and
+    /// the EP uses its default device (today's behavior).
+    pub fn verify_nli_ep_device(&self) -> Option<i32> {
+        self.verify_nli_ep_device
+    }
+
+    /// Per-corpus `[verify.nli].ep_mem_limit_mb` GPU arena memory cap in megabytes, or `None` when
+    /// unset — in which case `gate::config::VerifyConfig` leaves it `None` and the EP sets no memory
+    /// options (today's behavior).
+    pub fn verify_nli_ep_mem_limit_mb(&self) -> Option<usize> {
+        self.verify_nli_ep_mem_limit_mb
     }
 
     /// Per-corpus `[verify.combined.single]` z-score consensus calibration, or `None` when the

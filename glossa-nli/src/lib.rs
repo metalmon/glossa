@@ -74,13 +74,15 @@ mod ort_engine {
         batch_budget_tokens: usize,
     }
 
-    /// `MODEL_CACHE`'s key: `(canonicalized model_dir, providers)`. Factored out to satisfy
-    /// `clippy::type_complexity`.
-    type ModelCacheKey = (PathBuf, Vec<String>);
+    /// `MODEL_CACHE`'s key: `(canonicalized model_dir, providers, device_id, mem_limit_mb)`.
+    /// Factored out to satisfy `clippy::type_complexity`.
+    type ModelCacheKey = (PathBuf, Vec<String>, Option<i32>, Option<usize>);
     type ModelCache = OnceLock<Mutex<HashMap<ModelCacheKey, Arc<Inner>>>>;
 
-    /// Process-global load-once cache, keyed by `(canonicalized model_dir, providers)`. A different
-    /// EP set is a different ONNX session (spec §2.1a), so `providers` is part of the key.
+    /// Process-global load-once cache, keyed by
+    /// `(canonicalized model_dir, providers, device_id, mem_limit_mb)`. A different EP set, GPU
+    /// device, or GPU memory limit is a different ONNX session (spec §2.1a), so all three are part of
+    /// the key.
     static MODEL_CACHE: ModelCache = OnceLock::new();
 
     /// An in-process NLI scorer over an ONNX 3-way NLI model. Constructed from a local `model_dir`
@@ -142,17 +144,26 @@ mod ort_engine {
         /// Load the model + tokenizer from `model_dir`. `entail_index` is the softmax index of the
         /// entailment class. `providers` is the ordered list of runtime execution-provider names
         /// (lowercased by the caller's config), e.g. `["cuda", "cpu"]`; empty or `["cpu"]` means
-        /// CPU-only. Reuses a cached `Inner` for the same `(canonicalized model_dir, providers)`.
+        /// CPU-only. `device_id` selects which GPU the CUDA/DirectML/ROCm EP binds to; `None` builds
+        /// each EP exactly as before (its own default, i.e. device 0) — byte-identical behavior.
+        /// `mem_limit_mb` caps GPU arena memory (CUDA only in this ort version) and switches the arena
+        /// to same-as-requested + disables the session memory-pattern optimizer, so NLI can share a
+        /// GPU with an LLM; `None` sets no memory options (byte-identical to today). Reuses a cached
+        /// `Inner` for the same `(canonicalized model_dir, providers, device_id, mem_limit_mb)`.
         pub fn load(
             model_dir: &Path,
             entail_index: usize,
             providers: &[String],
+            device_id: Option<i32>,
+            mem_limit_mb: Option<usize>,
         ) -> anyhow::Result<Self> {
             let cache_key = (
                 model_dir
                     .canonicalize()
                     .unwrap_or_else(|_| model_dir.to_path_buf()),
                 providers.to_vec(),
+                device_id,
+                mem_limit_mb,
             );
             let cache = MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
@@ -167,7 +178,12 @@ mod ort_engine {
                 });
             }
 
-            let built = Arc::new(Self::build_inner(model_dir, providers)?);
+            let built = Arc::new(Self::build_inner(
+                model_dir,
+                providers,
+                device_id,
+                mem_limit_mb,
+            )?);
             let mut guard = cache
                 .lock()
                 .map_err(|_| anyhow::anyhow!("nli model cache mutex poisoned"))?;
@@ -178,7 +194,12 @@ mod ort_engine {
             })
         }
 
-        fn build_inner(model_dir: &Path, providers: &[String]) -> anyhow::Result<Inner> {
+        fn build_inner(
+            model_dir: &Path,
+            providers: &[String],
+            device_id: Option<i32>,
+            mem_limit_mb: Option<usize>,
+        ) -> anyhow::Result<Inner> {
             let tokenizer_path = model_dir.join("tokenizer.json");
             let mut tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
                 anyhow::anyhow!("tokenizer load ({}): {e}", tokenizer_path.display())
@@ -190,21 +211,28 @@ mod ort_engine {
             tokenizer.with_padding(None);
 
             let model_path = resolve_model_file(model_dir)?;
-            let eps = execution_provider_dispatch(providers);
+            let eps = execution_provider_dispatch(providers, device_id, mem_limit_mb);
             // Deliberately NO `.error_on_failure()`: a GPU EP that can't register falls through to
             // ORT's implicit CPU EP — the fail-open contract (see module doc).
-            let session = Session::builder()
+            let mut builder = Session::builder()
                 .map_err(|e| anyhow::anyhow!("onnx session builder: {e}"))?
                 .with_execution_providers(eps)
                 .map_err(|e| anyhow::anyhow!("onnx session execution providers: {e}"))?
                 .with_optimization_level(GraphOptimizationLevel::Level3)
                 .map_err(|e| anyhow::anyhow!("onnx session optimization level: {e}"))?
                 .with_intra_threads(1)
-                .map_err(|e| anyhow::anyhow!("onnx session intra-threads: {e}"))?
-                .commit_from_file(&model_path)
-                .map_err(|e| {
-                    anyhow::anyhow!("onnx session load ({}): {e}", model_path.display())
-                })?;
+                .map_err(|e| anyhow::anyhow!("onnx session intra-threads: {e}"))?;
+            // Under a GPU memory limit, disable the memory-pattern optimizer: it pre-plans one big
+            // contiguous arena, which fights a hard cap and inflates peak VRAM. Only applied when a
+            // limit is requested, so the unset path is byte-identical to before.
+            if mem_limit_mb.is_some() {
+                builder = builder
+                    .with_memory_pattern(false)
+                    .map_err(|e| anyhow::anyhow!("onnx session memory pattern: {e}"))?;
+            }
+            let session = builder.commit_from_file(&model_path).map_err(|e| {
+                anyhow::anyhow!("onnx session load ({}): {e}", model_path.display())
+            })?;
 
             Ok(Inner {
                 tokenizer,
@@ -270,10 +298,18 @@ mod ort_engine {
     }
 
     /// Build the ORT execution-provider dispatch list for `providers`, in the caller's order.
-    fn execution_provider_dispatch(providers: &[String]) -> Vec<ExecutionProviderDispatch> {
+    /// `device_id` (when `Some`) selects the GPU each CUDA/DirectML/ROCm EP binds to; `None` leaves
+    /// every EP at its default (device 0). `mem_limit_mb` (when `Some`) caps GPU arena memory (CUDA)
+    /// and sets same-as-requested arena growth (CUDA/ROCm). Both `None` produces the exact dispatch
+    /// list built before these knobs.
+    fn execution_provider_dispatch(
+        providers: &[String],
+        device_id: Option<i32>,
+        mem_limit_mb: Option<usize>,
+    ) -> Vec<ExecutionProviderDispatch> {
         compiled_gpu_providers(providers)
             .into_iter()
-            .filter_map(dispatch_for_gpu_name)
+            .filter_map(|name| dispatch_for_gpu_name(name, device_id, mem_limit_mb))
             .collect()
     }
 
@@ -309,15 +345,39 @@ mod ort_engine {
         None
     }
 
-    /// Turns an already-filtered GPU EP name into a live `ExecutionProviderDispatch`.
-    fn dispatch_for_gpu_name(name: &str) -> Option<ExecutionProviderDispatch> {
+    /// Turns an already-filtered GPU EP name into a live `ExecutionProviderDispatch`. `device_id`
+    /// (when `Some`) is threaded onto the CUDA/DirectML/ROCm builders via `with_device_id`; `None`
+    /// builds each EP with its default device. `mem_limit_mb` (when `Some`) is converted to bytes and
+    /// applied where the EP supports it: CUDA gets `with_memory_limit` + same-as-requested arena;
+    /// ROCm gets same-as-requested arena (this ort version exposes no ROCm memory cap); DirectML and
+    /// CoreML expose no memory/arena option in this ort version, so they ignore it. Both `None`
+    /// builds each EP exactly as before.
+    fn dispatch_for_gpu_name(
+        name: &str,
+        device_id: Option<i32>,
+        mem_limit_mb: Option<usize>,
+    ) -> Option<ExecutionProviderDispatch> {
         #[cfg(feature = "nli-cuda")]
         if name == "cuda" {
-            return Some(ort::ep::CUDA::default().build());
+            let mut ep = ort::ep::CUDA::default();
+            if let Some(id) = device_id {
+                ep = ep.with_device_id(id);
+            }
+            if let Some(mb) = mem_limit_mb {
+                ep = ep
+                    .with_memory_limit(mb * 1024 * 1024)
+                    .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested);
+            }
+            return Some(ep.build());
         }
         #[cfg(feature = "nli-directml")]
         if name == "directml" {
-            return Some(ort::ep::DirectML::default().build());
+            // DirectML exposes no memory-limit / arena option in this ort version; only device_id.
+            let mut ep = ort::ep::DirectML::default();
+            if let Some(id) = device_id {
+                ep = ep.with_device_id(id);
+            }
+            return Some(ep.build());
         }
         #[cfg(feature = "nli-coreml")]
         if name == "coreml" {
@@ -325,9 +385,18 @@ mod ort_engine {
         }
         #[cfg(feature = "nli-rocm")]
         if name == "rocm" {
-            return Some(ort::ep::ROCm::default().build());
+            let mut ep = ort::ep::ROCm::default();
+            if let Some(id) = device_id {
+                ep = ep.with_device_id(id);
+            }
+            if mem_limit_mb.is_some() {
+                ep = ep.with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested);
+            }
+            return Some(ep.build());
         }
         let _ = name;
+        let _ = device_id;
+        let _ = mem_limit_mb;
         None
     }
 
@@ -335,14 +404,34 @@ mod ort_engine {
     mod tests {
         use super::*;
 
+        /// `device_id = None` must leave the dispatch list identical to the pre-knob behavior.
+        /// A CPU-only provider list registers zero GPU EPs regardless of the device id, which is
+        /// exactly `compiled_gpu_providers`' filtered length here (0) — so `None` adds no EP and
+        /// changes nothing. (Real GPU dispatch needs hardware + a compiled `nli-*` feature and
+        /// isn't unit-testable.)
+        #[test]
+        fn dispatch_with_none_device_matches_baseline_length() {
+            let providers = vec!["cpu".to_string()];
+            assert_eq!(
+                execution_provider_dispatch(&providers, None, None).len(),
+                compiled_gpu_providers(&providers).len()
+            );
+        }
+
         #[test]
         fn obvious_entailment_outranks_contradiction() {
             let Ok(model_dir) = std::env::var("GLOSSA_NLI_TEST_MODEL") else {
                 return;
             };
             const ENTAIL_IDX: usize = 0;
-            let nli = InProcessNli::load(Path::new(&model_dir), ENTAIL_IDX, &["cpu".to_string()])
-                .expect("model load should succeed against a real GLOSSA_NLI_TEST_MODEL dir");
+            let nli = InProcessNli::load(
+                Path::new(&model_dir),
+                ENTAIL_IDX,
+                &["cpu".to_string()],
+                None,
+                None,
+            )
+            .expect("model load should succeed against a real GLOSSA_NLI_TEST_MODEL dir");
             let scores = nli
                 .entail(
                     "A dog is sleeping on the couch.",
@@ -472,8 +561,14 @@ mod ort_engine {
             };
             const ENTAIL_IDX: usize = 0;
             std::env::set_var("GLOSSA_NLI_BATCH_TOKENS", "16384");
-            let nli = InProcessNli::load(Path::new(&model_dir), ENTAIL_IDX, &["cpu".to_string()])
-                .expect("model load should succeed against a real GLOSSA_NLI_TEST_MODEL dir");
+            let nli = InProcessNli::load(
+                Path::new(&model_dir),
+                ENTAIL_IDX,
+                &["cpu".to_string()],
+                None,
+                None,
+            )
+            .expect("model load should succeed against a real GLOSSA_NLI_TEST_MODEL dir");
 
             let premise =
                 "The device must be fully powered off before any servicing begins. ".repeat(80);
