@@ -8,19 +8,6 @@ name = "kb_eval"
 path = "src/lib.rs"
 
 [[bin]]
-name = "kb-eval"
-path = "src/main.rs"
-
-[[bin]]
-name = "kb-train"
-path = "src/bin/kb-train.rs"
-
-[[bin]]
-name = "kb-eval-constraint"
-path = "src/bin/kb-eval-constraint.rs"
-required-features = ["constraint"]
-
-[[bin]]
 name = "convert-xlsx"
 path = "src/bin/convert-xlsx.rs"
 
@@ -33,10 +20,8 @@ name = "kbx"
 path = "src/bin/kbx.rs"
 
 [features]
-# Off by default: pulls in glossa's CSP/marking-schema solver (glossa-constraint) plus the
-# kb-eval constraint tooling (constraint_score/constraint_synthetic/gepa_constraint/
-# export_tz_constraint + the kb-eval-constraint bin). Rare/opt-in path; see `just build-kb-constraint`
-# and `just build-train-constraint`.
+# Off by default: pulls in glossa's CSP/marking-schema solver (glossa-constraint). Rare/opt-in
+# path, exercised by `eval/tests/constraint_it.rs`.
 constraint = ["glossa/constraint", "dep:glossa-constraint"]
 # Off by default: builds `kbx nli check`'s real in-process ONNX scorer path (glossa-nli/ort). No
 # new external dep here — this only forwards to glossa's own `nli` feature. Without it, `kbx nli
@@ -104,11 +89,8 @@ uuid = { version = "1", features = ["v7"] }
 rand = "0.8"
 rand_chacha = "0.3"
 base64 = "0.22"
-bzip2 = "0.4"
-tar = "0.4"
 calamine = "0.26"
 tempfile = "3"
-ctrlc = "3"
 indicatif = "0.17"
 # Port of Python json_repair — heal truncated / messy LLM tool-call arguments.
 jsonrepair = { version = "0.1", default-features = false, features = ["serde"] }

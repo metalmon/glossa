@@ -1,10 +1,8 @@
 pub mod accounting;
 pub mod agent_loop;
-pub mod cli;
 pub mod dialogue;
 pub mod glossa_tools;
 pub mod loop_compat;
-pub mod mock;
 pub mod openai;
 pub mod progress;
 pub mod prompt;
