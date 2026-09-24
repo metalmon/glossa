@@ -6,6 +6,87 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-24
+
+### Added
+
+- **Model-free answer-grounding gate (`verify`).** A verifier checks whether an answer's claims are actually supported by the cited evidence and can gate a low-support answer into an abstention. Configured per corpus via `[verify]` in `ontology.toml` (`mode = "ac" | "nli" | "combined"`), with the SAME verdict applied at serve time (MCP) and in eval/train — serving/eval parity.
+- **NLI support-verifier with GPU engines.** The `nli` verifier runs on an ONNX Runtime backend with selectable GPU execution providers, or on a pure-Rust burn + Vulkan/SPIR-V engine that needs no ONNX Runtime at all. `kbx nli check` validates an exported model directory (accepts an fp16-only `model.fp16.onnx`); `kb --version` reports the active NLI engine.
+- **Run-free calibration.** `kbx eval calibrate --from-dataset` derives verifier thresholds from the dataset alone (a bootstrap prior) with AUROC reliability gating and negative denoising — no full eval run required.
+- **Coverage abstention / quote-or-decline.** The reader can decline when retrieval does not cover the question instead of guessing, and a served answer is checked by the `verify` grounding gate first. On the training/eval side, a dataset abstention model (answerable vs unanswerable, with reclassification), a `safety_first` abstention policy, and an FP/FN scoring matrix reward a correct decline and penalize a confident wrong answer.
+- **GEPA training checkpoint/resume.** `kbx train` writes a crash-resumable checkpoint after pool-init and each accepted iteration; `--resume` / `--force` control it, over a three-phase progress bar (baseline · search · final-val). Adds K-sample rollout averaging (`[tuning] gepa_rollout_samples`), a dialogue-aware judge, intrinsic majority voting over judge verdicts (default 5), a `--lab` override for cross-model runs, and `--vision` so a prompt trains under the same image modality it will be served.
+- **`kbx dataset` command group.** `stat` / `merge` / `validate` / `dedup` / `sample`, an answer-reachability metric, and gate-marking (answerable/unanswerable) with legacy-tag reset.
+- **Graph doctor `--relink`.** Repoints a reasoning node's dead `MENTIONS` edge onto the live structural node a renamed/relabeled document now lives at (backup + repoint), rather than pruning recoverable nodes; mutually exclusive with `--prune-*`.
+- **Retrieval engine knobs.** Deterministic Louvain communities; a dual-seed geomean bridge mode (`[retrieval].bridge` / `GLOSSA_PPR_BRIDGE`, default off); and a spine-weight tier that boosts Chaining-role edges in PPR (`[retrieval].spine_weight`, default no-op). The graph transition store is now an out-of-core memory-mapped CSR with forward-push local PPR, bounding the working set on large graphs.
+- **Reasoning-scope controls.** `kbx build` / `distil` `--exclude` / `--only` and a `[tuning] reasoning_only` allowlist keep reference/generic documents out of graph mining; `graph prune --source` (with `--dry-run`) cleans a type grounded in one document.
+- **Per-endpoint headers.** `[[<stage>.endpoint]] headers` with `${{session}}` substitution, resolved per call inside the transport.
+- **Canonical CLI output.** Every `kb` / `kbx` subcommand ends with a single summary block (via `cli_fmt`); banners, hints, and advisories go to stderr; the shared progress bar shows an ETA; and `kbx --version` reports the engine version (parity with `kb`).
+
+### Changed
+
+- **Chunk identity is an ordinal (`path#ord`).** Chunks are addressed by sequence position, not a page label; `read` / `search` round-trip `path#N` between the CLI and MCP; the deprecated `p.N` page label is gone from all output. Bumps `INDEX_SCHEMA_VERSION` — reindex on upgrade.
+- **Unified retrieval dedup.** The MCP server and the eval/train reader share one dedup response with an opt-in raw bypass, gated by `--dedup` (default off, `config::DEDUP`), so eval and train optimize under the same retrieval feedback a default-config server actually serves. `--dedup` is a bare on-switch (present ⇒ on).
+- **Vision feeds every image per turn.** The answering and extraction paths feed all images a `read` returns (dropping the earlier 4-image cap); `--vision` maps symmetrically across MCP, eval, and train (`ToolContext.no_image`).
+- **Lock-free graph reads in the MCP server.** A shared `ArcSwap<GraphHandle>` serves reads without locking and swaps on freshen so a live daemon serves fresh results, production-hardened for a Linux daemon over a network-folder corpus.
+
+### Fixed
+
+- **Prune and backward-reasoning data-safety guards.** `kb graph doctor` now refuses a whole-layer mass delete on an ontology mismatch across the `ungrounded` / `stale` / `dangling` buckets (not just `dangling`), and refuses any destructive prune when `.glossa/ontology.toml` is present but unparseable (CLI `--force` overrides; the MCP server never mass-prunes). `kbx reason` and `distil --densify` now fail loud — or warn on a partial ontology — when no grounded terminal is a Chaining sink, instead of silently synthesizing nothing.
+- **Context-overflow retry converges.** Reactive client-side middle-out truncation (then drop-oldest-round) on a 400 context-length rejection; the eval reader honors `[tuning] max_rounds` (was hardcoded).
+- **Honest CLI counts and round-trips.** Summary counts appear once (bottom block only); `search` output keeps the full path prefix so it round-trips to `kb read`; `read(path, n)` is treated as a by-id fetch that bypasses the anti-loop signal tracker; doctor reports a false-all-clear as "check disabled" rather than "0".
+
+## [0.4.5] — 2026-09-02
+
+### Added
+
+- **Terminal-anchored backward gold generation** (ontology-general) for `kbx distil`.
+- **K-sample rollout averaging** in `kbx train` (`[tuning] gepa_rollout_samples`).
+
+### Fixed
+
+- Train rollout/judge error notices route through `pb.println`, so they no longer garble the live progress bar.
+
+## [0.4.4] — 2026-09-02
+
+### Fixed
+
+- `kbx train` blocklists endpoint-erroring questions from reflect minibatches, so a flaky endpoint no longer poisons a candidate's reflection.
+
+## [0.4.3] — 2026-09-02
+
+### Added
+
+- **Per-corpus `[retrieval].sim_weight`** — the PPR `SIMILAR`-edge weight is now an ontology knob.
+
+### Changed
+
+- Canonical-GEPA default in `kbx train`; endpoint-errored rollouts are excluded from the apply gate so a transport failure isn't counted as a wrong answer.
+
+## [0.4.2] — 2026-09-02
+
+### Added
+
+- **GEPA canonical termination** — full-set apply-gate + evict-on-reject, a metric-calls budget, and dataset-derived auto-hyperparameters.
+- **`glossary` renders the reasoning path** for composed candidates, with multi-grounding read anchors.
+
+### Changed
+
+- PPR default `w_sim` 0.1 → 0.3 (won an internal A/B); the PPR transition cache is keyed on `w_sim` so `GLOSSA_PPR_SIM_WEIGHT` takes effect.
+
+### Fixed
+
+- Elastic `wide_bar` progress template so a terminal resize no longer smears the bar; the mid-copy freshen window widens (2s → 10s) so the hold reliably fires.
+
+## [0.4.1] — 2026-09-01
+
+### Added
+
+- **`kbx distil --aliases-only`** — chain-driven alias enrichment (file-first, single-shot per chain); `graph_update` can add aliases to an existing node; `kb graph doctor --prune-stale`.
+
+### Fixed
+
+- `graph_upsert` resolves edges by a call-scoped handle with partial-apply and actionable feedback; `--aliases-only` uses the `[distil]` endpoint like the other distil modes.
+
 ## [0.4.0] — 2026-08-31
 
 ### Added
