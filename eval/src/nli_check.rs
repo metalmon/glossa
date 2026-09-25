@@ -33,34 +33,36 @@ pub struct NliFacts {
     pub dylib_set: bool,
     /// `glossa::gate::resolve_scorer(&cfg).is_some()` — a scorer actually loaded.
     pub scorer_built: bool,
-    /// Outcome of the canned English sanity probe run against a loaded scorer (see [`Probe`]).
+    /// Outcome of the language-agnostic lexical-identity sanity probe run against a loaded scorer
+    /// (see [`Probe`]).
     pub probe: Probe,
 }
 
-/// Outcome of `nli_check`'s canned English sanity probe (`entail(support)` vs `entail(contra)`
-/// against one hard-coded English premise/hypothesis pair). `NotRun` when no scorer resolved, so
-/// the probe never fired. `Errored` when the `entail()` call itself returned `Err` (session,
-/// tokenizer, or output-shape failure) — this DOES block READY, since it proves a loaded scorer
-/// can't actually run inference. `Ran { support_ge_contra }` proves the opposite: session,
-/// tokenizer, and 3-way output all work end to end. The bool inside `Ran` does NOT gate READY (see
-/// [`nli_verdict`]) — the probe text is English while the deployed model may be trained on another
-/// language (the shipped target is Russian), so a healthy non-English model can legitimately score
-/// this specific pair either way; the comparison is surfaced as an advisory line only.
+/// Outcome of `nli_check`'s language-agnostic lexical-identity sanity probe: `entail(premise,
+/// [identical, disjoint])` over one hard-coded pair whose "support" hypothesis is IDENTICAL to the
+/// premise and whose "contra" hypothesis shares no tokens with it (NATO-phonetic tokens). `NotRun`
+/// when no scorer resolved, so the probe never fired. `Errored` when the `entail()` call itself
+/// returned `Err` (session, tokenizer, or output-shape failure) — this DOES block READY, since it
+/// proves a loaded scorer can't actually run inference. `Ran { identity_ge_disjoint }` proves the
+/// opposite: session, tokenizer, and 3-way output all work end to end. The bool inside `Ran` does
+/// NOT gate READY (see [`nli_verdict`]): a well-trained model of any language should rank the
+/// identical hypothesis above the disjoint one, so a `false` hints at a miswired scorer (e.g. a
+/// wrong entail_index) rather than a language mismatch — it's surfaced as an advisory line only.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Probe {
     NotRun,
     Errored(String),
-    Ran { support_ge_contra: bool },
+    Ran { identity_ge_disjoint: bool },
 }
 
 /// Judge [`NliFacts`] into a `(ready, verdict_line)` pair. READY only when every gate passes, in
 /// this order (the returned line names the FIRST one that fails): mode isn't `ac` -> feature `nli`
 /// is built -> scorer is `"in_process"` -> `model_dir` is configured -> `model_dir` has both model
 /// files -> a scorer actually loaded -> the sanity probe RAN without error. (`ORT_DYLIB_PATH` is
-/// NOT a gate — see the note at the `scorer_built` check.) The probe's support-vs-contra comparison
-/// is advisory only and never
-/// blocks READY (see [`Probe`]'s doc comment for why: the probe is English text, the target model
-/// may not be). Pure — no IO, no panics; safe to call with any combination of facts (including ones
+/// NOT a gate — see the note at the `scorer_built` check.) The probe's identity-vs-disjoint
+/// comparison is advisory only and never blocks READY (see [`Probe`]'s doc comment for why: a `false`
+/// points at a miswired scorer, not a language mismatch). Pure — no IO, no panics; safe to call with
+/// any combination of facts (including ones
 /// that couldn't co-occur in practice, e.g. `probe: Probe::Ran { .. }` with `scorer_built: false`).
 pub fn nli_verdict(f: &NliFacts) -> (bool, String) {
     if f.mode == "ac" {
@@ -208,12 +210,17 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
     let scorer_built = scorer.is_some();
     let probe = match &scorer {
         None => Probe::NotRun,
+        // Language-agnostic lexical-identity smoke test: a premise entails an IDENTICAL hypothesis
+        // (trivially, in any language) more than a token-disjoint one. `identity_ge_disjoint` should
+        // hold for any working scorer regardless of the model's language; a `false` points at a
+        // miswired scorer (e.g. a wrong entail_index that inverts the classes) or a degenerate model,
+        // not a language mismatch. Uses NATO-phonetic tokens (an international, language-neutral set).
         Some(s) => match s.entail(
-            "A dog is sleeping on the couch.",
-            &["An animal is resting.", "The room is empty."],
+            "alpha bravo charlie delta",
+            &["alpha bravo charlie delta", "november oscar papa quebec"],
         ) {
             Ok(scores) if scores.len() >= 2 => Probe::Ran {
-                support_ge_contra: scores[0] > scores[1],
+                identity_ge_disjoint: scores[0] > scores[1],
             },
             // `entail()` returns one score per hypothesis (2 here); an `Ok` with fewer values
             // would mean the crate's own length contract broke — treat it like an error rather
@@ -297,9 +304,12 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
         }
     );
     match &facts.probe {
-        Probe::Ran { support_ge_contra } => println!(
-            "sanity         = ran (support>=contra: {support_ge_contra})  [advisory: probe is \
-             English; a non-English model may score low]"
+        Probe::Ran {
+            identity_ge_disjoint,
+        } => println!(
+            "sanity         = ran (identity>=disjoint: {identity_ge_disjoint})  [language-agnostic \
+             lexical check; false suggests a miswired scorer (e.g. wrong entail_index), not a \
+             language mismatch]"
         ),
         Probe::Errored(msg) => println!("sanity         = ERRORED: {msg}"),
         Probe::NotRun => println!("sanity         = (skipped — no scorer loaded)"),
@@ -494,7 +504,7 @@ mod tests {
             dylib_set: true,
             scorer_built: true,
             probe: Probe::Ran {
-                support_ge_contra: true,
+                identity_ge_disjoint: true,
             },
         }
     }
@@ -586,14 +596,14 @@ mod tests {
         assert!(line.contains("scorer failed to load"), "line was: {line}");
     }
 
-    /// `Probe::Ran { support_ge_contra: false }` proves the scorer loaded and ran real inference
+    /// `Probe::Ran { identity_ge_disjoint: false }` proves the scorer loaded and ran real inference
     /// end to end (session + tokenizer + 3-way output) — the comparison itself is advisory only
-    /// (the probe is English, the target model may not be), so it must NOT block READY.
+    /// (a `false` points at a miswired scorer, not a language mismatch), so it must NOT block READY.
     #[test]
     fn probe_ran_with_false_comparison_is_still_ready() {
         let mut f = ready_facts();
         f.probe = Probe::Ran {
-            support_ge_contra: false,
+            identity_ge_disjoint: false,
         };
         let (ready, line) = nli_verdict(&f);
         assert!(ready, "line was: {line}");
