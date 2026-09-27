@@ -1,13 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
-    "answer": {
-      "description": "The final answer to gate (submit exactly what you would send the user).",
-      "type": "string"
-    },
     "chunk_paths": {
       "default": null,
-      "description": "The chunk paths the answer is grounded in, as `path#loc`. More than one ⇒ multihop.",
+      "description": "The chunk paths the answer is grounded in, as `path#loc`. More than one ⇒ multihop. Omit to instead check the text's terms against the KB vocabulary.",
       "items": {
         "type": "string"
       },
@@ -15,10 +11,14 @@
         "array",
         "null"
       ]
+    },
+    "text": {
+      "description": "The text to check: with chunk_paths, the final answer to gate (submit exactly what you would send the user); without chunk_paths, a question/claim whose terms are checked against the KB vocabulary.",
+      "type": "string"
     }
   },
   "required": [
-    "answer"
+    "text"
   ],
   "type": "object"
 }

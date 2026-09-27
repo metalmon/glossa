@@ -5,6 +5,7 @@ pub mod df_cache;
 pub mod nli;
 #[cfg(any(feature = "nli", feature = "nli-dynamic", feature = "nli-burn"))]
 pub mod nli_engine;
+pub mod question;
 pub mod score;
 pub mod token;
 

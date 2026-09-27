@@ -630,7 +630,7 @@ pub fn exec(
             // SAME `glossa::gate` core the MCP `verify` tool uses (`src/mcp.rs`), so eval runs and
             // the live server agree. Reuses the loose vec-of-string deser (mirrors `VerifyArgs`)
             // since some models send `chunk_paths` as a single string / comma-joined string.
-            let answer = args.get("answer").and_then(|v| v.as_str()).unwrap_or("");
+            let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
             let chunk_paths: Vec<String> = args
                 .get("chunk_paths")
                 .and_then(|v| {
@@ -644,8 +644,19 @@ pub fn exec(
             let body = if !(cfg.enabled && cfg.is_calibrated()) {
                 // Serving parity: an uncalibrated/disabled verify is withheld on the live server.
                 glossa::gate::reader_uncalibrated_json().to_string()
+            } else if chunk_paths.is_empty() {
+                // Chunk-free mode parity: check the text's terms against the KB vocabulary
+                // (did-you-mean), same as the MCP `verify` handler (src/mcp.rs).
+                match glossa::graph::store::GraphStore::open(root) {
+                    Ok(g) => match glossa::gate::question::check_question(&g, text) {
+                        Ok(r) => serde_json::to_string(&r)
+                            .unwrap_or_else(|e| format!("verify error: {e}")),
+                        Err(e) => format!("verify error: {e}"),
+                    },
+                    Err(e) => format!("verify error: {e}"),
+                }
             } else {
-                match glossa::gate::verify_outcome(&glossa_dir, answer, &chunk_paths) {
+                match glossa::gate::verify_outcome(&glossa_dir, text, &chunk_paths) {
                     Ok((o, n)) => glossa::gate::reader_verify_json(&o, n).to_string(),
                     Err(e) => format!("verify error: {e}"),
                 }
@@ -758,7 +769,7 @@ mod tests {
         let trace = TraceLog::disabled();
         let out = exec(
             "verify",
-            &json!({"answer": "x", "chunk_paths": []}),
+            &json!({"text": "x", "chunk_paths": []}),
             dir.path(),
             &idx,
             None,
@@ -786,7 +797,7 @@ mod tests {
         let trace = TraceLog::disabled();
         let out = exec(
             "verify",
-            &json!({"answer": "anything", "chunk_paths": []}),
+            &json!({"text": "anything", "chunk_paths": []}),
             dir.path(),
             &idx,
             None,

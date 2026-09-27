@@ -23,7 +23,7 @@ pub const DESC_GREP: &str = "Find an exact string in the text — a code, identi
 
 pub const DESC_GLOB: &str = "List knowledge-base documents whose path matches a ripgrep `-g` glob (e.g. `*` or `**/*` for all documents, or `*<name-fragment>*` to find a file by name). Returns one `path  (N chunks)` per line — use it to discover what documents exist or find a file by name, then `read(path, n)` or scope a `search`/`grep` to it. N is the document's last page/section number; every page 1..N is addressable (blank pages return empty text).";
 
-pub const DESC_VERIFY: &str = "Check whether an answer is grounded in the cited chunks; returns serve/abstain. Pass the final answer and the chunk paths it rests on.";
+pub const DESC_VERIFY: &str = "Check text against the knowledge base. WITH chunk_paths: gate whether the answer is grounded in those cited chunks (serve/abstain) — pass the final answer and the chunk paths it rests on. WITHOUT chunk_paths: check whether the text's terms exist in the KB vocabulary and get did-you-mean suggestions for unknown/misspelled ones.";
 
 pub const DESC_SQL: &str = "Run a read-only SQL SELECT over the reasoning graph to compute/aggregate/rank/filter/traverse-by-join over facts and edges; an empty query returns the schema. Tables: nodes(id, node_type, label), edges(efrom, edge_type, eto), node_validity(node_id, valid_from, ...), edges_labeled(src_label, edge_type, dst_label, efrom, eto). This is SQLite (read-only SELECT). LIKE is case-insensitive incl. Cyrillic; ILIKE is accepted and treated as LIKE; no trailing ';' needed.";
 
