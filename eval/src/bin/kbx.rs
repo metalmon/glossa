@@ -1155,6 +1155,8 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 bool,        // errored (reader endpoint failure)
                 Vec<String>, // ranked_sources (deduped retrieved doc paths, score/coverage ranked)
                 Vec<(String, String)>, // reader<->user_sim dialogue (empty unless a user_sim gate deflected)
+                bool, // answered_without_retrieval (from-memory answer, no tool, not rescued)
+                bool, // no_tool_rescued (guard fired then a resample produced a tool call)
             );
             let run_sample = |capture: bool| -> Sample {
                 // Reset THIS worker thread's TZ episode grouping before the reader runs, so a stale
@@ -1204,6 +1206,11 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 // when no `user_sim` gate deflected (or none is configured), so the judge grades
                 // exactly as before.
                 let reader_dialogue = kb_eval::backend::dialogue::take_reader_dialogue();
+                // Drain this thread's no-tool answer guard outcome (see agent_loop): whether the
+                // reader answered from memory with no retrieval, and whether a resample rescued it.
+                let no_tool = kb_eval::backend::dialogue::take_no_tool_stats();
+                let answered_without_retrieval = no_tool.fired && !no_tool.rescued;
+                let no_tool_rescued = no_tool.rescued;
 
                 let golds = gold_forms(q);
                 // Endpoint-errored rollouts produced no answer — no EM/F1 sample (0.0) and the
@@ -1297,6 +1304,8 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                     errored,
                     ranked_sources,
                     reader_dialogue,
+                    answered_without_retrieval,
+                    no_tool_rescued,
                 )
             };
 
@@ -1315,6 +1324,8 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 errored,
                 ranked_sources,
                 reader_dialogue,
+                answered_without_retrieval,
+                no_tool_rescued,
             ) = run_sample(args.capture);
 
             // Capture: record sample 0's trajectory + any additional samples (varied outcomes → DPO).
@@ -1370,9 +1381,8 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 chunk_paths,
                 ranked_sources,
                 dialogue: reader_dialogue,
-                // Placeholder — wired to the real drained stats in the no-tool-gate wiring task.
-                answered_without_retrieval: false,
-                no_tool_rescued: false,
+                answered_without_retrieval,
+                no_tool_rescued,
             };
             write_case(&cases_dir, &r)
                 .with_context(|| format!("persisting case {} to {}", r.id, cases_dir.display()))?;

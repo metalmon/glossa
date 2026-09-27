@@ -319,8 +319,17 @@ pub fn run_agent_loop(
     // byte-identical to the pre-capture loop. Only the eval `--capture` path calls
     // `run_agent_loop_capturing` directly with a `Some` sink.
     run_agent_loop_capturing(
-        transport, ep, system, messages, tools, exec, on_repeat, max_rounds, user_sim,
-        require_retrieval, None,
+        transport,
+        ep,
+        system,
+        messages,
+        tools,
+        exec,
+        on_repeat,
+        max_rounds,
+        user_sim,
+        require_retrieval,
+        None,
     )
 }
 
@@ -698,8 +707,19 @@ mod tests {
         let ep = test_endpoint();
         let transport = MockTransport::new(vec![reply_text("ANSWER: Bob")]);
         let exec = |_: &str, _: &Value| (String::new(), Vec::new());
-        let out =
-            run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 4, None, false).unwrap();
+        let out = run_agent_loop(
+            &transport,
+            &ep,
+            None,
+            vec![],
+            None,
+            exec,
+            nudge,
+            4,
+            None,
+            false,
+        )
+        .unwrap();
         assert_eq!(out, "ANSWER: Bob");
     }
 
@@ -837,8 +857,19 @@ mod tests {
             *execs.borrow_mut() += 1;
             ("hit".to_string(), vec!["hit-id".to_string()])
         };
-        let out =
-            run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 5, None, false).unwrap();
+        let out = run_agent_loop(
+            &transport,
+            &ep,
+            None,
+            vec![],
+            None,
+            exec,
+            nudge,
+            5,
+            None,
+            false,
+        )
+        .unwrap();
         assert_eq!(out, "looping");
         assert_eq!(
             *execs.borrow(),
@@ -881,7 +912,19 @@ mod tests {
             *execs.borrow_mut() += 1;
             ("hit".to_string(), Vec::new())
         };
-        let _ = run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 4, None, false).unwrap();
+        let _ = run_agent_loop(
+            &transport,
+            &ep,
+            None,
+            vec![],
+            None,
+            exec,
+            nudge,
+            4,
+            None,
+            false,
+        )
+        .unwrap();
         assert_eq!(*execs.borrow(), 4, "alternating tools must each execute");
     }
 
@@ -896,8 +939,19 @@ mod tests {
             .collect();
         let transport = MockTransport::new(replies);
         let exec = |_: &str, _: &Value| ("hit".to_string(), Vec::new());
-        let out =
-            run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 3, None, false).unwrap();
+        let out = run_agent_loop(
+            &transport,
+            &ep,
+            None,
+            vec![],
+            None,
+            exec,
+            nudge,
+            3,
+            None,
+            false,
+        )
+        .unwrap();
         // The trailing "give up" call's reply.text is what's returned regardless of it also
         // carrying tool_calls (the loop reads `text` unconditionally on the final call).
         assert_eq!(out, "giving up");
@@ -1462,7 +1516,16 @@ mod tests {
             reply_text("grounded answer"),
         ]);
         let out = run_agent_loop(
-            &transport, &ep, None, vec![], None, exec, nudge, 10, None, true,
+            &transport,
+            &ep,
+            None,
+            vec![],
+            None,
+            exec,
+            nudge,
+            10,
+            None,
+            true,
         )
         .unwrap();
         assert_eq!(out, "grounded answer");
@@ -1481,7 +1544,16 @@ mod tests {
         // raw `transport.call`: 1 initial + 2 resamples, then accept.
         let transport = MockTransport::new(vec![reply_text("from memory"); 5]);
         let out = run_agent_loop(
-            &transport, &ep, None, vec![], None, exec, nudge, 10, None, true,
+            &transport,
+            &ep,
+            None,
+            vec![],
+            None,
+            exec,
+            nudge,
+            10,
+            None,
+            true,
         )
         .unwrap();
         assert_eq!(out, "from memory");
@@ -1498,7 +1570,16 @@ mod tests {
         let exec = |_: &str, _: &Value| (String::new(), Vec::new());
         let transport = MockTransport::new(vec![reply_text("from memory")]);
         let out = run_agent_loop(
-            &transport, &ep, None, vec![], None, exec, nudge, 10, None, false,
+            &transport,
+            &ep,
+            None,
+            vec![],
+            None,
+            exec,
+            nudge,
+            10,
+            None,
+            false,
         )
         .unwrap();
         assert_eq!(out, "from memory");
@@ -1517,7 +1598,16 @@ mod tests {
             reply_text("grounded answer"),
         ]);
         let out = run_agent_loop(
-            &transport, &ep, None, vec![], None, exec, nudge, 10, None, true,
+            &transport,
+            &ep,
+            None,
+            vec![],
+            None,
+            exec,
+            nudge,
+            10,
+            None,
+            true,
         )
         .unwrap();
         assert_eq!(out, "grounded answer");
@@ -1537,7 +1627,16 @@ mod tests {
         // keys on the `tools_called_ever` flag, never a round index.
         let transport = MockTransport::new(vec![reply_text(""), reply_text("from memory")]);
         let out = run_agent_loop(
-            &transport, &ep, None, vec![], None, exec, nudge, 10, None, true,
+            &transport,
+            &ep,
+            None,
+            vec![],
+            None,
+            exec,
+            nudge,
+            10,
+            None,
+            true,
         )
         .unwrap();
         assert_eq!(out, "from memory");
@@ -1555,7 +1654,16 @@ mod tests {
         let exec = |_: &str, _: &Value| (String::new(), Vec::new());
         let transport = MockTransport::new(vec![reply_text("from memory"); 5]);
         let _ = run_agent_loop(
-            &transport, &ep, None, vec![], None, exec, nudge, 10, None, true,
+            &transport,
+            &ep,
+            None,
+            vec![],
+            None,
+            exec,
+            nudge,
+            10,
+            None,
+            true,
         )
         .unwrap();
         assert_eq!(transport.calls.borrow().len(), 3); // default budget 2 => initial + 2 resamples
