@@ -313,12 +313,14 @@ pub fn run_agent_loop(
     on_repeat: impl Fn(&str, &Value) -> String,
     max_rounds: usize,
     user_sim: Option<&dyn DialogueGate>,
+    require_retrieval: bool,
 ) -> anyhow::Result<String> {
     // Back-compat: every existing caller drives the loop with NO capture sink, which is
     // byte-identical to the pre-capture loop. Only the eval `--capture` path calls
     // `run_agent_loop_capturing` directly with a `Some` sink.
     run_agent_loop_capturing(
-        transport, ep, system, messages, tools, exec, on_repeat, max_rounds, user_sim, None,
+        transport, ep, system, messages, tools, exec, on_repeat, max_rounds, user_sim,
+        require_retrieval, None,
     )
 }
 
@@ -336,6 +338,7 @@ pub fn run_agent_loop_capturing(
     on_repeat: impl Fn(&str, &Value) -> String,
     max_rounds: usize,
     user_sim: Option<&dyn DialogueGate>,
+    require_retrieval: bool,
     mut capture: Option<&mut CapturedEpisode>,
 ) -> anyhow::Result<String> {
     // This call is the start of a fresh CONVERSATION (one reason seed / one build doc / one eval
@@ -384,6 +387,19 @@ pub fn run_agent_loop_capturing(
     const MAX_SIM_REPEAT: usize = 2;
     let mut sim_last_answer: Option<String> = None;
     let mut sim_repeat: usize = 0;
+    // No-tool answer guard (eval reader only, gated by `require_retrieval`): the reader sometimes
+    // answers straight from memory with no tool call — ungrounded, bypassing retrieval and verify.
+    // Blind-resample such a first answer (a bare `continue` re-issues the SAME messages; with no
+    // `seed` sent the server draws a fresh sample at temp>0, a chance to retrieve this time), up to
+    // a budget, then accept. Armed only until the first tool call and bounded by the counter, so a
+    // multi-turn user_sim dialogue cannot re-spend the budget. Budget default 2, env-overridable.
+    let max_notool: usize = std::env::var("KB_EVAL_MAX_NOTOOL_RESAMPLE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2);
+    let mut tools_called_ever = false;
+    let mut no_tool_gate_fired = false;
+    let mut no_tool_resamples = 0usize;
 
     for _ in 0..max_rounds {
         let reply: TurnReply =
@@ -403,6 +419,22 @@ pub fn run_agent_loop_capturing(
                     "content": "Your reply was empty. Give your final answer now as plain text, or call a tool if you still need to look something up."
                 }));
                 continue;
+            }
+            // From-memory guard: a substantive answer with no tool call anywhere in the
+            // conversation is ungrounded. Mark it (observability, even at budget 0), then
+            // blind-resample up to the budget — a bare `continue` re-issues the SAME messages, so
+            // the server draws a fresh sample at temp>0, a chance to retrieve this time. Once the
+            // budget is spent, fall through and accept the answer exactly as before.
+            if require_retrieval && !tools_called_ever && !text.trim().is_empty() {
+                if !no_tool_gate_fired {
+                    no_tool_gate_fired = true;
+                    crate::backend::dialogue::mark_no_tool_gate_fired();
+                }
+                if no_tool_resamples < max_notool {
+                    no_tool_resamples += 1;
+                    continue;
+                }
+                // budget spent -> fall through to the acceptance logic below.
             }
             match user_sim {
                 // No gate configured -> today's behavior EXACTLY: the first text-only turn is the
@@ -470,6 +502,14 @@ pub fn run_agent_loop_capturing(
                 },
             }
         }
+        // A tool call arrived. If the no-tool guard had fired before any retrieval, this resample
+        // rescued the case from a from-memory answer. Either way, disarm the guard for the rest of
+        // the conversation.
+        if no_tool_gate_fired && !tools_called_ever {
+            crate::backend::dialogue::mark_no_tool_rescued();
+        }
+        tools_called_ever = true;
+
         // Echo the assistant turn that requested the tools (mirrors the old `messages.push(msg.clone())`).
         transport.push_assistant_turn(&mut messages, &reply);
 
@@ -528,7 +568,14 @@ pub fn run_agent_loop_capturing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::accounting::reset_conversation_prefix;
+    use crate::backend::dialogue::{take_no_tool_stats, NoToolStats};
     use crate::backend::transport::ToolCall;
+
+    /// Serializes the no-tool-guard tests that read or mutate the process-global
+    /// `KB_EVAL_MAX_NOTOOL_RESAMPLE`, so a setter's set→remove window can't race a reader that
+    /// depends on the default. Held for the whole test body.
+    static NOTOOL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use std::cell::RefCell;
     use std::collections::VecDeque;
 
@@ -652,7 +699,7 @@ mod tests {
         let transport = MockTransport::new(vec![reply_text("ANSWER: Bob")]);
         let exec = |_: &str, _: &Value| (String::new(), Vec::new());
         let out =
-            run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 4, None).unwrap();
+            run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 4, None, false).unwrap();
         assert_eq!(out, "ANSWER: Bob");
     }
 
@@ -690,6 +737,7 @@ mod tests {
             nudge,
             6,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(out, "REAL ANSWER");
@@ -716,6 +764,7 @@ mod tests {
             nudge,
             10,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(out2, "");
@@ -754,6 +803,7 @@ mod tests {
             nudge,
             4,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(out, "ANSWER: Chief of Protocol");
@@ -788,7 +838,7 @@ mod tests {
             ("hit".to_string(), vec!["hit-id".to_string()])
         };
         let out =
-            run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 5, None).unwrap();
+            run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 5, None, false).unwrap();
         assert_eq!(out, "looping");
         assert_eq!(
             *execs.borrow(),
@@ -831,7 +881,7 @@ mod tests {
             *execs.borrow_mut() += 1;
             ("hit".to_string(), Vec::new())
         };
-        let _ = run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 4, None).unwrap();
+        let _ = run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 4, None, false).unwrap();
         assert_eq!(*execs.borrow(), 4, "alternating tools must each execute");
     }
 
@@ -847,7 +897,7 @@ mod tests {
         let transport = MockTransport::new(replies);
         let exec = |_: &str, _: &Value| ("hit".to_string(), Vec::new());
         let out =
-            run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 3, None).unwrap();
+            run_agent_loop(&transport, &ep, None, vec![], None, exec, nudge, 3, None, false).unwrap();
         // The trailing "give up" call's reply.text is what's returned regardless of it also
         // carrying tool_calls (the loop reads `text` unconditionally on the final call).
         assert_eq!(out, "giving up");
@@ -890,6 +940,7 @@ mod tests {
             nudge,
             UNPRODUCTIVE_STREAK_K + 3,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(out, "ANSWER: done");
@@ -934,6 +985,7 @@ mod tests {
             nudge,
             4,
             None,
+            false,
             Some(&mut episode),
         )
         .unwrap();
@@ -965,6 +1017,7 @@ mod tests {
             nudge,
             4,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(out, "ANSWER: 4");
@@ -1027,6 +1080,7 @@ mod tests {
             nudge,
             4,
             Some(&gate),
+            false,
         )
         .unwrap();
         assert_eq!(out, "ANSWER: Bob Page");
@@ -1076,6 +1130,7 @@ mod tests {
             nudge,
             8, // max_rounds high enough that only the repeat-guard can stop the loop early
             Some(&gate),
+            false,
         )
         .unwrap();
         assert_eq!(out, "No information found in the knowledge base");
@@ -1104,6 +1159,7 @@ mod tests {
             nudge,
             4,
             Some(&gate),
+            false,
         )
         .unwrap();
         assert_eq!(out, "ANSWER: Chief of Protocol");
@@ -1132,6 +1188,7 @@ mod tests {
             nudge,
             4,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(out, "QUESTION: who is Bob?");
@@ -1155,6 +1212,7 @@ mod tests {
             nudge,
             4,
             Some(&gate),
+            false,
         )
         .unwrap();
         assert_eq!(out, "QUESTION: still thinking");
@@ -1387,5 +1445,120 @@ mod tests {
         let ep = test_endpoint();
         let out = call_with_context_retry(&AlwaysRateLimited, &ep, None, &mut msgs, None, None);
         assert!(out.is_err(), "non-overflow error must propagate");
+    }
+
+    // ---- no-tool answer guard (require_retrieval) ----
+
+    #[test]
+    fn no_tool_answer_is_resampled_then_rescued_by_tool_call() {
+        let _env = NOTOOL_ENV_LOCK.lock().unwrap();
+        reset_conversation_prefix();
+        let ep = test_endpoint();
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        // turn 0: from-memory answer (no tool); resample -> a tool call; then a final answer.
+        let transport = MockTransport::new(vec![
+            reply_text("42 is the answer"),
+            reply_tool_call("c1", "search", json!({ "q": "x" })),
+            reply_text("grounded answer"),
+        ]);
+        let out = run_agent_loop(
+            &transport, &ep, None, vec![], None, exec, nudge, 10, None, true,
+        )
+        .unwrap();
+        assert_eq!(out, "grounded answer");
+        let s = take_no_tool_stats();
+        assert!(s.fired && s.rescued);
+    }
+
+    #[test]
+    fn no_tool_answer_gives_up_after_budget_and_is_recorded() {
+        let _env = NOTOOL_ENV_LOCK.lock().unwrap();
+        reset_conversation_prefix();
+        std::env::set_var("KB_EVAL_MAX_NOTOOL_RESAMPLE", "2");
+        let ep = test_endpoint();
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        // A substantive no-tool reply is NOT degenerate to resample.rs, so each outer round is one
+        // raw `transport.call`: 1 initial + 2 resamples, then accept.
+        let transport = MockTransport::new(vec![reply_text("from memory"); 5]);
+        let out = run_agent_loop(
+            &transport, &ep, None, vec![], None, exec, nudge, 10, None, true,
+        )
+        .unwrap();
+        assert_eq!(out, "from memory");
+        assert_eq!(transport.calls.borrow().len(), 3);
+        let s = take_no_tool_stats();
+        assert!(s.fired && !s.rescued);
+        std::env::remove_var("KB_EVAL_MAX_NOTOOL_RESAMPLE");
+    }
+
+    #[test]
+    fn guard_disabled_when_require_retrieval_false() {
+        reset_conversation_prefix();
+        let ep = test_endpoint();
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        let transport = MockTransport::new(vec![reply_text("from memory")]);
+        let out = run_agent_loop(
+            &transport, &ep, None, vec![], None, exec, nudge, 10, None, false,
+        )
+        .unwrap();
+        assert_eq!(out, "from memory");
+        assert_eq!(transport.calls.borrow().len(), 1); // no resample
+        assert_eq!(take_no_tool_stats(), NoToolStats::default());
+    }
+
+    #[test]
+    fn guard_not_triggered_when_a_tool_was_called_first() {
+        reset_conversation_prefix();
+        let ep = test_endpoint();
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        // A tool call on turn 0 disarms the guard; the later no-tool answer is accepted, not resampled.
+        let transport = MockTransport::new(vec![
+            reply_tool_call("c1", "search", json!({ "q": "x" })),
+            reply_text("grounded answer"),
+        ]);
+        let out = run_agent_loop(
+            &transport, &ep, None, vec![], None, exec, nudge, 10, None, true,
+        )
+        .unwrap();
+        assert_eq!(out, "grounded answer");
+        assert_eq!(transport.calls.borrow().len(), 2); // no extra resample
+        assert_eq!(take_no_tool_stats(), NoToolStats::default());
+    }
+
+    #[test]
+    fn guard_records_from_memory_answer_even_after_empty_first_turn_at_budget_zero() {
+        let _env = NOTOOL_ENV_LOCK.lock().unwrap();
+        reset_conversation_prefix();
+        std::env::set_var("KB_EVAL_MAX_NOTOOL_RESAMPLE", "0"); // record only, no resample
+        let ep = test_endpoint();
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        // An empty preamble turn (absorbed by resample.rs's inner resample or the outer empty-guard)
+        // must not stop the guard firing on the subsequent substantive no-tool answer — the guard
+        // keys on the `tools_called_ever` flag, never a round index.
+        let transport = MockTransport::new(vec![reply_text(""), reply_text("from memory")]);
+        let out = run_agent_loop(
+            &transport, &ep, None, vec![], None, exec, nudge, 10, None, true,
+        )
+        .unwrap();
+        assert_eq!(out, "from memory");
+        let s = take_no_tool_stats();
+        assert!(s.fired && !s.rescued); // recorded even though budget 0 resampled nothing
+        std::env::remove_var("KB_EVAL_MAX_NOTOOL_RESAMPLE");
+    }
+
+    #[test]
+    fn budget_env_parse_failure_falls_back_to_default() {
+        let _env = NOTOOL_ENV_LOCK.lock().unwrap();
+        reset_conversation_prefix();
+        std::env::set_var("KB_EVAL_MAX_NOTOOL_RESAMPLE", "abc");
+        let ep = test_endpoint();
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        let transport = MockTransport::new(vec![reply_text("from memory"); 5]);
+        let _ = run_agent_loop(
+            &transport, &ep, None, vec![], None, exec, nudge, 10, None, true,
+        )
+        .unwrap();
+        assert_eq!(transport.calls.borrow().len(), 3); // default budget 2 => initial + 2 resamples
+        std::env::remove_var("KB_EVAL_MAX_NOTOOL_RESAMPLE");
     }
 }
