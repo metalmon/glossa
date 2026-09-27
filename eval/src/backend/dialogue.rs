@@ -26,12 +26,51 @@ pub fn take_reader_dialogue() -> Vec<(String, String)> {
     READER_DIALOGUE.with(|d| std::mem::take(&mut *d.borrow_mut()))
 }
 
+/// Per-conversation outcome of the no-tool answer guard (see `agent_loop`): whether the reader
+/// produced a substantive answer before any tool call (`fired`), and whether a later resample then
+/// emitted a tool call that rescued it (`rescued`). Reset per conversation by [`reset`], drained by
+/// [`take_no_tool_stats`] on the same worker thread — same handoff discipline as the dialogue store.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct NoToolStats {
+    pub fired: bool,
+    pub rescued: bool,
+}
+
+thread_local! {
+    static NO_TOOL_STATS: std::cell::Cell<NoToolStats> =
+        const { std::cell::Cell::new(NoToolStats { fired: false, rescued: false }) };
+}
+
+/// The reader answered without any tool call (from memory). Idempotent within a conversation.
+pub fn mark_no_tool_gate_fired() {
+    NO_TOOL_STATS.with(|s| {
+        let mut v = s.get();
+        v.fired = true;
+        s.set(v);
+    });
+}
+
+/// After the guard fired, a resample produced a tool call (the from-memory answer was rescued).
+pub fn mark_no_tool_rescued() {
+    NO_TOOL_STATS.with(|s| {
+        let mut v = s.get();
+        v.rescued = true;
+        s.set(v);
+    });
+}
+
+/// Drain this thread's stats (leaving them reset), for the case-result builder.
+pub fn take_no_tool_stats() -> NoToolStats {
+    NO_TOOL_STATS.with(|s| s.replace(NoToolStats::default()))
+}
+
 /// Clear the calling thread's reader-dialogue store. Called by
 /// `accounting::reset_conversation_prefix` at the start of every conversation so a fresh
 /// seed/doc/case never inherits the previous conversation's dialogue — keeping the store's
 /// per-conversation reset behavior identical to when it lived alongside `PREV_PROMPT_TOKENS`.
 pub(crate) fn reset() {
     READER_DIALOGUE.with(|d| d.borrow_mut().clear());
+    NO_TOOL_STATS.with(|s| s.set(NoToolStats::default()));
 }
 
 #[cfg(test)]
@@ -56,5 +95,22 @@ mod tests {
         );
         // take drained it
         assert!(take_reader_dialogue().is_empty());
+    }
+
+    #[test]
+    fn no_tool_stats_mark_take_roundtrip_and_reset() {
+        // Reset (per-conversation) clears the stats; marks accumulate; take drains.
+        reset_conversation_prefix();
+        assert_eq!(take_no_tool_stats(), NoToolStats::default());
+        mark_no_tool_gate_fired();
+        mark_no_tool_rescued();
+        let s = take_no_tool_stats();
+        assert!(s.fired && s.rescued);
+        // take drained it
+        assert_eq!(take_no_tool_stats(), NoToolStats::default());
+        // reset also clears without a take
+        mark_no_tool_gate_fired();
+        reset_conversation_prefix();
+        assert_eq!(take_no_tool_stats(), NoToolStats::default());
     }
 }
