@@ -1370,6 +1370,9 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 chunk_paths,
                 ranked_sources,
                 dialogue: reader_dialogue,
+                // Placeholder — wired to the real drained stats in the no-tool-gate wiring task.
+                answered_without_retrieval: false,
+                no_tool_rescued: false,
             };
             write_case(&cases_dir, &r)
                 .with_context(|| format!("persisting case {} to {}", r.id, cases_dir.display()))?;
