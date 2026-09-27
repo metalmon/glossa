@@ -1409,7 +1409,7 @@ fn normalize_tokens(s: &str) -> Vec<String> {
 }
 
 /// Levenshtein edit distance between two strings, counted in Unicode scalar values.
-fn levenshtein(a: &str, b: &str) -> usize {
+pub(crate) fn levenshtein(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
     let (alen, blen) = (a.len(), b.len());

@@ -504,7 +504,7 @@ description = "Run a read-only SQL SELECT over the reasoning graph to compute/ag
 parameters = "tools/sql.json"
 
 [tools.verify]
-description = "Check whether an answer is grounded in the cited chunks; returns serve/abstain. Pass the final answer and the chunk paths it rests on."
+description = "Check text against the knowledge base. WITH chunk_paths: gate whether the answer is grounded in those cited chunks (serve/abstain) — pass the final answer and the chunk paths it rests on. WITHOUT chunk_paths: check whether the text's terms exist in the KB vocabulary and get did-you-mean suggestions for unknown/misspelled ones."
 parameters = "tools/verify.json"
 
 [tools.done]

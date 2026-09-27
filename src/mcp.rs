@@ -1038,15 +1038,15 @@ pub(crate) struct GlossaryArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct VerifyArgs {
     #[schemars(
-        description = "The final answer to gate (submit exactly what you would send the user)."
+        description = "The text to check: with chunk_paths, the final answer to gate (submit exactly what you would send the user); without chunk_paths, a question/claim whose terms are checked against the KB vocabulary."
     )]
-    pub answer: String,
+    pub text: String,
     #[serde(
         default,
         deserialize_with = "crate::json_util::deserialize_opt_vec_string_loose"
     )]
     #[schemars(
-        description = "The chunk paths the answer is grounded in, as `path#loc`. More than one ⇒ multihop."
+        description = "The chunk paths the answer is grounded in, as `path#loc`. More than one ⇒ multihop. Omit to instead check the text's terms against the KB vocabulary."
     )]
     pub chunk_paths: Option<Vec<String>>,
 }
@@ -1599,7 +1599,7 @@ impl GlossaServer {
     // keep in sync with registry::DESC_VERIFY (see search's comment above for why this is a literal;
     // the mcp_advertised_set_matches_catalog_full_profile test enforces byte-equality with the catalog constant).
     #[tool(
-        description = "Check whether an answer is grounded in the cited chunks; returns serve/abstain. Pass the final answer and the chunk paths it rests on."
+        description = "Check text against the knowledge base. WITH chunk_paths: gate whether the answer is grounded in those cited chunks (serve/abstain) — pass the final answer and the chunk paths it rests on. WITHOUT chunk_paths: check whether the text's terms exist in the KB vocabulary and get did-you-mean suggestions for unknown/misspelled ones."
     )]
     async fn verify(
         &self,
@@ -1607,7 +1607,17 @@ impl GlossaServer {
     ) -> Result<CallToolResult, McpError> {
         let glossa_dir = self.state_base.join(".glossa");
         let paths = a.chunk_paths.unwrap_or_default();
-        let (outcome, n_chunks) = crate::gate::verify_outcome(&glossa_dir, &a.answer, &paths)
+        // No chunks ⇒ chunk-free mode: check the text's terms against the KB vocabulary
+        // (did-you-mean for unknown/misspelled query terms) rather than grounding an answer.
+        if paths.is_empty() {
+            let h = self.handle().map_err(internal)?;
+            let report = crate::gate::question::check_question(&h.graph, &a.text)
+                .map_err(|e| McpError::internal_error(format!("verify: {e}"), None))?;
+            let json = serde_json::to_value(report)
+                .map_err(|e| McpError::internal_error(format!("verify: {e}"), None))?;
+            return Ok(CallToolResult::success(vec![Content::json(json)?]));
+        }
+        let (outcome, n_chunks) = crate::gate::verify_outcome(&glossa_dir, &a.text, &paths)
             .map_err(|e| McpError::internal_error(format!("verify: {e}"), None))?;
         let json = project_verify(self.profile, &outcome, n_chunks);
         Ok(CallToolResult::success(vec![Content::json(json)?]))
