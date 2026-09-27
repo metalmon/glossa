@@ -1154,6 +1154,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 kb_eval::backend::agent_loop::CapturedEpisode, // trajectory (empty unless captured)
                 bool,        // errored (reader endpoint failure)
                 Vec<String>, // ranked_sources (deduped retrieved doc paths, score/coverage ranked)
+                Vec<(String, String)>, // reader<->user_sim dialogue (empty unless a user_sim gate deflected)
             );
             let run_sample = |capture: bool| -> Sample {
                 // Reset THIS worker thread's TZ episode grouping before the reader runs, so a stale
@@ -1295,6 +1296,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                     episode,
                     errored,
                     ranked_sources,
+                    reader_dialogue,
                 )
             };
 
@@ -1312,6 +1314,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 episode,
                 errored,
                 ranked_sources,
+                reader_dialogue,
             ) = run_sample(args.capture);
 
             // Capture: record sample 0's trajectory + any additional samples (varied outcomes → DPO).
@@ -1366,6 +1369,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 answerable: q.answerable,
                 chunk_paths,
                 ranked_sources,
+                dialogue: reader_dialogue,
             };
             write_case(&cases_dir, &r)
                 .with_context(|| format!("persisting case {} to {}", r.id, cases_dir.display()))?;

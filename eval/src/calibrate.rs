@@ -1267,6 +1267,7 @@ mod tests {
             final_answer: "the code is pp.19.00.00.00".into(),
             chunk_paths: vec!["a.md#1".into()],
             ranked_sources: vec![],
+            dialogue: vec![],
         };
         write_case(&cases_dir, &case).unwrap();
         (run_dir, corpus_glossa, dir)
@@ -1303,6 +1304,7 @@ mod tests {
             final_answer: String::new(),
             chunk_paths: vec![],
             ranked_sources: vec![],
+            dialogue: vec![],
         };
         write_case(&cases_dir, &errored).unwrap();
         errored.id = "q3".into(); // empty final_answer, not errored — also skipped
@@ -1336,6 +1338,7 @@ mod tests {
             final_answer: "some answer".into(),
             chunk_paths: vec![],
             ranked_sources: vec![],
+            dialogue: vec![],
         };
         write_case(&cases_dir, &hallucinated).unwrap();
 

@@ -60,6 +60,15 @@ pub struct CaseResult {
     /// Deduped retrieved source docs, score-ranked (search) then coverage (grep/glob).
     #[serde(default)]
     pub ranked_sources: Vec<String>,
+    /// The captured reader<->`user_sim` dialogue as `(role, text)` turns, in order. Under a
+    /// `[user_sim]` gate the reader's SUBSTANTIVE answer lives in an earlier assistant turn while
+    /// `final_answer` holds only the closing pleasantry — the judge already grades this dialogue
+    /// (`judge::build_user`'s `DIALOGUE:` block), so persist it here too, otherwise a run's case JSON
+    /// shows only the sign-off and an audit can't see what the judge actually scored. Empty when no
+    /// `user_sim` gate deflected (or none is configured). `#[serde(default)]` keeps pre-existing
+    /// persisted cases loadable.
+    #[serde(default)]
+    pub dialogue: Vec<(String, String)>,
 }
 
 fn default_true() -> bool {
@@ -621,6 +630,42 @@ mod tests {
         let c: CaseResult = serde_json::from_str(old).unwrap();
         assert_eq!(c.final_answer, "");
         assert!(c.chunk_paths.is_empty());
+        // an older case also lacks `dialogue` → serde default keeps it loadable as empty
+        assert!(c.dialogue.is_empty());
+    }
+
+    #[test]
+    fn caseresult_persists_user_sim_dialogue() {
+        // A user_sim run's substantive answer lives in the reader<->user_sim dialogue, NOT in
+        // `final_answer` (which is only the closing turn). Persist it so audits see what the judge
+        // saw instead of just the sign-off.
+        let c = CaseResult {
+            id: "x".into(),
+            verdict: Verdict::Wrong,
+            reason: "r".into(),
+            f1: 0.0,
+            em: 0.0,
+            tools: vec![],
+            answer: "Great, that's sorted, thanks!".into(),
+            transcript: String::new(),
+            judge_raw: String::new(),
+            hop_type: "multihop".into(),
+            needs_graph: "no".into(),
+            errored: false,
+            answerable: true,
+            final_answer: "Great, that's sorted, thanks!".into(),
+            chunk_paths: vec![],
+            ranked_sources: vec![],
+            dialogue: vec![
+                ("assistant".into(), "The substantive answer is X.".into()),
+                ("user".into(), "and what about Y?".into()),
+            ],
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        let back: CaseResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.dialogue.len(), 2);
+        assert_eq!(back.dialogue[0].0, "assistant");
+        assert_eq!(back.dialogue[0].1, "The substantive answer is X.");
     }
 
     #[test]
@@ -689,6 +734,7 @@ mod tests {
                 final_answer: String::new(),
                 chunk_paths: Vec::new(),
                 ranked_sources: Vec::new(),
+                dialogue: Vec::new(),
             },
             CaseResult {
                 id: "q2".into(),
@@ -707,6 +753,7 @@ mod tests {
                 final_answer: String::new(),
                 chunk_paths: Vec::new(),
                 ranked_sources: Vec::new(),
+                dialogue: Vec::new(),
             },
         ];
         let p = write_run(dir.path(), "t1", &RunMeta::test(), &rs).unwrap();
@@ -742,6 +789,7 @@ mod tests {
             final_answer: String::new(),
             chunk_paths: Vec::new(),
             ranked_sources: Vec::new(),
+            dialogue: Vec::new(),
         }
     }
 
