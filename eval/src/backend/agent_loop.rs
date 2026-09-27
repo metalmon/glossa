@@ -402,10 +402,14 @@ pub fn run_agent_loop_capturing(
     // `seed` sent the server draws a fresh sample at temp>0, a chance to retrieve this time), up to
     // a budget, then accept. Armed only until the first tool call and bounded by the counter, so a
     // multi-turn user_sim dialogue cannot re-spend the budget. Budget default 2, env-overridable.
+    // Cap the resample budget at `max_rounds - 1` so at least one round remains for the
+    // fall-through accept path: otherwise resamples consume every round and the answer takes the
+    // trailing "give up" nudge instead of a clean accept.
     let max_notool: usize = std::env::var("KB_EVAL_MAX_NOTOOL_RESAMPLE")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(2);
+        .unwrap_or(2)
+        .min(max_rounds.saturating_sub(1));
     let mut tools_called_ever = false;
     let mut no_tool_gate_fired = false;
     let mut no_tool_resamples = 0usize;
@@ -516,6 +520,11 @@ pub fn run_agent_loop_capturing(
         // the conversation.
         if no_tool_gate_fired && !tools_called_ever {
             crate::backend::dialogue::mark_no_tool_rescued();
+            // Attribute to the resample only when one actually ran; a tool call reached after a
+            // `user_sim` deflection (no resample) grounds the case but is not a resample rescue.
+            if no_tool_resamples > 0 {
+                crate::backend::dialogue::mark_no_tool_resample_rescued();
+            }
         }
         tools_called_ever = true;
 
@@ -1667,6 +1676,76 @@ mod tests {
         )
         .unwrap();
         assert_eq!(transport.calls.borrow().len(), 3); // default budget 2 => initial + 2 resamples
+        std::env::remove_var("KB_EVAL_MAX_NOTOOL_RESAMPLE");
+    }
+
+    #[test]
+    fn resample_rescued_excludes_user_sim_driven_retrieval() {
+        let _env = NOTOOL_ENV_LOCK.lock().unwrap();
+        reset_conversation_prefix();
+        std::env::set_var("KB_EVAL_MAX_NOTOOL_RESAMPLE", "0"); // no blind resample
+        let ep = test_endpoint();
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        // A from-memory non-answer fires the guard (budget 0 -> no resample); user_sim deflects it;
+        // the reader THEN calls a tool. That retrieval is user_sim-driven, not resample-driven, so
+        // `rescued` (grounded-after-fire, used for the N metric) is true but `resample_rescued`
+        // (the M metric) must be false.
+        let transport = MockTransport::new(vec![
+            reply_text("QUESTION: who is Bob?"),
+            reply_tool_call("c1", "search", json!({ "q": "bob" })),
+            reply_text("ANSWER: Bob"),
+        ]);
+        let gate = MockGate::new(vec![Ok(Some("please just answer".to_string())), Ok(None)]);
+        let out = run_agent_loop(
+            &transport,
+            &ep,
+            None,
+            vec![json!({"role":"user","content":"who is Bob?"})],
+            None,
+            exec,
+            nudge,
+            10,
+            Some(&gate),
+            true,
+        )
+        .unwrap();
+        assert_eq!(out, "ANSWER: Bob");
+        let s = take_no_tool_stats();
+        assert!(s.fired, "guard fired on the from-memory non-answer");
+        assert!(s.rescued, "it did eventually retrieve (grounded)");
+        assert!(
+            !s.resample_rescued,
+            "retrieval was user_sim-driven, not a resample"
+        );
+        std::env::remove_var("KB_EVAL_MAX_NOTOOL_RESAMPLE");
+    }
+
+    #[test]
+    fn resample_budget_is_capped_below_max_rounds() {
+        let _env = NOTOOL_ENV_LOCK.lock().unwrap();
+        reset_conversation_prefix();
+        std::env::set_var("KB_EVAL_MAX_NOTOOL_RESAMPLE", "10"); // larger than max_rounds
+        let ep = test_endpoint();
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        let transport = MockTransport::new(vec![reply_text("from memory"); 8]);
+        let out = run_agent_loop(
+            &transport,
+            &ep,
+            None,
+            vec![],
+            None,
+            exec,
+            nudge,
+            3,
+            None,
+            true,
+        )
+        .unwrap();
+        // Budget capped to max_rounds-1 = 2, so initial + 2 resamples = 3 calls, then the clean
+        // accept path (NOT the trailing give-up nudge, which would be a 4th call). Returns the
+        // from-memory answer verbatim.
+        assert_eq!(out, "from memory");
+        assert_eq!(transport.calls.borrow().len(), 3);
         std::env::remove_var("KB_EVAL_MAX_NOTOOL_RESAMPLE");
     }
 }

@@ -1210,7 +1210,9 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 // reader answered from memory with no retrieval, and whether a resample rescued it.
                 let no_tool = kb_eval::backend::dialogue::take_no_tool_stats();
                 let answered_without_retrieval = no_tool.fired && !no_tool.rescued;
-                let no_tool_rescued = no_tool.rescued;
+                // M metric ("rescued by resample") counts only resample-driven rescues, not
+                // user_sim-driven retrievals that also ground the case.
+                let no_tool_rescued = no_tool.resample_rescued;
 
                 let golds = gold_forms(q);
                 // Endpoint-errored rollouts produced no answer — no EM/F1 sample (0.0) and the

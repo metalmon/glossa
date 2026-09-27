@@ -33,12 +33,24 @@ pub fn take_reader_dialogue() -> Vec<(String, String)> {
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct NoToolStats {
     pub fired: bool,
+    /// A tool call arrived after the guard fired, so the case ended grounded — by ANY mechanism
+    /// (a blind resample, or a `user_sim` deflection that provoked retrieval). Drives the
+    /// "answered without retrieval" (N) metric via `fired && !rescued`.
     pub rescued: bool,
+    /// A subset of `rescued`: the grounding tool call arrived after at least one blind resample,
+    /// i.e. the resample itself is what rescued the from-memory answer. Drives the "rescued by
+    /// resample" (M) metric, so it is not inflated by `user_sim`-driven retrievals.
+    pub resample_rescued: bool,
 }
 
 thread_local! {
-    static NO_TOOL_STATS: std::cell::Cell<NoToolStats> =
-        const { std::cell::Cell::new(NoToolStats { fired: false, rescued: false }) };
+    static NO_TOOL_STATS: std::cell::Cell<NoToolStats> = const {
+        std::cell::Cell::new(NoToolStats {
+            fired: false,
+            rescued: false,
+            resample_rescued: false,
+        })
+    };
 }
 
 /// The reader answered without any tool call (from memory). Idempotent within a conversation.
@@ -50,11 +62,21 @@ pub fn mark_no_tool_gate_fired() {
     });
 }
 
-/// After the guard fired, a resample produced a tool call (the from-memory answer was rescued).
+/// After the guard fired, a tool call arrived (by any mechanism) — the case ended grounded.
 pub fn mark_no_tool_rescued() {
     NO_TOOL_STATS.with(|s| {
         let mut v = s.get();
         v.rescued = true;
+        s.set(v);
+    });
+}
+
+/// After the guard fired, a tool call arrived following at least one blind resample — the resample
+/// is what rescued the from-memory answer (the M metric, distinct from a `user_sim`-driven rescue).
+pub fn mark_no_tool_resample_rescued() {
+    NO_TOOL_STATS.with(|s| {
+        let mut v = s.get();
+        v.resample_rescued = true;
         s.set(v);
     });
 }
