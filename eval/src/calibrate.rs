@@ -819,7 +819,11 @@ pub fn render_ascii(bucket: &str, rep: &BucketReport) -> String {
 /// Render a self-contained SVG line chart (no external refs — no `xlink:href`, no `http(s)://` in
 /// any attribute value; the `xmlns` declaration is a namespace, not a network fetch) with two
 /// polylines: answered% (green) and error% (red) against threshold, left-to-right.
-pub fn render_svg(bucket: &str, rep: &BucketReport) -> String {
+/// One bucket's panel: an answered% (green) and error% (red) curve over the swept threshold. Emitted
+/// as a NESTED `<svg>` positioned at `y_offset` so several panels stack inside one document root (see
+/// [`wrap_svg_document`]) — a nested `<svg>` is valid and keeps this self-contained. `y_offset` is
+/// the panel's top edge; each panel is 220 tall.
+pub fn render_svg(bucket: &str, rep: &BucketReport, y_offset: f32) -> String {
     let mut pts_a = String::new();
     let mut pts_e = String::new();
     for (i, p) in rep.points.iter().enumerate() {
@@ -828,9 +832,21 @@ pub fn render_svg(bucket: &str, rep: &BucketReport) -> String {
         pts_e.push_str(&format!("{x:.0},{:.0} ", 180.0 - p.error_pct * 160.0));
     }
     format!(
-        "<svg xmlns='http://www.w3.org/2000/svg' width='400' height='220'><title>{bucket}</title>\
+        "<svg xmlns='http://www.w3.org/2000/svg' width='400' height='220' y='{y_offset:.0}'>\
+        <title>{bucket}</title>\
+        <text x='40' y='14' font-size='11' fill='#333'>{bucket}: answered% (green) vs wrong% (red)</text>\
         <polyline fill='none' stroke='#2a7' points='{pts_a}'/>\
         <polyline fill='none' stroke='#c33' points='{pts_e}'/></svg>"
+    )
+}
+
+/// Wrap per-bucket [`render_svg`] panels (already offset by `y`) in ONE root `<svg>` sized for all
+/// `n_panels` stacked vertically. A calibration figure with several buckets must be a single XML
+/// document — concatenating full `<svg>` roots produces sibling roots that viewers reject.
+pub fn wrap_svg_document(panels: &str, n_panels: usize) -> String {
+    format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' width='400' height='{}'>{panels}</svg>",
+        n_panels.max(1) * 220
     )
 }
 
@@ -1026,7 +1042,8 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
     let want_single = args.bucket == "single" || args.bucket == "both";
     let want_multi = args.bucket == "multi" || args.bucket == "both";
 
-    let mut svg_report = String::new();
+    let mut svg_panels = String::new();
+    let mut svg_bucket_count = 0usize;
     let mut json_buckets = serde_json::Map::new();
     // Weighted (by bucket universe size `n`) average of the recommended operating point across
     // every bucket actually swept, reported in `[verify.calibration]` as the single summary
@@ -1050,7 +1067,8 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
             .collect();
         let rep = sweep(&bucket_cases, args.folds);
         let cv = sweep_cv(&bucket_cases, args.folds, budget);
-        svg_report.push_str(&render_svg(name, &rep));
+        svg_panels.push_str(&render_svg(name, &rep, svg_bucket_count as f32 * 220.0));
+        svg_bucket_count += 1;
 
         let recommended = rep.recommended_for(budget);
         if let Some(t) = recommended {
@@ -1099,6 +1117,7 @@ pub fn run(args: CalibrateArgs) -> anyhow::Result<()> {
     }
     println!();
 
+    let svg_report = wrap_svg_document(&svg_panels, svg_bucket_count);
     std::fs::write(out_dir.join("calibration.svg"), &svg_report)
         .with_context(|| format!("writing {}", out_dir.join("calibration.svg").display()))?;
     let json_doc = serde_json::json!({
@@ -1435,7 +1454,7 @@ mod tests {
                 served: 1,
             }],
         };
-        let svg = super::render_svg("single", &rep);
+        let svg = super::render_svg("single", &rep, 0.0);
         assert!(svg.starts_with("<svg") && svg.contains("</svg>"));
         // "no external refs" means no xlink:href / http(s):// URL fetched by the renderer — the
         // mandatory `xmlns='http://www.w3.org/2000/svg'` namespace declaration is not a network
@@ -1443,6 +1462,39 @@ mod tests {
         assert!(!svg.contains("xlink:href"));
         let without_namespace = svg.replacen("http://www.w3.org/2000/svg", "", 1);
         assert!(!without_namespace.contains("http://") && !without_namespace.contains("https://"));
+    }
+
+    #[test]
+    fn svg_document_is_single_root() {
+        // Regression: the report used to concatenate one full <svg> per bucket, producing TWO
+        // sibling root elements — malformed XML that viewers reject. The document must have ONE
+        // root wrapping the per-bucket panels (nested <svg>s stacked vertically).
+        let rep = super::BucketReport {
+            n: 1,
+            points: vec![super::Point {
+                threshold: 0.4,
+                answered_pct: 0.5,
+                error_pct: 0.1,
+                served: 1,
+            }],
+        };
+        let p1 = super::render_svg("single", &rep, 0.0);
+        let p2 = super::render_svg("multi", &rep, 220.0);
+        let doc = super::wrap_svg_document(&format!("{p1}{p2}"), 2);
+        // One outer root, sized for both stacked panels (2 * 220).
+        assert!(
+            doc.starts_with("<svg xmlns='http://www.w3.org/2000/svg' width='400' height='440'>"),
+            "got: {}",
+            &doc[..doc.len().min(80)]
+        );
+        assert!(doc.ends_with("</svg>"));
+        // Exactly three <svg> tags: the wrapper plus the two nested panels (the old bug had two).
+        assert_eq!(doc.matches("<svg").count(), 3);
+        // Panels carry distinct y-offsets so they stack instead of overlapping.
+        assert!(
+            p2.contains("y='220'"),
+            "second panel must be offset, got: {p2}"
+        );
     }
 
     /// A `ModeSelection` fixture for `write_threshold` tests: `ac` mode, no nli thresholds (the
