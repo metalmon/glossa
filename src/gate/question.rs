@@ -119,14 +119,21 @@ mod tests {
     #[test]
     fn known_terms_are_not_reported() {
         let r = classify_terms("setpoint modbus", &vocab(&["setpoint", "modbus"]));
-        assert!(r.terms.is_empty(), "all grounded ⇒ empty report, got {:?}", r.terms);
+        assert!(
+            r.terms.is_empty(),
+            "all grounded ⇒ empty report, got {:?}",
+            r.terms
+        );
     }
 
     #[test]
     fn typo_reported_with_near_suggestion() {
         let r = classify_terms("setpiont modbus", &vocab(&["setpoint", "modbus"]));
         let by: HashMap<&str, &TermCheck> = r.terms.iter().map(|t| (t.term.as_str(), t)).collect();
-        assert!(!by.contains_key("modbus"), "grounded term must not be reported");
+        assert!(
+            !by.contains_key("modbus"),
+            "grounded term must not be reported"
+        );
         let sp = by.get("setpiont").expect("typo must be reported");
         assert!(
             sp.suggestions.contains(&"setpoint".to_string()),
@@ -141,7 +148,11 @@ mod tests {
         let r = classify_terms("jargonword modbus", &vocab(&["setpoint", "modbus"]));
         let by: HashMap<&str, &TermCheck> = r.terms.iter().map(|t| (t.term.as_str(), t)).collect();
         let j = by.get("jargonword").expect("absent term must be reported");
-        assert!(j.suggestions.is_empty(), "no near match ⇒ empty, got {:?}", j.suggestions);
+        assert!(
+            j.suggestions.is_empty(),
+            "no near match ⇒ empty, got {:?}",
+            j.suggestions
+        );
     }
 
     #[test]
@@ -151,7 +162,14 @@ mod tests {
         let r = classify_terms("setpointer", &vocab(&["set", "setpoint"]));
         let t = &r.terms[0];
         assert_eq!(t.term, "setpointer");
-        assert!(t.suggestions.contains(&"setpoint".to_string()), "got {:?}", t.suggestions);
-        assert!(!t.suggestions.contains(&"set".to_string()), "must NOT offer the short fragment 'set'");
+        assert!(
+            t.suggestions.contains(&"setpoint".to_string()),
+            "got {:?}",
+            t.suggestions
+        );
+        assert!(
+            !t.suggestions.contains(&"set".to_string()),
+            "must NOT offer the short fragment 'set'"
+        );
     }
 }

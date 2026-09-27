@@ -431,8 +431,11 @@ pub fn run_agent_loop_capturing(
                         // previous one. Repeating the same answer while the sim keeps deflecting is a
                         // stuck dialogue — after MAX_SIM_REPEAT identical repeats, accept the answer
                         // and stop instead of grinding out the whole `max_rounds` budget.
-                        let norm: String =
-                            text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+                        let norm: String = text
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .to_lowercase();
                         if sim_last_answer.as_deref() == Some(norm.as_str()) {
                             sim_repeat += 1;
                         } else {
@@ -442,7 +445,8 @@ pub fn run_agent_loop_capturing(
                         if sim_repeat >= MAX_SIM_REPEAT {
                             if sim_deflected {
                                 crate::backend::dialogue::push_reader_dialogue_turn(
-                                    "assistant", &text,
+                                    "assistant",
+                                    &text,
                                 );
                             }
                             record_episode(&mut capture, system, tools, &messages, &text);
@@ -1050,7 +1054,11 @@ mod tests {
     fn user_sim_stops_on_repeated_identical_answer() {
         let ep = test_endpoint();
         // 10 identical stuck answers available; the guard should consume only the first few.
-        let transport = MockTransport::new(vec![reply_text("No information found in the knowledge base"); 10]);
+        let transport =
+            MockTransport::new(vec![
+                reply_text("No information found in the knowledge base");
+                10
+            ]);
         // Gate always deflects (it never gets a substantive answer to accept).
         let gate = MockGate::new(
             std::iter::repeat_with(|| Ok(Some("how do I reach them, then?".to_string())))

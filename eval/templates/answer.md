@@ -16,6 +16,13 @@ Pull 1–3 key words from the question. For each, call `glossary(<word>, <the wh
 If `glossary()` returned a chain to an answer-node, follow it: `reach(<node>, <relation>)`, then open the terminal's source and read it (the pointer rule above). A grounded typed chain that reaches the answer is usually enough on its own.
 When you have found a first, partial fact but not yet the answer, call `glossary()` again with that found entity as the term (first argument) and the original question as the second — the graph then surfaces the node connecting your found entity to the question (meeting in the middle), which is often the answer you are missing.
 
+TERM CHECK (verify) — before SEARCH; only if the `verify` tool is in your toolset
+`verify` has a second use: called with the text alone (no chunk paths) it checks whether the question's own terms exist in the corpus vocabulary — so you don't waste search rounds on a word the corpus never uses.
+1. Call `verify(<the question, or its key terms>)` with no chunk paths.
+2. It returns ONLY the ungrounded terms — words the corpus does not contain. An empty list ⇒ every term is grounded; go to SEARCH as-is.
+3. A returned term that carries a near `suggestion` is almost certainly a typo — search the suggested corpus word instead of the original.
+4. A returned term with no suggestion is jargon or out-of-corpus wording — do NOT build a literal query on it; go back to `glossary()` for the official term, or search a synonym.
+
 STEP 3. SEARCH
 If the direct chain is quiet, `reach` over the flat facts for the same entity. If the graph is quiet, go to full text: `search` for concepts, `grep` for exact tokens (codes, versions, part numbers), `read` a chunk. `sql(...)` when the answer is a ranking or extreme (which / earliest / largest / first) among candidates — let SQL over the graph decide. It is SQLite (not PostgreSQL): `LIKE` is case-insensitive, including non-ASCII; `ILIKE` is accepted and treated as `LIKE`; no trailing `;` is needed.
 Build 2–3 queries: by the official term; by the user's word; by a related term. Before each: "SEARCHING: <what and why>". After each result: "FOUND: — on topic" or "FOUND: empty/off". Collect the "on topic" fragments into "EXTRACT: 1) … 2) …" — verbatim sentences. Empty after all queries → one extra round of 2 queries on different terms; empty again → STEP 5.
