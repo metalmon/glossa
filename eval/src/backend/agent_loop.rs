@@ -375,6 +375,15 @@ pub fn run_agent_loop_capturing(
     // real assistant↔user_sim dialogue worth handing the judge (a gate that accepts the first text
     // turn just yields the final answer, which the judge already sees). See the `user_sim` arms below.
     let mut sim_deflected = false;
+    // user_sim degenerate-loop guard: when the reader emits the SAME text-only answer on
+    // consecutive deflected turns, the dialogue is making no progress (e.g. the reader repeats
+    // a "no information found" reply while the sim keeps re-asking). Stop deflecting after MAX_SIM_REPEAT
+    // identical repeats instead of grinding out the whole `max_rounds` budget. `sim_last_answer`
+    // holds the whitespace/case-normalized previous text-only answer; `sim_repeat` counts how many
+    // times in a row it has recurred. eval-only (there is no user_sim gate in prod).
+    const MAX_SIM_REPEAT: usize = 2;
+    let mut sim_last_answer: Option<String> = None;
+    let mut sim_repeat: usize = 0;
 
     for _ in 0..max_rounds {
         let reply: TurnReply =
@@ -418,6 +427,27 @@ pub fn run_agent_loop_capturing(
                     // a round, so this is naturally capped by `max_rounds`. Record BOTH text turns
                     // (assistant + user_sim) into the dialogue the judge will later see.
                     Ok(Some(deflection)) => {
+                        // No-progress guard: normalize this text-only answer and compare to the
+                        // previous one. Repeating the same answer while the sim keeps deflecting is a
+                        // stuck dialogue — after MAX_SIM_REPEAT identical repeats, accept the answer
+                        // and stop instead of grinding out the whole `max_rounds` budget.
+                        let norm: String =
+                            text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+                        if sim_last_answer.as_deref() == Some(norm.as_str()) {
+                            sim_repeat += 1;
+                        } else {
+                            sim_repeat = 0;
+                            sim_last_answer = Some(norm);
+                        }
+                        if sim_repeat >= MAX_SIM_REPEAT {
+                            if sim_deflected {
+                                crate::backend::dialogue::push_reader_dialogue_turn(
+                                    "assistant", &text,
+                                );
+                            }
+                            record_episode(&mut capture, system, tools, &messages, &text);
+                            return Ok(text);
+                        }
                         crate::backend::dialogue::push_reader_dialogue_turn("assistant", &text);
                         crate::backend::dialogue::push_reader_dialogue_turn("user", &deflection);
                         sim_deflected = true;
@@ -1010,6 +1040,42 @@ mod tests {
             Some("I don't know, that's what I was hoping you'd tell me.")
         );
         assert_eq!(*gate.calls.borrow(), 2);
+    }
+
+    /// Degenerate dialogue: the reader repeats the SAME text-only answer while the gate keeps
+    /// deflecting (the "no information found" <-> "how do I reach them?" loop that ran to max_rounds).
+    /// The loop must detect the no-progress repetition and stop after MAX_SIM_REPEAT identical
+    /// answers rather than grinding out the whole `max_rounds` budget.
+    #[test]
+    fn user_sim_stops_on_repeated_identical_answer() {
+        let ep = test_endpoint();
+        // 10 identical stuck answers available; the guard should consume only the first few.
+        let transport = MockTransport::new(vec![reply_text("No information found in the knowledge base"); 10]);
+        // Gate always deflects (it never gets a substantive answer to accept).
+        let gate = MockGate::new(
+            std::iter::repeat_with(|| Ok(Some("how do I reach them, then?".to_string())))
+                .take(10)
+                .collect(),
+        );
+        let exec = |_: &str, _: &Value| (String::new(), Vec::new());
+        let out = run_agent_loop(
+            &transport,
+            &ep,
+            None,
+            vec![json!({"role":"user","content":"give me a solution"})],
+            None,
+            exec,
+            nudge,
+            8, // max_rounds high enough that only the repeat-guard can stop the loop early
+            Some(&gate),
+        )
+        .unwrap();
+        assert_eq!(out, "No information found in the knowledge base");
+        assert_eq!(
+            transport.calls.borrow().len(),
+            3,
+            "must stop after MAX_SIM_REPEAT identical answers, not grind to max_rounds"
+        );
     }
 
     /// The gate signals DONE (`Ok(None)`) on the first text-only turn -> the loop returns that text,
