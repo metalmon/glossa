@@ -377,7 +377,7 @@ pub fn run_agent_loop_capturing(
     let mut sim_deflected = false;
     // user_sim degenerate-loop guard: when the reader emits the SAME text-only answer on
     // consecutive deflected turns, the dialogue is making no progress (e.g. the reader repeats
-    // "нет информации" while the sim keeps re-asking). Stop deflecting after MAX_SIM_REPEAT
+    // a "no information found" reply while the sim keeps re-asking). Stop deflecting after MAX_SIM_REPEAT
     // identical repeats instead of grinding out the whole `max_rounds` budget. `sim_last_answer`
     // holds the whitespace/case-normalized previous text-only answer; `sim_repeat` counts how many
     // times in a row it has recurred. eval-only (there is no user_sim gate in prod).
@@ -1043,17 +1043,17 @@ mod tests {
     }
 
     /// Degenerate dialogue: the reader repeats the SAME text-only answer while the gate keeps
-    /// deflecting (the sherpa-52 "нет информации" ↔ "как связаться" loop that ran to max_rounds).
+    /// deflecting (the "no information found" <-> "how do I reach them?" loop that ran to max_rounds).
     /// The loop must detect the no-progress repetition and stop after MAX_SIM_REPEAT identical
     /// answers rather than grinding out the whole `max_rounds` budget.
     #[test]
     fn user_sim_stops_on_repeated_identical_answer() {
         let ep = test_endpoint();
         // 10 identical stuck answers available; the guard should consume only the first few.
-        let transport = MockTransport::new(vec![reply_text("Нет информации в базе"); 10]);
+        let transport = MockTransport::new(vec![reply_text("No information found in the knowledge base"); 10]);
         // Gate always deflects (it never gets a substantive answer to accept).
         let gate = MockGate::new(
-            std::iter::repeat_with(|| Ok(Some("как мне связаться?".to_string())))
+            std::iter::repeat_with(|| Ok(Some("how do I reach them, then?".to_string())))
                 .take(10)
                 .collect(),
         );
@@ -1062,7 +1062,7 @@ mod tests {
             &transport,
             &ep,
             None,
-            vec![json!({"role":"user","content":"дай решение"})],
+            vec![json!({"role":"user","content":"give me a solution"})],
             None,
             exec,
             nudge,
@@ -1070,7 +1070,7 @@ mod tests {
             Some(&gate),
         )
         .unwrap();
-        assert_eq!(out, "Нет информации в базе");
+        assert_eq!(out, "No information found in the knowledge base");
         assert_eq!(
             transport.calls.borrow().len(),
             3,
