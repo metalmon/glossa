@@ -302,6 +302,8 @@ impl OpenAiBackend {
             nba,
             self.max_rounds,
             user_sim,
+            // Reader path: gate a from-memory answer that never retrieved (see agent_loop guard).
+            true,
             capture,
         )?;
         Ok(prompt::parse_answer(&raw))

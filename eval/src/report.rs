@@ -69,6 +69,15 @@ pub struct CaseResult {
     /// persisted cases loadable.
     #[serde(default)]
     pub dialogue: Vec<(String, String)>,
+    /// The reader answered this case with no tool call and the resample budget did not rescue it
+    /// (the whole case was answered from memory — ungrounded). `#[serde(default)]` keeps
+    /// pre-existing persisted cases loadable.
+    #[serde(default)]
+    pub answered_without_retrieval: bool,
+    /// The no-tool guard fired but a resample then produced a tool call, so the case ended
+    /// grounded. `#[serde(default)]` keeps pre-existing persisted cases loadable.
+    #[serde(default)]
+    pub no_tool_rescued: bool,
 }
 
 fn default_true() -> bool {
@@ -299,6 +308,19 @@ pub fn summary_text(results: &[CaseResult]) -> String {
     // from the graded-quality denominator above, so this makes the exclusion visible in the headline.
     if t.errored > 0 {
         pairs.push(("errored (endpoint, excluded)", t.errored.to_string()));
+    }
+    // No-tool answer guard (eval reader): cases answered from memory with no retrieval, and cases
+    // where a resample rescued that into a grounded answer. Shown only when non-zero.
+    let no_retrieval = results
+        .iter()
+        .filter(|r| r.answered_without_retrieval)
+        .count();
+    let rescued = results.iter().filter(|r| r.no_tool_rescued).count();
+    if no_retrieval > 0 {
+        pairs.push(("answered without retrieval", no_retrieval.to_string()));
+    }
+    if rescued > 0 {
+        pairs.push(("rescued by resample", rescued.to_string()));
     }
     s.push_str(&cli_fmt::summary_string(&pairs));
     s
@@ -660,6 +682,8 @@ mod tests {
                 ("assistant".into(), "The substantive answer is X.".into()),
                 ("user".into(), "and what about Y?".into()),
             ],
+            answered_without_retrieval: false,
+            no_tool_rescued: false,
         };
         let json = serde_json::to_string(&c).unwrap();
         let back: CaseResult = serde_json::from_str(&json).unwrap();
@@ -735,6 +759,8 @@ mod tests {
                 chunk_paths: Vec::new(),
                 ranked_sources: Vec::new(),
                 dialogue: Vec::new(),
+                answered_without_retrieval: false,
+                no_tool_rescued: false,
             },
             CaseResult {
                 id: "q2".into(),
@@ -754,6 +780,8 @@ mod tests {
                 chunk_paths: Vec::new(),
                 ranked_sources: Vec::new(),
                 dialogue: Vec::new(),
+                answered_without_retrieval: false,
+                no_tool_rescued: false,
             },
         ];
         let p = write_run(dir.path(), "t1", &RunMeta::test(), &rs).unwrap();
@@ -790,6 +818,8 @@ mod tests {
             chunk_paths: Vec::new(),
             ranked_sources: Vec::new(),
             dialogue: Vec::new(),
+            answered_without_retrieval: false,
+            no_tool_rescued: false,
         }
     }
 
@@ -801,6 +831,28 @@ mod tests {
             needs_graph: needs_graph.into(),
             ..case(id, verdict)
         }
+    }
+
+    #[test]
+    fn summary_reports_no_tool_gate_counts() {
+        let mut gaveup = case("g", Verdict::Wrong);
+        gaveup.answered_without_retrieval = true;
+        let mut rescued = case("r", Verdict::Correct);
+        rescued.no_tool_rescued = true;
+        let clean = case("c", Verdict::Correct);
+        let s = summary_text(&[gaveup, rescued, clean]);
+        assert!(s.contains("answered without retrieval: 1"), "got: {s}");
+        assert!(s.contains("rescued by resample: 1"), "got: {s}");
+    }
+
+    #[test]
+    fn old_case_json_without_no_tool_fields_defaults_false() {
+        // A case persisted before these fields existed must still load, defaulting to false.
+        let json = r#"{"id":"x","verdict":"Correct","reason":"","f1":0.0,"em":0.0,"tools":[],
+            "answer":"a","transcript":"","judge_raw":""}"#;
+        let r: CaseResult = serde_json::from_str(json).expect("loads with serde defaults");
+        assert!(!r.answered_without_retrieval);
+        assert!(!r.no_tool_rescued);
     }
 
     #[test]

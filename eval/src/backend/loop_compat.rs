@@ -83,6 +83,8 @@ where
     };
     crate::backend::agent_loop::run_agent_loop(
         &transport, &ep, None, messages, None, exec2, on_repeat, max_rounds, user_sim,
+        // build/reason/distil never gate on retrieval — a no-tool synthesis turn is legitimate.
+        false,
     )
 }
 

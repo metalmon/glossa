@@ -1268,6 +1268,8 @@ mod tests {
             chunk_paths: vec!["a.md#1".into()],
             ranked_sources: vec![],
             dialogue: vec![],
+            answered_without_retrieval: false,
+            no_tool_rescued: false,
         };
         write_case(&cases_dir, &case).unwrap();
         (run_dir, corpus_glossa, dir)
@@ -1305,6 +1307,8 @@ mod tests {
             chunk_paths: vec![],
             ranked_sources: vec![],
             dialogue: vec![],
+            answered_without_retrieval: false,
+            no_tool_rescued: false,
         };
         write_case(&cases_dir, &errored).unwrap();
         errored.id = "q3".into(); // empty final_answer, not errored — also skipped
@@ -1339,6 +1343,8 @@ mod tests {
             chunk_paths: vec![],
             ranked_sources: vec![],
             dialogue: vec![],
+            answered_without_retrieval: false,
+            no_tool_rescued: false,
         };
         write_case(&cases_dir, &hallucinated).unwrap();
 
