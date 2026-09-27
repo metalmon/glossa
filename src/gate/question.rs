@@ -1,13 +1,47 @@
 //! Question-term validation for the `verify` tool's chunk-free mode.
 //!
 //! When `verify` is called with a `text` but NO `chunk_paths`, we don't ground an answer against
-//! evidence — instead we surface the query terms that are NOT in the KB vocabulary (node labels +
-//! aliases), so the agent stops building a search on jargon/wrong words verbatim and reformulates.
-//! A *negative* signal: only ungrounded terms are reported. For a term that is merely misspelled we
-//! add near (Levenshtein) "did you mean" candidates. Model-free, deterministic.
+//! evidence — instead we surface the query terms whose Snowball STEM is not in the KB vocabulary
+//! (node labels + aliases), so the agent stops building a search on jargon/wrong words verbatim and
+//! reformulates. Stem-based so an inflected query word matches the corpus's form of the same word
+//! (crucial for Russian's rich inflection) instead of being flagged as absent. A *negative* signal:
+//! only ungrounded terms are reported. For a term that is merely misspelled we add near (Levenshtein)
+//! "did you mean" candidates. Model-free, deterministic.
 //! Design: docs/superpowers/specs/2026-09-27-verify-question-terms.md
 
+use rust_stemmers::{Algorithm, Stemmer as RsStemmer};
 use std::collections::HashSet;
+
+/// Snowball stemmers for stem-based grounding: a query term is present when its stem matches a
+/// vocabulary token's stem, so inflected forms (plurals, cases) are not flagged as missing. The
+/// algorithm is chosen per token by script — a Cyrillic character ⇒ Russian, else English — the same
+/// rule the search index uses (`crate::index::multilang::script_detector`). Snowball is a stemmer,
+/// not a full morphological analyzer, so it is deliberately biased toward grounding: it may collapse
+/// a derivation as well as an inflection, which for this negative signal means one fewer false "not
+/// in the corpus" flag — the right direction for a tool whose job is to surface genuine jargon/typos.
+struct Stemmers {
+    ru: RsStemmer,
+    en: RsStemmer,
+}
+
+impl Stemmers {
+    fn new() -> Self {
+        Self {
+            ru: RsStemmer::create(Algorithm::Russian),
+            en: RsStemmer::create(Algorithm::English),
+        }
+    }
+
+    fn stem(&self, tok: &str) -> String {
+        let cyrillic = tok.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c));
+        if cyrillic {
+            self.ru.stem(tok)
+        } else {
+            self.en.stem(tok)
+        }
+        .into_owned()
+    }
+}
 
 /// One reported (ungrounded) term and, when it looks like a typo, near vocabulary candidates.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -61,20 +95,24 @@ fn typo_suggestions(term: &str, vocab: &[String]) -> Vec<String> {
 }
 
 /// Pure classifier: split `text` into content terms (rare-code-preserving tokenizer, `< 3` chars
-/// dropped) and report ONLY those NOT present in `vocab_tokens` (the KB's label/alias words, already
-/// lowercased), each with near typo candidates. Grounded terms are omitted. No stopword list, no
-/// salience filter, no semantic mapping — "is this word in the KB, considering aliases?" and nothing
-/// more. No graph access — the caller supplies the vocabulary, so this is unit-testable in isolation.
+/// dropped) and report ONLY those whose Snowball STEM is not among the vocabulary's stems (the KB's
+/// label/alias words, already lowercased), each with near typo candidates. Stem comparison so an
+/// inflected query word (a plural or a non-nominative case of the corpus's form) is grounded, not
+/// flagged.
+/// Grounded terms are omitted. No stopword list, no salience filter, no semantic mapping — "is this
+/// word (in any inflection) in the KB, considering aliases?" and nothing more. No graph access — the
+/// caller supplies the vocabulary, so this is unit-testable in isolation.
 pub fn classify_terms(text: &str, vocab_tokens: &[String]) -> QuestionReport {
-    let vocab_set: HashSet<&str> = vocab_tokens.iter().map(String::as_str).collect();
+    let stemmers = Stemmers::new();
+    let vocab_stems: HashSet<String> = vocab_tokens.iter().map(|t| stemmers.stem(t)).collect();
     let mut seen: HashSet<String> = HashSet::new();
     let mut terms = Vec::new();
     for tok in crate::gate::token::tokenize(text) {
         if !seen.insert(tok.clone()) {
             continue;
         }
-        if vocab_set.contains(tok.as_str()) {
-            continue; // grounded ⇒ not news, stay silent
+        if vocab_stems.contains(&stemmers.stem(&tok)) {
+            continue; // grounded by stem ⇒ not news, stay silent
         }
         let suggestions = typo_suggestions(&tok, vocab_tokens);
         terms.push(TermCheck {
@@ -127,6 +165,20 @@ mod tests {
     }
 
     #[test]
+    fn inflected_forms_are_grounded_by_stem() {
+        // A query word in a different inflection than the vocabulary form is the SAME word and must
+        // stay silent — grounding compares Snowball stems, not exact tokens. Tested with English
+        // morphology (the repo is English-only); the production win is Russian, where the per-token
+        // Cyrillic->Russian algorithm collapses a noun's case/number forms to one stem the same way.
+        let r = classify_terms("running dogs", &vocab(&["run", "dog"]));
+        assert!(
+            r.terms.is_empty(),
+            "inflected forms share a stem with the vocab ⇒ grounded, got {:?}",
+            r.terms
+        );
+    }
+
+    #[test]
     fn typo_reported_with_near_suggestion() {
         let r = classify_terms("setpiont modbus", &vocab(&["setpoint", "modbus"]));
         let by: HashMap<&str, &TermCheck> = r.terms.iter().map(|t| (t.term.as_str(), t)).collect();
@@ -156,12 +208,20 @@ mod tests {
     }
 
     #[test]
-    fn short_vocab_token_not_offered_as_substring() {
-        // Regression: the old substring/Jaccard ranker offered a short vocab fragment ("set") as a
-        // "match" for a longer query word. Pure Levenshtein must suggest only the genuine near term.
-        let r = classify_terms("setpointer", &vocab(&["set", "setpoint"]));
-        let t = &r.terms[0];
-        assert_eq!(t.term, "setpointer");
+    fn derivation_grounds_by_stem_and_short_fragment_never_suggested() {
+        // A derivation that shares a vocab word's stem is grounded — Snowball is intentionally
+        // stem-biased, so "setpointer" (stem "setpoint") stays silent rather than being flagged.
+        let grounded = classify_terms("setpointer", &vocab(&["set", "setpoint"]));
+        assert!(
+            grounded.terms.is_empty(),
+            "a derivation sharing a vocab stem grounds, got {:?}",
+            grounded.terms
+        );
+        // A genuine typo (stem differs) is still reported, and suggests the real near term via pure
+        // Levenshtein — never the short fragment "set" (the nonsense the old substring ranker gave).
+        let typo = classify_terms("setpiont", &vocab(&["set", "setpoint"]));
+        let t = &typo.terms[0];
+        assert_eq!(t.term, "setpiont");
         assert!(
             t.suggestions.contains(&"setpoint".to_string()),
             "got {:?}",
