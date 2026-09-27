@@ -1019,13 +1019,15 @@ fn run_eval(args: EvalArgs) -> Result<()> {
     // unconditionally so a silent default-off is visible in the run header rather than discovered
     // later as a missing plateau signal in GEPA/fine-tuning data.
     let dedup = args.dedup;
-    cli_fmt::note(&if dedup {
-        "dedup: on".to_string()
-    } else {
-        "dedup: off (default — retrieval plateau/repeat/streak markers suppressed; pass --dedup \
-         to reproduce a --dedup MCP deployment or to train on the plateau signal)"
-            .to_string()
-    });
+    // Only the silent default-OFF is worth a header note (it means the plateau signal is suppressed,
+    // easy to discover too late in GEPA/fine-tuning data). When `--dedup` is passed the "on" state is
+    // self-evident from the flag, so don't echo it.
+    if !dedup {
+        cli_fmt::note(
+            "dedup: off (default — retrieval plateau/repeat/streak markers suppressed; pass --dedup \
+             to reproduce a --dedup MCP deployment or to train on the plateau signal)",
+        );
+    }
 
     let use_judge = !args.no_judge && !args.no_gold && lab.judge.is_some();
     // Abstention policy (FP-vs-FN operating point): balanced (default) or safety_first. Only affects

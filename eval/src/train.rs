@@ -177,13 +177,14 @@ pub fn run_train(path: Option<PathBuf>, args: TrainArgs) -> anyhow::Result<()> {
     // workspace. Enables cross-model runs (train on one reader, eval concurrently on another).
     let lab_path = args.lab.clone().unwrap_or_else(|| paths.lab.clone());
     let lab = LabConfig::load_at(&lab_path)?;
-    // Make the effective dedup value visible in the run header (spec §4.4): a silent default-off
-    // means GEPA never sees the plateau signal, which is easy to discover far too late.
-    glossa::cli_fmt::note(if args.dedup {
-        "dedup: on"
-    } else {
-        "dedup: off (default — train rollouts suppress the retrieval plateau signal; pass --dedup to train on it)"
-    });
+    // Surface the silent default-off in the run header (spec §4.4): a default-off means GEPA never
+    // sees the plateau signal, easy to discover far too late. The "on" state is self-evident from
+    // the `--dedup` flag, so only the off case is worth a note.
+    if !args.dedup {
+        glossa::cli_fmt::note(
+            "dedup: off (default — train rollouts suppress the retrieval plateau signal; pass --dedup to train on it)",
+        );
+    }
     // Worker-pool size for `gepa_graph::score_questions`'s concurrent read-only rollouts
     // (CLI `--jobs` > `[tuning] jobs_train` > DEFAULT_JOBS), clamped to at least 1.
     let jobs = crate::lab::resolve(args.jobs, lab.tuning.jobs_train, DEFAULT_JOBS).max(1);
