@@ -54,7 +54,8 @@ pub struct BertSelfAttention<B: Backend> {
     pub query: Linear<B>,
     pub key: Linear<B>,
     pub value: Linear<B>,
-    heads: usize,
+    // pub(crate) so the reused encoder can be constructed from `reranker_model.rs`.
+    pub(crate) heads: usize,
 }
 
 impl<B: Backend> BertSelfAttention<B> {
@@ -113,7 +114,8 @@ pub struct BertLayer<B: Backend> {
     pub output: BertOutput<B>,
 }
 impl<B: Backend> BertLayer<B> {
-    fn forward(&self, h: Tensor<B, 3>, add_mask: Tensor<B, 4>) -> Tensor<B, 3> {
+    // pub(crate) so `reranker_model.rs` can drive the reused encoder stack directly.
+    pub(crate) fn forward(&self, h: Tensor<B, 3>, add_mask: Tensor<B, 4>) -> Tensor<B, 3> {
         let a = self.attention.forward(h, add_mask);
         let inter = gelu(self.intermediate.dense.forward(a.clone())); // erf-exact GELU
         self.output

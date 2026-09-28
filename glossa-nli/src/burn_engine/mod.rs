@@ -4,6 +4,7 @@
 //! engine — cross-engine parity by construction.
 
 mod model;
+mod reranker_model;
 
 use std::path::{Path, PathBuf};
 
