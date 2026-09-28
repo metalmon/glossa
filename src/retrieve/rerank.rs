@@ -1,5 +1,6 @@
 use crate::index::store::{DocIndex, RankedHit};
 use crate::retrieve::config::RerankConfig;
+use std::path::Path;
 
 /// Backend-agnostic cross-encoder scorer: one relevance score per passage, same length + order as
 /// `passages`. Higher = more relevant. Implemented in-process (`retrieve::rerank_engine`) and, later,
@@ -107,6 +108,32 @@ pub fn retrieve_with(
             ))
         }
     }
+}
+
+/// Config-driven retrieval: resolves `[rerank]` from `glossa_dir` and either reranks the BM25 pool
+/// or returns plain BM25 (the default). The single entry shared by `tools::search`, the eval search
+/// arm, and the `kb search` CLI so all three agree on order.
+pub fn retrieve(
+    idx: &DocIndex,
+    glossa_dir: &Path,
+    query: &str,
+    limit: usize,
+    glob: Option<&str>,
+    file_type: Option<&str>,
+    scope: Option<&str>,
+) -> anyhow::Result<(Vec<RankedHit>, RerankInfo)> {
+    let cfg = RerankConfig::resolve(glossa_dir);
+    let reranker = resolve_reranker(&cfg);
+    retrieve_with(
+        idx,
+        query,
+        limit,
+        glob,
+        file_type,
+        scope,
+        reranker.as_deref(),
+        cfg.pool_size,
+    )
 }
 
 /// Build the in-process reranker from `[rerank]`, or `None` (=> plain BM25, fail-open). Any load
@@ -263,6 +290,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = crate::retrieve::config::RerankConfig::resolve(dir.path()); // off by default
         assert!(resolve_reranker(&cfg).is_none());
+    }
+
+    #[test]
+    fn retrieve_without_config_matches_search_filtered() {
+        let (_d, idx) = idx_with_pages();
+        let dir = tempfile::tempdir().unwrap(); // no [rerank] ontology -> inactive
+        let (out, info) = retrieve(&idx, dir.path(), "swap", 2, None, None, None).unwrap();
+        let base = idx.search_filtered("swap", 2, None, None, None).unwrap();
+        assert_eq!(
+            out.iter().map(|h| h.ord).collect::<Vec<_>>(),
+            base.iter().map(|h| h.ord).collect::<Vec<_>>()
+        );
+        assert!(!info.reranked);
     }
 
     #[test]
