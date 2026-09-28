@@ -11,7 +11,7 @@ use anyhow::{anyhow, Result};
 use burn::prelude::*;
 use burn::tensor::TensorData;
 use burn_store::{ModuleSnapshot, PyTorchToBurnAdapter, SafetensorsStore};
-use tokenizers::Tokenizer;
+use tokenizers::{Tokenizer, TruncationParams, TruncationStrategy};
 
 use super::reranker_model::{RobertaRerankerConfig, RobertaRerankerModel};
 use super::{resolve_weights_file, BurnBackend, Dev};
@@ -43,9 +43,17 @@ impl InProcessBurnReranker {
         let tokenizer_path = model_dir.join("tokenizer.json");
         let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow!("tokenizer load ({}): {e}", tokenizer_path.display()))?;
-        // The harness owns truncation (longest-first, so the query survives) and padding.
+        // Truncate the (query, passage) pair longest-first (so the query survives) to the model's
+        // max length — the SAME tokenizer-level truncation the ORT engine uses (`InProcessReranker`),
+        // so both engines score identically on overlength inputs (a flat post-tokenize clamp would
+        // trim only-second and diverge). The harness's `ids.truncate` is then a redundant safety
+        // clamp. Padding is built by the harness from the attention mask, so leave it off here.
         tokenizer
-            .with_truncation(None)
+            .with_truncation(Some(TruncationParams {
+                max_length: DEFAULT_MAX_SEQ_LEN,
+                strategy: TruncationStrategy::LongestFirst,
+                ..Default::default()
+            }))
             .map_err(|e| anyhow!("tokenizer truncation config: {e}"))?;
         tokenizer.with_padding(None);
 

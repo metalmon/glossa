@@ -177,10 +177,12 @@ pub trait RerankForward {
 }
 
 /// One relevance score per passage (higher = more relevant), in the same order as `passages`,
-/// using `fwd` for the raw forward. Tokenizes each `(query, passage)` pair, truncates to
-/// `max_seq_len` (longest-first, so the query survives truncation), plans the rows into
-/// token-budgeted batches via the shared [`plan_batches`], pads each batch, runs `fwd`, and
-/// concats the scores back into input order. Engine-agnostic: ORT and burn share this exact code.
+/// using `fwd` for the raw forward. Tokenizes each `(query, passage)` pair — the caller's tokenizer
+/// performs the real longest-first truncation to `max_seq_len` (so the query survives), identical
+/// across engines; the `ids.truncate(max_seq_len)` below is a defensive clamp, not the primary
+/// truncation. Plans the rows into token-budgeted batches via the shared [`plan_batches`], pads each
+/// batch, runs `fwd`, and concats the scores back into input order. Engine-agnostic: ORT and burn
+/// share this exact code.
 pub fn rerank(
     fwd: &impl RerankForward,
     tokenizer: &Tokenizer,
