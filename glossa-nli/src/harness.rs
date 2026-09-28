@@ -496,17 +496,27 @@ mod rerank_tests {
         }
     }
 
-    /// Real-model smoke (env-gated): proves `rerank` returns one score per passage, in input
-    /// order, against a real tokenizer (mirrors `reranker_scores_relevant_above_irrelevant` in
-    /// `lib.rs`). Skips when `RERANK_MODEL_DIR` is unset so CI without the staged model is green.
+    /// Load the tokenizer from `RERANK_MODEL_DIR`, or `None` when the env var is unset (the
+    /// caller then skips — mirrors `reranker_scores_relevant_above_irrelevant` in `lib.rs`, so CI
+    /// without the staged model stays green).
+    fn env_tokenizer() -> Option<Tokenizer> {
+        let dir = std::env::var("RERANK_MODEL_DIR").ok()?;
+        let tokenizer_path = Path::new(&dir).join("tokenizer.json");
+        Some(
+            Tokenizer::from_file(&tokenizer_path)
+                .unwrap_or_else(|e| panic!("tokenizer load ({}): {e}", tokenizer_path.display())),
+        )
+    }
+
+    /// Real-model smoke (env-gated): sanity case where the passages already happen to sort by
+    /// length in input order (both land in one batch, batch order == input order). Proves the
+    /// basic shape/monotonicity but NOT scatter-back — see
+    /// `rerank_scatters_scores_back_to_original_index_across_batch_reorder` below for that.
     #[test]
     fn rerank_returns_one_score_per_passage_in_order() {
-        let Ok(dir) = std::env::var("RERANK_MODEL_DIR") else {
+        let Some(t) = env_tokenizer() else {
             return;
         };
-        let tokenizer_path = Path::new(&dir).join("tokenizer.json");
-        let t = Tokenizer::from_file(&tokenizer_path)
-            .unwrap_or_else(|e| panic!("tokenizer load ({}): {e}", tokenizer_path.display()));
 
         let scores = rerank(
             &LenFwd,
@@ -519,5 +529,52 @@ mod rerank_tests {
         .unwrap();
         assert_eq!(scores.len(), 2);
         assert!(scores[1] > scores[0]);
+    }
+
+    /// Real-model smoke (env-gated): the load-bearing property `rerank` must have is that scores
+    /// come back mapped to their ORIGINAL passage index, not in whatever order `plan_batches`
+    /// visited the rows internally. `plan_batches` always sorts rows ascending by token length
+    /// before batching, so feeding passages in a length order that DIVERGES from input order
+    /// (long, medium, short) forces `plan_batches` to visit them as (short, medium, long) inside
+    /// the single batch they all fit in — i.e. `row_pos != row_idx` for every row. A correct
+    /// scatter-back (`scores[row_idx] = out[row_pos]`) recovers the true per-passage order; a bug
+    /// that instead concatenated `out` positionally (e.g. `scores.extend(out)`, batch-visitation
+    /// order) would place the short passage's small score at index 0 and the long passage's large
+    /// score at index 1, flipping the `scores[1] > scores[0]` relation this test asserts on the
+    /// middle passage and breaking the `scores[0] > scores[2]` relation below.
+    #[test]
+    fn rerank_scatters_scores_back_to_original_index_across_batch_reorder() {
+        let Some(t) = env_tokenizer() else {
+            return;
+        };
+
+        let medium = "a medium length passage used for testing token counts in this unit test";
+        let long = "a substantially longer passage than the medium one, containing considerably \
+                     more words in order to guarantee that its token count clearly exceeds every \
+                     other passage in this test case by a wide margin";
+        let short = "short";
+        // Input order: medium (0), long (1), short (2) — NOT length-sorted (long > medium > short
+        // in real length, but sits at index 1, not last).
+        let scores = rerank(
+            &LenFwd,
+            &t,
+            DEFAULT_MAX_SEQ_LEN,
+            NLI_BATCH_TOKENS,
+            "q",
+            &[medium, long, short],
+        )
+        .unwrap();
+        assert_eq!(scores.len(), 3);
+        // Longest passage (index 1) must score highest, shortest (index 2) lowest, medium (index
+        // 0) in between — proves each score landed on its own original index, not the
+        // length-sorted batch-visitation position.
+        assert!(
+            scores[1] > scores[0],
+            "long passage (idx 1) should outscore medium (idx 0): {scores:?}"
+        );
+        assert!(
+            scores[0] > scores[2],
+            "medium passage (idx 0) should outscore short (idx 2): {scores:?}"
+        );
     }
 }
