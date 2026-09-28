@@ -487,6 +487,9 @@ enum EvalCmd {
     Run(EvalArgs),
     /// Sweep the verify-gate threshold over a run and (optionally) write it to ontology.toml.
     Calibrate(CalibrateArgs),
+    /// Run-free Full Chain Retrieval: does BM25 retrieval surface the WHOLE gold source set per
+    /// question? Reports FCR + partial recall by hop_type. No reader/judge/GPU.
+    Fcr(kb_eval::fcr::FcrArgs),
 }
 
 /// `kbx dataset` subcommands — pure file ops on the `[[case]]` dataset format (logic lives in
@@ -549,6 +552,9 @@ fn main() -> Result<()> {
         Cmd::Eval {
             cmd: EvalCmd::Calibrate(args),
         } => calibrate::run(args),
+        Cmd::Eval {
+            cmd: EvalCmd::Fcr(args),
+        } => kb_eval::fcr::run_fcr(args),
         Cmd::Export {
             path,
             from,
