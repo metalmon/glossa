@@ -73,6 +73,10 @@ mod tests {
 
     #[test]
     fn defaults_off_when_no_ontology() {
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_RERANK_POOL_SIZE");
         let dir = tempfile::tempdir().unwrap();
         let c = RerankConfig::resolve(dir.path());
         assert!(!c.enabled);
@@ -83,6 +87,10 @@ mod tests {
 
     #[test]
     fn active_requires_enabled_scorer_and_model_dir() {
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_RERANK_POOL_SIZE");
         let dir = tempfile::tempdir().unwrap();
         let g = dir.path().join(".glossa");
         std::fs::create_dir_all(&g).unwrap();
@@ -103,6 +111,10 @@ mod tests {
 
     #[test]
     fn not_active_when_enabled_but_no_model_dir() {
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_RERANK_POOL_SIZE");
         let dir = tempfile::tempdir().unwrap();
         let g = dir.path().join(".glossa");
         std::fs::create_dir_all(&g).unwrap();
