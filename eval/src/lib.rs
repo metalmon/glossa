@@ -25,6 +25,7 @@ pub mod nli_check;
 pub mod parallel;
 pub mod reason;
 pub mod report;
+pub mod rerank_check;
 pub mod scaffold;
 pub mod score;
 pub mod train;

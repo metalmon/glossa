@@ -414,6 +414,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: NliCmd,
     },
+    /// In-process cross-encoder reranker diagnostics.
+    Rerank {
+        #[command(subcommand)]
+        cmd: RerankCmd,
+    },
 }
 
 /// `kbx nli` subcommands: `download` fetches the ONNX model + tokenizer so `[verify.nli].model_dir`
@@ -473,6 +478,32 @@ enum NliCmd {
         /// GPU arena memory cap in MB for the NLI EP, so NLI can share a GPU with an LLM. Written to
         /// `[verify.nli].ep_mem_limit_mb` only if given. Effective on CUDA (memory limit + arena);
         /// ROCm honors only arena growth; DirectML/CoreML expose no memory option in this ort build.
+        #[arg(long = "ep-mem-limit-mb")]
+        ep_mem_limit_mb: Option<usize>,
+    },
+}
+
+/// `kbx rerank` subcommands: `check` is a readiness doctor mirroring `kbx nli check` — it probes
+/// the reranker's execution provider and reports whether the model actually ranks a known-relevant
+/// passage above a known-irrelevant one.
+#[derive(Subcommand)]
+enum RerankCmd {
+    /// Probe the reranker's execution provider and run a fixed relevant-vs-irrelevant sanity pair
+    /// through `InProcessReranker`, reporting `ep_active` and both scores.
+    Check {
+        /// Local model dir holding the cross-encoder ONNX weights + tokenizer.
+        #[arg(long = "model-dir")]
+        model_dir: PathBuf,
+        /// Ordered execution-provider preference list. Repeat the flag or comma-join a single
+        /// value, e.g. `--ep cuda,cpu` or `--ep cuda --ep cpu` (each occurrence is comma-split
+        /// too).
+        #[arg(long = "ep")]
+        ep: Vec<String>,
+        /// GPU device id the CUDA/DirectML/ROCm EP binds to.
+        #[arg(long = "ep-device")]
+        ep_device: Option<i32>,
+        /// GPU arena memory cap in MB for the reranker EP, so it can share a GPU with an LLM or
+        /// the NLI verifier.
         #[arg(long = "ep-mem-limit-mb")]
         ep_mem_limit_mb: Option<usize>,
     },
@@ -802,6 +833,26 @@ fn main() -> Result<()> {
                 ep_device,
                 ep_mem_limit_mb,
             )
+        }
+        Cmd::Rerank {
+            cmd:
+                RerankCmd::Check {
+                    model_dir,
+                    ep,
+                    ep_device,
+                    ep_mem_limit_mb,
+                },
+        } => {
+            // Each `--ep` occurrence may itself be comma-joined (`--ep cuda,cpu`); flatten both
+            // the repeated-flag and comma-joined forms into one ordered list (mirrors `nli set`).
+            let ep: Vec<String> = ep
+                .iter()
+                .flat_map(|s| s.split(','))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            kb_eval::rerank_check::rerank_check(model_dir, ep, ep_device, ep_mem_limit_mb)
         }
     }
 }
