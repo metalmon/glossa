@@ -20,6 +20,31 @@ pub fn chain_recall(gold: &HashSet<String>, retrieved: &HashSet<String>) -> (boo
     (hit == gold.len(), hit as f32 / gold.len() as f32)
 }
 
+/// Chunk refs (`path#N`) named by a glossary rendering's `— read <ref>` grounding anchors — the
+/// graph-retrieval counterpart of a BM25 hit list. Tolerant by design: on each line it takes the
+/// text after the LAST `read ` when that text ends in `#<digits>`, so a stray "read" in a label
+/// never yields a false ref.
+pub fn extract_graph_refs(body: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in body.lines() {
+        let Some(pos) = line.rfind("read ") else {
+            continue;
+        };
+        let cand = line[pos + "read ".len()..].trim();
+        let Some(h) = cand.rfind('#') else {
+            continue;
+        };
+        let ord = &cand[h + 1..];
+        if !ord.is_empty()
+            && ord.chars().all(|c| c.is_ascii_digit())
+            && !out.iter().any(|r| r == cand)
+        {
+            out.push(cand.to_string());
+        }
+    }
+    out
+}
+
 /// FCR tallies for one `hop_type` bucket.
 #[derive(Default, Clone)]
 pub struct BucketFcr {
@@ -112,6 +137,19 @@ pub struct FcrArgs {
     /// Only score cases whose `tags` include this value.
     #[arg(long = "tag-filter")]
     pub tag_filter: Option<String>,
+    /// Retrieval method to score: `search` (BM25 over the index) or `graph` (glossary over the
+    /// reasoning graph). `graph` ignores `--k` (glossary returns its own bounded neighbourhood).
+    #[arg(long, value_enum, default_value_t = Via::Search)]
+    pub via: Via,
+}
+
+/// Which retrieval path `kbx eval fcr` measures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum Via {
+    /// BM25 full-text search over the index.
+    Search,
+    /// `glossary` retrieval over the reasoning graph (grounded chunks named by its `— read` anchors).
+    Graph,
 }
 
 /// `kbx eval fcr`: run-free Full Chain Retrieval over the corpus index + dataset golds. Opens the
@@ -129,6 +167,18 @@ pub fn run_fcr(args: FcrArgs) -> anyhow::Result<()> {
         .with_context(|| format!("parsing dataset {}", dataset_path.display()))?;
     let idx = glossa::index::store::DocIndex::open_or_create(&paths.root)
         .with_context(|| format!("opening index at {}", paths.root.display()))?;
+    // Graph retrieval path (only opened for `--via graph`): reuse the reader's `glossary` over the
+    // reasoning graph, with a disabled trace and default chain spec.
+    let graph = if args.via == Via::Graph {
+        Some(
+            glossa::graph::store::GraphStore::open(&paths.root)
+                .with_context(|| format!("opening graph at {}", paths.root.display()))?,
+        )
+    } else {
+        None
+    };
+    let spec = glossa::tools::ChainSpec::default();
+    let trace = glossa::trace::TraceLog::disabled();
 
     let mut report = FcrReport::default();
     for q in &golds {
@@ -145,17 +195,39 @@ pub fn run_fcr(args: FcrArgs) -> anyhow::Result<()> {
             report.skipped_no_gold += 1;
             continue;
         }
-        let hits = idx
-            .search_filtered(&q.question, args.k, None, None, None)
-            .unwrap_or_default();
-        let retrieved: HashSet<String> = hits
-            .iter()
-            .map(|h| format!("{}#{}", h.path, h.ord))
-            .collect();
+        let retrieved: HashSet<String> = match &graph {
+            Some(g) => {
+                let body = glossa::tools::glossary_with_query(
+                    &idx,
+                    g,
+                    &q.question,
+                    Some(&q.question),
+                    &spec,
+                    &trace,
+                    None,
+                    None,
+                    None,
+                );
+                extract_graph_refs(&body).into_iter().collect()
+            }
+            None => idx
+                .search_filtered(&q.question, args.k, None, None, None)
+                .unwrap_or_default()
+                .iter()
+                .map(|h| format!("{}#{}", h.path, h.ord))
+                .collect(),
+        };
         let (full, partial) = chain_recall(&gold, &retrieved);
         report.add(&q.hop_type, full, partial);
     }
 
+    println!(
+        "retrieval: {}",
+        match args.via {
+            Via::Search => "search (BM25 over the index)",
+            Via::Graph => "graph (glossary over the reasoning graph)",
+        }
+    );
     print!("{}", report.render(args.k));
     if report.skipped_no_gold > 0 {
         println!(
@@ -189,6 +261,24 @@ mod tests {
         assert_eq!(chain_recall(&set(&["a"]), &set(&["x"])), (false, 0.0));
         // empty gold -> vacuously full
         assert_eq!(chain_recall(&set(&[]), &set(&["x"])), (true, 1.0));
+    }
+
+    #[test]
+    fn extract_graph_refs_reads_grounding_anchors_only() {
+        let body = "res:abc  [Resolution]  Foo   — read Runtime/CODESYS Redundancy.pdf#18\n\
+                    task:def  [Task]  how to read the manual\n\
+                    cause:xyz  [Cause]  Bar   — read plk/setup guide.pdf#644\n";
+        let refs = extract_graph_refs(body);
+        assert!(
+            refs.contains(&"Runtime/CODESYS Redundancy.pdf#18".to_string()),
+            "{refs:?}"
+        );
+        assert!(
+            refs.contains(&"plk/setup guide.pdf#644".to_string()),
+            "{refs:?}"
+        );
+        // the "how to read the manual" line has no `#N` ref -> not extracted
+        assert_eq!(refs.len(), 2, "{refs:?}");
     }
 
     #[test]
