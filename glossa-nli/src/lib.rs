@@ -76,7 +76,7 @@ mod ort_engine {
         PaddingParams, PaddingStrategy, Tokenizer, TruncationParams, TruncationStrategy,
     };
 
-    use crate::harness::{self, RawForward, DEFAULT_MAX_SEQ_LEN};
+    use crate::harness::{self, RawForward, RerankForward, DEFAULT_MAX_SEQ_LEN};
 
     /// The loaded model + tokenizer for one `model_dir`, shared across all `InProcessNli` handles
     /// that point at the same directory (see `MODEL_CACHE`).
@@ -363,10 +363,6 @@ mod ort_engine {
         }
     }
 
-    /// Default number of (query, passage) pairs encoded and scored in one ONNX forward. Override with
-    /// `GLOSSA_RERANK_BATCH`. A cross-encoder is much heavier than the NLI head, so keep this modest.
-    const DEFAULT_RERANK_BATCH: usize = 32;
-
     /// The loaded reranker model + tokenizer for one `model_dir`, shared across all
     /// `InProcessReranker` handles for the same key (mirrors `Inner`/`MODEL_CACHE`).
     struct RerankInner {
@@ -377,6 +373,7 @@ mod ort_engine {
         // `input_ids` + `attention_mask` only (no `token_type_ids`); BERT-family models add
         // `token_type_ids`. We feed exactly what the session declares.
         input_names: Vec<String>,
+        max_seq_len: usize,
     }
 
     type RerankCache = OnceLock<Mutex<HashMap<ModelCacheKey, Arc<RerankInner>>>>;
@@ -391,7 +388,6 @@ mod ort_engine {
     /// (`model.onnx` [+ optional `model.onnx_data`] + `tokenizer.json`).
     pub struct InProcessReranker {
         inner: Arc<RerankInner>,
-        batch: usize,
     }
 
     impl InProcessReranker {
@@ -422,7 +418,6 @@ mod ort_engine {
             {
                 return Ok(Self {
                     inner: Arc::clone(inner),
-                    batch: rerank_batch_size(),
                 });
             }
 
@@ -436,10 +431,7 @@ mod ort_engine {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("rerank model cache mutex poisoned"))?;
             let inner = Arc::clone(guard.entry(cache_key).or_insert(built));
-            Ok(Self {
-                inner,
-                batch: rerank_batch_size(),
-            })
+            Ok(Self { inner })
         }
 
         fn build_inner(
@@ -485,89 +477,82 @@ mod ort_engine {
                 tokenizer,
                 session: Mutex::new(session),
                 input_names,
+                max_seq_len: DEFAULT_MAX_SEQ_LEN,
             })
         }
 
         /// One relevance score per passage (raw logit; higher = more relevant), in the same order as
-        /// `passages`. Encodes (query, passage) pairs in batches of `self.batch`.
+        /// `passages`. The pair tokenization and token-budget batching live in [`harness::rerank`];
+        /// this engine only supplies the raw forward (`RerankForward` below).
         pub fn rerank(&self, query: &str, passages: &[&str]) -> anyhow::Result<Vec<f32>> {
-            let mut out = Vec::with_capacity(passages.len());
-            for chunk in passages.chunks(self.batch.max(1)) {
-                let inputs: Vec<(&str, &str)> = chunk.iter().map(|p| (query, *p)).collect();
-                let encodings = self
-                    .inner
-                    .tokenizer
-                    .encode_batch(inputs, true)
-                    .map_err(|e| anyhow::anyhow!("rerank tokenize: {e}"))?;
-                let n = encodings.len();
-                let seq = encodings.first().map(|e| e.get_ids().len()).unwrap_or(0);
-                if n == 0 || seq == 0 {
-                    continue;
-                }
-                let mut ids = Vec::with_capacity(n * seq);
-                let mut mask = Vec::with_capacity(n * seq);
-                for e in &encodings {
-                    ids.extend(e.get_ids().iter().map(|&x| x as i64));
-                    mask.extend(e.get_attention_mask().iter().map(|&x| x as i64));
-                }
-                let ids_tensor = Tensor::from_array(([n, seq], ids))?;
-                let mask_tensor = Tensor::from_array(([n, seq], mask))?;
-
-                let mut session = self
-                    .inner
-                    .session
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("rerank onnx session mutex poisoned"))?;
-                // Feed exactly the inputs the graph declares. XLM-RoBERTa: `input_ids` +
-                // `attention_mask`. A BERT-family cross-encoder additionally declares
-                // `token_type_ids`; feed zeros (a single (query, passage) segment pair still scores
-                // correctly for a relevance head trained with segment 0 throughout under masking).
-                let outputs = if self
-                    .inner
-                    .input_names
-                    .iter()
-                    .any(|name| name == "token_type_ids")
-                {
-                    let token_type_tensor = Tensor::from_array(([n, seq], vec![0i64; n * seq]))?;
-                    session.run(ort::inputs![
-                        "input_ids" => ids_tensor,
-                        "attention_mask" => mask_tensor,
-                        "token_type_ids" => token_type_tensor,
-                    ])?
-                } else {
-                    session.run(ort::inputs![
-                        "input_ids" => ids_tensor,
-                        "attention_mask" => mask_tensor,
-                    ])?
-                };
-
-                // A cross-encoder relevance head emits one logit per pair; index the sole output by
-                // position (mirrors `forward_logits`) and read the leading `n` values.
-                let out0 = outputs
-                    .values()
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("rerank onnx session returned no outputs"))?;
-                let (_shape, data) = out0
-                    .try_extract_tensor::<f32>()
-                    .map_err(|e| anyhow::anyhow!("rerank logits extraction: {e}"))?;
-                debug_assert!(
-                    data.len() == n,
-                    "reranker expected {n} logits, got {}",
-                    data.len()
-                );
-                out.extend_from_slice(&data[..n.min(data.len())]);
-            }
-            Ok(out)
+            crate::harness::rerank(
+                self,
+                &self.inner.tokenizer,
+                self.inner.max_seq_len,
+                crate::harness::parse_batch_budget_tokens(),
+                query,
+                passages,
+            )
         }
     }
 
-    /// Batch size for pair encoding, from `GLOSSA_RERANK_BATCH` or [`DEFAULT_RERANK_BATCH`].
-    fn rerank_batch_size() -> usize {
-        std::env::var("GLOSSA_RERANK_BATCH")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&v| v > 0)
-            .unwrap_or(DEFAULT_RERANK_BATCH)
+    impl RerankForward for InProcessReranker {
+        /// Run one padded batch of (query, passage) pair rows through the ONNX session and return
+        /// one raw relevance logit per row (length `n`). Feeds exactly the inputs the session
+        /// declares: `input_ids` + `attention_mask` for an XLM-RoBERTa cross-encoder; a BERT-family
+        /// cross-encoder additionally declares `token_type_ids`, fed as zeros (a single (query,
+        /// passage) segment pair still scores correctly for a relevance head trained with segment 0
+        /// throughout under masking).
+        fn forward_logits(
+            &self,
+            input_ids: &[i64],
+            attention_mask: &[i64],
+            n: usize,
+            seq: usize,
+        ) -> anyhow::Result<Vec<f32>> {
+            let ids_tensor = Tensor::from_array(([n, seq], input_ids.to_vec()))?;
+            let mask_tensor = Tensor::from_array(([n, seq], attention_mask.to_vec()))?;
+
+            let mut session = self
+                .inner
+                .session
+                .lock()
+                .map_err(|_| anyhow::anyhow!("rerank onnx session mutex poisoned"))?;
+            let outputs = if self
+                .inner
+                .input_names
+                .iter()
+                .any(|name| name == "token_type_ids")
+            {
+                let token_type_tensor = Tensor::from_array(([n, seq], vec![0i64; n * seq]))?;
+                session.run(ort::inputs![
+                    "input_ids" => ids_tensor,
+                    "attention_mask" => mask_tensor,
+                    "token_type_ids" => token_type_tensor,
+                ])?
+            } else {
+                session.run(ort::inputs![
+                    "input_ids" => ids_tensor,
+                    "attention_mask" => mask_tensor,
+                ])?
+            };
+
+            // A cross-encoder relevance head emits one logit per pair; index the sole output by
+            // position (mirrors `InProcessNli`'s `forward_logits`).
+            let out0 = outputs
+                .values()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("rerank onnx session returned no outputs"))?;
+            let (_shape, data) = out0
+                .try_extract_tensor::<f32>()
+                .map_err(|e| anyhow::anyhow!("rerank logits extraction: {e}"))?;
+            debug_assert!(
+                data.len() == n,
+                "reranker expected {n} logits, got {}",
+                data.len()
+            );
+            Ok(data.to_vec())
+        }
     }
 
     /// Strict GPU execution-provider probe for the reranker (mirror of [`probe_gpu_ep`], for a
