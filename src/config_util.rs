@@ -53,7 +53,7 @@ pub fn env_i32(key: &str) -> Option<i32> {
     match trimmed.parse::<i32>() {
         Ok(n) => Some(n),
         Err(_) => {
-            tracing::warn!(key, value = %raw, "non-integer NLI EP device id ignored");
+            tracing::warn!(key, value = %raw, "non-integer EP device id ignored");
             None
         }
     }

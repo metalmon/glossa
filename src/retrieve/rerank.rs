@@ -261,6 +261,26 @@ mod tests {
         );
     }
 
+    struct FailingReranker;
+    impl Reranker for FailingReranker {
+        fn rerank(&self, _q: &str, _p: &[&str]) -> anyhow::Result<Vec<f32>> {
+            anyhow::bail!("boom")
+        }
+    }
+
+    #[test]
+    fn rerank_hits_fails_open_on_scorer_error() {
+        let (_d, idx) = idx_with_pages();
+        let pool = idx.search_filtered("swap", 10, None, None, None).unwrap();
+        let expected = pool.clone();
+        // FailingReranker always errors -> fail open to BM25 order.
+        let out = rerank_hits(&idx, "swap", pool, &FailingReranker, 10);
+        assert_eq!(
+            out.iter().map(|h| h.ord).collect::<Vec<_>>(),
+            expected.iter().map(|h| h.ord).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn retrieve_with_none_reranker_is_identity() {
         let (_d, idx) = idx_with_pages();

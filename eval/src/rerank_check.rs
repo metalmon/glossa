@@ -109,8 +109,10 @@ pub fn rerank_check(
     {
         let _ = (ep, ep_device, ep_mem_limit_mb);
         println!(
-            "=> not ready: reranker engine not built (rebuild kbx with --features nli-cuda, \
-             nli-directml, nli-coreml, or nli-rocm)"
+            "=> not ready: reranker not available in this kbx build (the reranker itself is \
+             CPU-capable in glossa, but this binary wasn't built with a feature that pulls it \
+             in) - rebuild kbx with --features nli-directml (or nli-cuda/nli-coreml/nli-rocm) \
+             to enable it"
         );
     }
 

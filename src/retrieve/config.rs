@@ -3,6 +3,10 @@ use std::path::{Path, PathBuf};
 use crate::config_util::{env_bool, env_i32, env_string, env_usize, normalize_eps};
 use crate::graph::ontology::Ontology;
 
+// Reranking only reorders the fetched pool, it never fetches deeper on its own. For rerank to
+// pool deeper than the caller's search limit, operators must set `[rerank].pool_size` GREATER
+// than that limit. E.g. the MCP `search` tool's default limit is 50, same as this default, so
+// out of the box rerank reorders the same 50 hits rather than pooling deeper.
 pub const DEFAULT_POOL_SIZE: usize = 50;
 
 pub struct RerankConfig {
@@ -111,7 +115,7 @@ mod tests {
     }
 
     #[test]
-    fn env_overrides_enabled() {
+    fn env_overrides_pool_size() {
         let _lock = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());

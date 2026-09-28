@@ -550,6 +550,11 @@ mod ort_engine {
                 let (_shape, data) = out0
                     .try_extract_tensor::<f32>()
                     .map_err(|e| anyhow::anyhow!("rerank logits extraction: {e}"))?;
+                debug_assert!(
+                    data.len() == n,
+                    "reranker expected {n} logits, got {}",
+                    data.len()
+                );
                 out.extend_from_slice(&data[..n.min(data.len())]);
             }
             Ok(out)
