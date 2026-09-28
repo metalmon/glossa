@@ -149,6 +149,29 @@ struct RawVerifyNli {
     ep_mem_limit_mb: Option<usize>,
 }
 
+/// `[rerank]` overlay: the retrieve→rerank cross-encoder's runtime selection. Top-level sibling of
+/// `[retrieval]` (per the design spec); all keys optional, an unset key falls back to the engine
+/// default in `retrieve::config::RerankConfig`.
+#[derive(Debug, Deserialize, Default, Clone)]
+struct RawRerank {
+    #[serde(default)]
+    enabled: Option<bool>,
+    /// "in_process" (v1) | "http" (later).
+    #[serde(default)]
+    scorer: Option<String>,
+    #[serde(default)]
+    model_dir: Option<String>,
+    /// Candidates fetched + reranked before trimming to the caller's limit.
+    #[serde(default)]
+    pool_size: Option<usize>,
+    #[serde(default)]
+    execution_providers: Option<Vec<String>>,
+    #[serde(default)]
+    ep_device: Option<i32>,
+    #[serde(default)]
+    ep_mem_limit_mb: Option<usize>,
+}
+
 /// `[verify.combined]` overlay: per-bucket z-score consensus calibration (see
 /// `RawVerify::combined` and [`Ontology::verify_combined_single`]).
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -364,6 +387,8 @@ struct RawOntology {
     #[serde(default)]
     verify: RawVerify,
     #[serde(default)]
+    rerank: RawRerank,
+    #[serde(default)]
     reasoning: RawReasoning,
     #[serde(default)]
     constraint_types: BTreeMap<String, RawConstraintType>,
@@ -440,6 +465,16 @@ pub struct Ontology {
     /// [`Ontology::verify_combined_single`].
     verify_combined_single: Option<CombinedStats>,
     verify_combined_multi: Option<CombinedStats>,
+    /// Per-corpus `[rerank]` overlay for the retrieve→rerank cross-encoder. `None`/empty per field
+    /// when unset → `retrieve::config::RerankConfig` applies its engine default. See the
+    /// `rerank_*` getters.
+    rerank_enabled: Option<bool>,
+    rerank_scorer: Option<String>,
+    rerank_model_dir: Option<String>,
+    rerank_pool_size: Option<usize>,
+    rerank_execution_providers: Vec<String>,
+    rerank_ep_device: Option<i32>,
+    rerank_ep_mem_limit_mb: Option<usize>,
 }
 
 fn entity_id_prefix(v: &toml::Value) -> Option<String> {
@@ -633,6 +668,13 @@ impl Ontology {
                 .as_ref()
                 .and_then(|c| c.multi.as_ref())
                 .and_then(combined_stats_from_raw),
+            rerank_enabled: raw.rerank.enabled,
+            rerank_scorer: raw.rerank.scorer.clone(),
+            rerank_model_dir: raw.rerank.model_dir.clone(),
+            rerank_pool_size: raw.rerank.pool_size,
+            rerank_execution_providers: raw.rerank.execution_providers.clone().unwrap_or_default(),
+            rerank_ep_device: raw.rerank.ep_device,
+            rerank_ep_mem_limit_mb: raw.rerank.ep_mem_limit_mb,
             reasoning: raw.reasoning,
             constraint_types: raw
                 .constraint_types
@@ -956,6 +998,41 @@ impl Ontology {
     /// options (today's behavior).
     pub fn verify_nli_ep_mem_limit_mb(&self) -> Option<usize> {
         self.verify_nli_ep_mem_limit_mb
+    }
+
+    /// Per-corpus `[rerank].enabled`, or `None` when unset.
+    pub fn rerank_enabled(&self) -> Option<bool> {
+        self.rerank_enabled
+    }
+
+    /// Per-corpus `[rerank].scorer` ("in_process" | "http"), or `None` when unset.
+    pub fn rerank_scorer(&self) -> Option<&str> {
+        self.rerank_scorer.as_deref()
+    }
+
+    /// Per-corpus `[rerank].model_dir` (in-process scorer only), or `None` when unset.
+    pub fn rerank_model_dir(&self) -> Option<&str> {
+        self.rerank_model_dir.as_deref()
+    }
+
+    /// Per-corpus `[rerank].pool_size`, or `None` when unset (engine default applies).
+    pub fn rerank_pool_size(&self) -> Option<usize> {
+        self.rerank_pool_size
+    }
+
+    /// Per-corpus `[rerank].execution_providers`, or an empty slice when unset.
+    pub fn rerank_execution_providers(&self) -> &[String] {
+        &self.rerank_execution_providers
+    }
+
+    /// Per-corpus `[rerank].ep_device` GPU device id, or `None` when unset.
+    pub fn rerank_ep_device(&self) -> Option<i32> {
+        self.rerank_ep_device
+    }
+
+    /// Per-corpus `[rerank].ep_mem_limit_mb` GPU arena cap (MB), or `None` when unset.
+    pub fn rerank_ep_mem_limit_mb(&self) -> Option<usize> {
+        self.rerank_ep_mem_limit_mb
     }
 
     /// Per-corpus `[verify.combined.single]` z-score consensus calibration, or `None` when the
@@ -1597,5 +1674,32 @@ props = []
         assert!(ont.requires_validity("Record"));
         assert!(!ont.requires_validity("Note"));
         assert!(!ont.requires_validity("Absent")); // undeclared → false, no panic
+    }
+
+    #[test]
+    fn rerank_config_round_trips_from_ontology() {
+        let o = Ontology::parse(
+            "[rerank]\nenabled=true\nscorer=\"in_process\"\nmodel_dir=\"/m\"\n\
+             pool_size=40\nexecution_providers=[\"cuda\",\"cpu\"]\nep_device=1\nep_mem_limit_mb=1024\n",
+        )
+        .unwrap();
+        assert_eq!(o.rerank_enabled(), Some(true));
+        assert_eq!(o.rerank_scorer(), Some("in_process"));
+        assert_eq!(o.rerank_model_dir(), Some("/m"));
+        assert_eq!(o.rerank_pool_size(), Some(40));
+        assert_eq!(
+            o.rerank_execution_providers(),
+            &["cuda".to_string(), "cpu".to_string()]
+        );
+        assert_eq!(o.rerank_ep_device(), Some(1));
+        assert_eq!(o.rerank_ep_mem_limit_mb(), Some(1024));
+    }
+
+    #[test]
+    fn rerank_config_absent_is_all_none() {
+        let o = Ontology::parse("[meta]\nname=\"x\"\n").unwrap();
+        assert_eq!(o.rerank_enabled(), None);
+        assert_eq!(o.rerank_scorer(), None);
+        assert!(o.rerank_execution_providers().is_empty());
     }
 }
