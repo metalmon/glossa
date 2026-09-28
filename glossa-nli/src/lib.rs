@@ -33,7 +33,7 @@ mod burn_engine;
 pub use burn_engine::InProcessBurnNli;
 
 #[cfg(feature = "nli-ort")]
-pub use ort_engine::{probe_gpu_ep, InProcessNli};
+pub use ort_engine::{probe_gpu_ep, probe_rerank_ep, InProcessNli, InProcessReranker};
 
 /// Stub for engine builds WITHOUT ORT (the burn/wgpu engine): there is no ORT execution-provider to
 /// probe, so report "nothing to probe" (`Ok(None)`) rather than fail. Keeps `kbx nli check`
@@ -72,7 +72,9 @@ mod ort_engine {
     use ort::execution_providers::ExecutionProviderDispatch;
     use ort::session::{builder::GraphOptimizationLevel, Session};
     use ort::value::Tensor;
-    use tokenizers::Tokenizer;
+    use tokenizers::{
+        PaddingParams, PaddingStrategy, Tokenizer, TruncationParams, TruncationStrategy,
+    };
 
     use crate::harness::{self, RawForward, DEFAULT_MAX_SEQ_LEN};
 
@@ -361,6 +363,230 @@ mod ort_engine {
         }
     }
 
+    /// Default number of (query, passage) pairs encoded and scored in one ONNX forward. Override with
+    /// `GLOSSA_RERANK_BATCH`. A cross-encoder is much heavier than the NLI head, so keep this modest.
+    const DEFAULT_RERANK_BATCH: usize = 32;
+
+    /// The loaded reranker model + tokenizer for one `model_dir`, shared across all
+    /// `InProcessReranker` handles for the same key (mirrors `Inner`/`MODEL_CACHE`).
+    struct RerankInner {
+        tokenizer: Tokenizer,
+        // rc.13 `Session::run` takes `&mut self`; serialize inference behind a Mutex (see `Inner`).
+        session: Mutex<Session>,
+        // The session's declared input names, in graph order. XLM-RoBERTa cross-encoders declare
+        // `input_ids` + `attention_mask` only (no `token_type_ids`); BERT-family models add
+        // `token_type_ids`. We feed exactly what the session declares.
+        input_names: Vec<String>,
+    }
+
+    type RerankCache = OnceLock<Mutex<HashMap<ModelCacheKey, Arc<RerankInner>>>>;
+
+    /// Process-global load-once cache for rerankers, keyed exactly like `MODEL_CACHE`
+    /// (`(canonicalized model_dir, providers, device_id, mem_limit_mb)`).
+    static RERANK_CACHE: RerankCache = OnceLock::new();
+
+    /// An in-process relevance scorer over an ONNX cross-encoder (e.g. bge-reranker-v2-m3). Unlike
+    /// [`InProcessNli`] it tokenizes (query, passage) PAIRS and reads ONE relevance logit per pair
+    /// (higher = more relevant), rather than a 3-way NLI head. Constructed from a local `model_dir`
+    /// (`model.onnx` [+ optional `model.onnx_data`] + `tokenizer.json`).
+    pub struct InProcessReranker {
+        inner: Arc<RerankInner>,
+        batch: usize,
+    }
+
+    impl InProcessReranker {
+        /// Load the cross-encoder + tokenizer from `model_dir`. EP knobs (`providers`, `device_id`,
+        /// `mem_limit_mb`) match [`InProcessNli::load`] exactly. Reuses a cached `RerankInner` for the
+        /// same `(canonicalized model_dir, providers, device_id, mem_limit_mb)`. Fail-open: any load
+        /// failure bubbles as `Err` (the glossa-side resolver catches it and drops to no-rerank).
+        pub fn load(
+            model_dir: &Path,
+            providers: &[String],
+            device_id: Option<i32>,
+            mem_limit_mb: Option<usize>,
+        ) -> anyhow::Result<Self> {
+            let cache_key = (
+                model_dir
+                    .canonicalize()
+                    .unwrap_or_else(|_| model_dir.to_path_buf()),
+                providers.to_vec(),
+                device_id,
+                mem_limit_mb,
+            );
+            let cache = RERANK_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+            if let Some(inner) = cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("rerank model cache mutex poisoned"))?
+                .get(&cache_key)
+            {
+                return Ok(Self {
+                    inner: Arc::clone(inner),
+                    batch: rerank_batch_size(),
+                });
+            }
+
+            let built = Arc::new(Self::build_inner(
+                model_dir,
+                providers,
+                device_id,
+                mem_limit_mb,
+            )?);
+            let mut guard = cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("rerank model cache mutex poisoned"))?;
+            let inner = Arc::clone(guard.entry(cache_key).or_insert(built));
+            Ok(Self {
+                inner,
+                batch: rerank_batch_size(),
+            })
+        }
+
+        fn build_inner(
+            model_dir: &Path,
+            providers: &[String],
+            device_id: Option<i32>,
+            mem_limit_mb: Option<usize>,
+        ) -> anyhow::Result<RerankInner> {
+            let tokenizer_path = model_dir.join("tokenizer.json");
+            let mut tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
+                anyhow::anyhow!("tokenizer load ({}): {e}", tokenizer_path.display())
+            })?;
+            // A cross-encoder scores a (query, passage) pair as one sequence; truncate the pair to the
+            // model's max length (longest-first, so the query is preserved) and pad each batch to its
+            // own longest member. Padded positions are masked by the attention mask, so the pad token
+            // id does not affect the score.
+            tokenizer
+                .with_truncation(Some(TruncationParams {
+                    max_length: DEFAULT_MAX_SEQ_LEN,
+                    strategy: TruncationStrategy::LongestFirst,
+                    ..Default::default()
+                }))
+                .map_err(|e| anyhow::anyhow!("tokenizer truncation config: {e}"))?;
+            tokenizer.with_padding(Some(PaddingParams {
+                strategy: PaddingStrategy::BatchLongest,
+                ..Default::default()
+            }));
+
+            let model_path = resolve_model_file(model_dir)?;
+            let eps = execution_provider_dispatch(providers, device_id, mem_limit_mb);
+            // Fail-open like `InProcessNli::build_inner`: NO `.error_on_failure()` here; a GPU EP that
+            // cannot register falls through to ORT's implicit CPU EP. `probe_rerank_ep` is the strict
+            // counterpart. `build_session`/`commit_from_file` loads `model.onnx_data` (external
+            // weights) from the model dir automatically.
+            let session = build_session(&model_path, eps, mem_limit_mb)?;
+            let input_names = session
+                .inputs()
+                .iter()
+                .map(|i| i.name().to_string())
+                .collect();
+
+            Ok(RerankInner {
+                tokenizer,
+                session: Mutex::new(session),
+                input_names,
+            })
+        }
+
+        /// One relevance score per passage (raw logit; higher = more relevant), in the same order as
+        /// `passages`. Encodes (query, passage) pairs in batches of `self.batch`.
+        pub fn rerank(&self, query: &str, passages: &[&str]) -> anyhow::Result<Vec<f32>> {
+            let mut out = Vec::with_capacity(passages.len());
+            for chunk in passages.chunks(self.batch.max(1)) {
+                let inputs: Vec<(&str, &str)> = chunk.iter().map(|p| (query, *p)).collect();
+                let encodings = self
+                    .inner
+                    .tokenizer
+                    .encode_batch(inputs, true)
+                    .map_err(|e| anyhow::anyhow!("rerank tokenize: {e}"))?;
+                let n = encodings.len();
+                let seq = encodings.first().map(|e| e.get_ids().len()).unwrap_or(0);
+                if n == 0 || seq == 0 {
+                    continue;
+                }
+                let mut ids = Vec::with_capacity(n * seq);
+                let mut mask = Vec::with_capacity(n * seq);
+                for e in &encodings {
+                    ids.extend(e.get_ids().iter().map(|&x| x as i64));
+                    mask.extend(e.get_attention_mask().iter().map(|&x| x as i64));
+                }
+                let ids_tensor = Tensor::from_array(([n, seq], ids))?;
+                let mask_tensor = Tensor::from_array(([n, seq], mask))?;
+
+                let mut session = self
+                    .inner
+                    .session
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("rerank onnx session mutex poisoned"))?;
+                // Feed exactly the inputs the graph declares. XLM-RoBERTa: `input_ids` +
+                // `attention_mask`. A BERT-family cross-encoder additionally declares
+                // `token_type_ids`; feed zeros (a single (query, passage) segment pair still scores
+                // correctly for a relevance head trained with segment 0 throughout under masking).
+                let outputs = if self
+                    .inner
+                    .input_names
+                    .iter()
+                    .any(|name| name == "token_type_ids")
+                {
+                    let token_type_tensor = Tensor::from_array(([n, seq], vec![0i64; n * seq]))?;
+                    session.run(ort::inputs![
+                        "input_ids" => ids_tensor,
+                        "attention_mask" => mask_tensor,
+                        "token_type_ids" => token_type_tensor,
+                    ])?
+                } else {
+                    session.run(ort::inputs![
+                        "input_ids" => ids_tensor,
+                        "attention_mask" => mask_tensor,
+                    ])?
+                };
+
+                // A cross-encoder relevance head emits one logit per pair; index the sole output by
+                // position (mirrors `forward_logits`) and read the leading `n` values.
+                let out0 = outputs
+                    .values()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("rerank onnx session returned no outputs"))?;
+                let (_shape, data) = out0
+                    .try_extract_tensor::<f32>()
+                    .map_err(|e| anyhow::anyhow!("rerank logits extraction: {e}"))?;
+                out.extend_from_slice(&data[..n.min(data.len())]);
+            }
+            Ok(out)
+        }
+    }
+
+    /// Batch size for pair encoding, from `GLOSSA_RERANK_BATCH` or [`DEFAULT_RERANK_BATCH`].
+    fn rerank_batch_size() -> usize {
+        std::env::var("GLOSSA_RERANK_BATCH")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(DEFAULT_RERANK_BATCH)
+    }
+
+    /// Strict GPU execution-provider probe for the reranker (mirror of [`probe_gpu_ep`], for a
+    /// `kbx rerank check`-style diagnostic). Never runs inference; does NOT touch the fail-open
+    /// [`InProcessReranker::load`] path. `Ok(None)` = CPU-only / no GPU EP compiled; `Ok(Some(name))`
+    /// = that EP initialized; `Err` = the EP was requested but failed to register (serving would
+    /// silently fall back to CPU).
+    pub fn probe_rerank_ep(
+        model_dir: &Path,
+        providers: &[String],
+        device_id: Option<i32>,
+        mem_limit_mb: Option<usize>,
+    ) -> anyhow::Result<Option<String>> {
+        let Some(name) = compiled_gpu_providers(providers).into_iter().next() else {
+            return Ok(None);
+        };
+        let Some(dispatch) = dispatch_for_gpu_name(name, device_id, mem_limit_mb) else {
+            return Ok(None);
+        };
+        let model_path = resolve_model_file(model_dir)?;
+        build_session(&model_path, vec![dispatch.error_on_failure()], mem_limit_mb)?;
+        Ok(Some(name.to_string()))
+    }
+
     /// Build the ORT execution-provider dispatch list for `providers`, in the caller's order.
     /// `device_id` (when `Some`) selects the GPU each CUDA/DirectML/ROCm EP binds to; `None` leaves
     /// every EP at its default (device 0). `mem_limit_mb` (when `Some`) caps GPU arena memory (CUDA)
@@ -513,6 +739,35 @@ mod ort_engine {
                     "entail score outside [0,1]: {scores:?}"
                 );
             }
+        }
+
+        /// Real-model smoke (env-gated): a relevant passage must outscore an irrelevant one.
+        /// Guards against a mis-served cross-encoder (the score inversion measured on a different
+        /// serving path). Skips when `RERANK_MODEL_DIR` is unset so CI without the model is green.
+        #[test]
+        fn reranker_scores_relevant_above_irrelevant() {
+            let Ok(dir) = std::env::var("RERANK_MODEL_DIR") else {
+                return;
+            };
+            let rr = InProcessReranker::load(Path::new(&dir), &["cpu".to_string()], None, None)
+                .expect("reranker load should succeed against a real RERANK_MODEL_DIR dir");
+            let q = "What is the capital of France?";
+            let scores = rr
+                .rerank(
+                    q,
+                    &[
+                        "Paris is the capital of France.",
+                        "Bananas are yellow fruit.",
+                    ],
+                )
+                .expect("rerank should succeed against a real model");
+            assert_eq!(scores.len(), 2);
+            assert!(
+                scores[0] > scores[1],
+                "relevant {} must beat irrelevant {}",
+                scores[0],
+                scores[1]
+            );
         }
 
         #[test]
