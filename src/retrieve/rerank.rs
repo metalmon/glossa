@@ -161,11 +161,27 @@ pub fn resolve_reranker(cfg: &RerankConfig) -> Option<Box<dyn Reranker>> {
     }
 }
 
-/// No ORT reranker compiled (burn-only, or no engine feature) => always plain BM25.
-#[cfg(not(all(
-    any(feature = "nli", feature = "nli-dynamic"),
-    not(feature = "nli-burn")
-)))]
+/// burn/wgpu engine (mirrors `gate::resolve_scorer`'s burn arm): `[rerank]` active + `model_dir`
+/// set => a real `InProcessBurnReranker`. Execution-provider config is ignored — the burn backend
+/// selects its own device. Same fail-open contract: any load error downgrades to `None` (plain
+/// BM25), never propagated.
+#[cfg(feature = "nli-burn")]
+pub fn resolve_reranker(cfg: &RerankConfig) -> Option<Box<dyn Reranker>> {
+    if !cfg.is_active() {
+        return None;
+    }
+    let dir = cfg.model_dir.as_ref()?;
+    match glossa_nli::InProcessBurnReranker::load(dir) {
+        Ok(r) => Some(Box::new(r)),
+        Err(e) => {
+            eprintln!("rerank (burn) scorer load failed ({}): {e}", dir.display());
+            None
+        }
+    }
+}
+
+/// No engine feature on => no in-process reranker even compiled; always plain BM25.
+#[cfg(not(any(feature = "nli", feature = "nli-dynamic", feature = "nli-burn")))]
 pub fn resolve_reranker(_cfg: &RerankConfig) -> Option<Box<dyn Reranker>> {
     None
 }
@@ -309,6 +325,16 @@ mod tests {
     fn resolve_reranker_none_when_inactive() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = crate::retrieve::config::RerankConfig::resolve(dir.path()); // off by default
+        assert!(resolve_reranker(&cfg).is_none());
+    }
+
+    // Same as above but named for the burn build (runs identically under `--features nli-burn`,
+    // where `resolve_reranker` is the burn arm — its own `cfg.is_active()` early return still
+    // fires for an inactive config).
+    #[test]
+    fn resolve_reranker_none_when_inactive_burn_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = crate::retrieve::config::RerankConfig::resolve(dir.path());
         assert!(resolve_reranker(&cfg).is_none());
     }
 

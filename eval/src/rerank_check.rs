@@ -19,6 +19,23 @@ pub fn rerank_check_ok(relevant: f32, irrelevant: f32) -> bool {
     relevant > irrelevant
 }
 
+/// Human label for the compiled reranker engine, shown in the `check` report. Mirrors
+/// `nli_check::engine_label`.
+fn engine_label() -> &'static str {
+    #[cfg(feature = "nli-burn")]
+    {
+        "burn/vulkan"
+    }
+    #[cfg(all(feature = "nli-burn-cpu", not(feature = "nli-burn")))]
+    {
+        "burn/cpu"
+    }
+    #[cfg(not(any(feature = "nli-burn", feature = "nli-burn-cpu")))]
+    {
+        "ort"
+    }
+}
+
 /// `kbx rerank check --model-dir <dir> [--ep ...] [--ep-device N] [--ep-mem-limit-mb N]`: probe
 /// the configured execution provider the same STRICT way `kbx nli check` does
 /// (`glossa_nli::probe_rerank_ep`, which builds a session with `.error_on_failure()` so a GPU EP
@@ -27,19 +44,21 @@ pub fn rerank_check_ok(relevant: f32, irrelevant: f32) -> bool {
 /// irrelevant]) pair — deliberately NOT drawn from any corpus/dataset/gold — asserting relevant >
 /// irrelevant via [`rerank_check_ok`] (the inversion guard).
 ///
-/// Only reachable when the real ORT reranker path is compiled — i.e. the features that pull in
-/// the direct `glossa-nli` dep with its `nli-ort` engine (`nli-directml`/`nli-coreml`/`nli-cuda`/
-/// `nli-rocm`; there is no burn/wgpu reranker backend, unlike the NLI verifier). Printing the
-/// diagnosis IS the deliverable — a NOT READY verdict is not a process error, so this always
-/// returns `Ok(())` (a load/inference error while gathering facts still propagates as `Err`,
-/// matching `nli_check`'s IO-vs-diagnosis split).
+/// On a burn/wgpu build (`nli-burn`/`nli-burn-cpu`) the same sanity pair is scored via
+/// `glossa_nli::InProcessBurnReranker` instead — the burn backend selects its own device, so there
+/// is no EP to probe; the report prints `engine = burn/<backend>` in place of `ep_active`, mirroring
+/// how `kbx nli check` handles the burn engine.
+///
+/// Printing the diagnosis IS the deliverable — a NOT READY verdict is not a process error, so this
+/// always returns `Ok(())` (a load/inference error while gathering facts still propagates as
+/// `Err`, matching `nli_check`'s IO-vs-diagnosis split).
 pub fn rerank_check(
     model_dir: PathBuf,
     ep: Vec<String>,
     ep_device: Option<i32>,
     ep_mem_limit_mb: Option<usize>,
 ) -> Result<()> {
-    println!("engine         = ort");
+    println!("engine         = {}", engine_label());
     println!("model_dir      = {}", model_dir.display());
 
     #[cfg(any(
@@ -100,19 +119,58 @@ pub fn rerank_check(
         }
     }
 
+    #[cfg(any(feature = "nli-burn", feature = "nli-burn-cpu"))]
+    {
+        // burn/wgpu engine: the backend selects its own device, so there is no EP to probe —
+        // `engine_label()` above already reported which backend is compiled in. `ep`/`ep_device`/
+        // `ep_mem_limit_mb` are ORT-only knobs and are ignored here.
+        let _ = (&ep, ep_device, ep_mem_limit_mb);
+
+        // Fixed, language-neutral, generic sanity pair — no corpus/gold values (see
+        // [[no-corpus-values-in-sop]]): a capital-city fact (relevant) vs. an unrelated fruit fact
+        // (irrelevant). Same pair as the ORT path above.
+        let query = "What is the capital of France?";
+        let relevant = "Paris is the capital and most populous city of France.";
+        let irrelevant = "Bananas are a good source of potassium.";
+
+        let reranker = glossa_nli::InProcessBurnReranker::load(&model_dir)?;
+        let scores = reranker.rerank(query, &[relevant, irrelevant])?;
+        match scores.as_slice() {
+            [rel_score, irr_score, ..] => {
+                println!("relevant score   = {rel_score}");
+                println!("irrelevant score = {irr_score}");
+                let ok = rerank_check_ok(*rel_score, *irr_score);
+                println!(
+                    "=> {}",
+                    if ok {
+                        "READY (relevant > irrelevant)"
+                    } else {
+                        "NOT READY: irrelevant scored >= relevant (inversion)"
+                    }
+                );
+            }
+            _ => println!(
+                "=> not ready: rerank() returned {} score(s), expected 2",
+                scores.len()
+            ),
+        }
+    }
+
     #[cfg(not(any(
         feature = "nli-directml",
         feature = "nli-coreml",
         feature = "nli-cuda",
         feature = "nli-rocm",
+        feature = "nli-burn",
+        feature = "nli-burn-cpu",
     )))]
     {
         let _ = (ep, ep_device, ep_mem_limit_mb);
         println!(
             "=> not ready: reranker not available in this kbx build (the reranker itself is \
              CPU-capable in glossa, but this binary wasn't built with a feature that pulls it \
-             in) - rebuild kbx with --features nli-directml (or nli-cuda/nli-coreml/nli-rocm) \
-             to enable it"
+             in) - rebuild kbx with --features nli-directml (or nli-cuda/nli-coreml/nli-rocm/ \
+             nli-burn) to enable it"
         );
     }
 
