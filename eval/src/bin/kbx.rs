@@ -426,21 +426,29 @@ enum Cmd {
 /// will actually run for a corpus or has silently fallen back to AC-only.
 #[derive(Subcommand)]
 enum NliCmd {
-    /// Download the ONNX model + tokenizer from a HuggingFace repo into a local dir (the dir
-    /// `[verify.nli].model_dir` points at). No network happens until this runs.
+    /// Download the ONNX model + tokenizer into a local dir (the dir `[verify.nli].model_dir` points
+    /// at). No network happens until this runs. Simple mode pulls a precision variant from the
+    /// default repo; `--repo`/`--file` override for third-party models.
     Download {
-        /// HuggingFace repo id, e.g. `metalmon/rubert-nli-threeway-onnx`.
+        /// HuggingFace repo id. Omitted ⇒ the default NLI repo (`metalmon80/rubert-nli-threeway-onnx`).
         #[arg(long)]
-        repo: String,
+        repo: Option<String>,
         /// Git revision / branch / tag.
         #[arg(long, default_value = "main")]
         revision: String,
         /// Local directory to write into (created if absent).
         #[arg(long)]
         to: PathBuf,
-        /// File(s) to fetch; repeat for several. Defaults to the standard export set.
+        /// Explicit file list (third-party models); mutually exclusive with `--fp16`/`--int8`.
+        /// Empty ⇒ the standard variant set (see `--fp16`/`--int8`; neither ⇒ fp32).
         #[arg(long = "file")]
         files: Vec<String>,
+        /// Fetch the fp16 variant (`model.fp16.onnx`), saved locally as `model.onnx`. GPU/prod.
+        #[arg(long)]
+        fp16: bool,
+        /// Fetch the int8 variant (`model.int8.onnx`), saved locally as `model.onnx`. CPU.
+        #[arg(long)]
+        int8: bool,
     },
     /// Report whether the NLI verifier will actually run for a corpus, or why it fails open to AC.
     Check {
@@ -507,6 +515,122 @@ enum RerankCmd {
         #[arg(long = "ep-mem-limit-mb")]
         ep_mem_limit_mb: Option<usize>,
     },
+    /// Download the reranker ONNX + tokenizer into a local dir (the dir `[rerank].model_dir` points
+    /// at). Simple mode pulls a precision variant from the default reranker repo; `--repo`/`--file`
+    /// override for third-party models. Mirrors `kbx nli download`.
+    Download {
+        /// HuggingFace repo id. Omitted ⇒ the default reranker repo
+        /// (`metalmon80/bge-reranker-v2-m3-en-ru-onnx`).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Git revision / branch / tag.
+        #[arg(long, default_value = "main")]
+        revision: String,
+        /// Local directory to write into (created if absent).
+        #[arg(long)]
+        to: PathBuf,
+        /// Explicit file list (third-party models); mutually exclusive with `--fp16`/`--int8`.
+        /// Empty ⇒ the standard variant set (neither flag ⇒ fp32).
+        #[arg(long = "file")]
+        files: Vec<String>,
+        /// Fetch the fp16 variant (`model.fp16.onnx`), saved locally as `model.onnx`. GPU/prod.
+        #[arg(long)]
+        fp16: bool,
+        /// Fetch the int8 variant (`model.int8.onnx`), saved locally as `model.onnx`. CPU.
+        #[arg(long)]
+        int8: bool,
+    },
+    /// Write `[rerank]` (model_dir + scorer, optional pool_size/execution_providers/ep_*) into the
+    /// corpus `ontology.toml`, preserving all other tables/comments. Pairs with `download` + `check`.
+    Set {
+        /// Corpus root (kb-style PATH resolution, like `nli set`).
+        path: Option<PathBuf>,
+        /// Local model dir (what `download --to` produced). Written to `[rerank].model_dir`.
+        #[arg(long = "model-dir")]
+        model_dir: PathBuf,
+        /// Scorer backend. Written to `[rerank].scorer`.
+        #[arg(long, default_value = "in_process")]
+        scorer: String,
+        /// Candidate pool size to rerank; written to `[rerank].pool_size` only if given.
+        #[arg(long = "pool-size")]
+        pool_size: Option<usize>,
+        /// Ordered execution-provider preference list. Repeat or comma-join (`--ep cuda,cpu`).
+        /// Written to `[rerank].execution_providers` only if given.
+        #[arg(long = "ep")]
+        ep: Vec<String>,
+        /// GPU device id the EP binds to. Written to `[rerank].ep_device` only if given.
+        #[arg(long = "ep-device")]
+        ep_device: Option<i32>,
+        /// GPU arena memory cap in MB for the reranker EP. Written to `[rerank].ep_mem_limit_mb`
+        /// only if given.
+        #[arg(long = "ep-mem-limit-mb")]
+        ep_mem_limit_mb: Option<usize>,
+    },
+}
+
+/// Default HF repos for the two in-process cross-encoder models — used by `download` when `--repo`
+/// is omitted (the convenient path); overridable via `--repo` for third-party models.
+const NLI_DEFAULT_REPO: &str = "metalmon80/rubert-nli-threeway-onnx";
+const RERANK_DEFAULT_REPO: &str = "metalmon80/bge-reranker-v2-m3-en-ru-onnx";
+
+/// Resolve the precision variant from the `download` flags. `--fp16`/`--int8` are mutually
+/// exclusive; a variant flag cannot combine with an explicit `--file` list. `None` ⇒ no variant
+/// selected (caller uses the explicit files if any, else fp32).
+fn resolve_variant(
+    fp16: bool,
+    int8: bool,
+    files: &[String],
+) -> Result<Option<kb_eval::download::Variant>> {
+    use kb_eval::download::Variant;
+    if fp16 && int8 {
+        anyhow::bail!("--fp16 and --int8 are mutually exclusive");
+    }
+    if !files.is_empty() && (fp16 || int8) {
+        anyhow::bail!("--file cannot be combined with --fp16/--int8 (explicit files vs variant)");
+    }
+    Ok(if fp16 {
+        Some(Variant::Fp16)
+    } else if int8 {
+        Some(Variant::Int8)
+    } else {
+        None
+    })
+}
+
+/// Shared `download` dispatch for both `nli` and `rerank`: resolve the repo (default when omitted)
+/// and the variant, fetch (explicit `--file` list, else the variant's file set → canonical
+/// `model.onnx`), and print a summary.
+fn run_download(
+    default_repo: &str,
+    repo: Option<String>,
+    revision: String,
+    to: PathBuf,
+    files: Vec<String>,
+    fp16: bool,
+    int8: bool,
+) -> Result<()> {
+    let repo = repo.unwrap_or_else(|| default_repo.to_string());
+    let variant = resolve_variant(fp16, int8, &files)?;
+    let downloaded = if !files.is_empty() {
+        kb_eval::download::download_files(&repo, &revision, &files, &to)?
+    } else {
+        kb_eval::download::download_variant(
+            &repo,
+            &revision,
+            &to,
+            variant.unwrap_or(kb_eval::download::Variant::Fp32),
+        )?
+    };
+    let mut total = 0u64;
+    for (path, bytes) in &downloaded {
+        println!("downloaded {} ({bytes} bytes)", path.display());
+        total += bytes;
+    }
+    println!(
+        "downloaded {} file(s), {total} bytes total from {repo}",
+        downloaded.len()
+    );
+    Ok(())
 }
 
 /// `kbx eval` subcommands: `run` is the former flat `kbx eval <path>` (BREAKING: now `kbx eval run
@@ -775,29 +899,10 @@ fn main() -> Result<()> {
                     revision,
                     to,
                     files,
+                    fp16,
+                    int8,
                 },
-        } => {
-            let files = if files.is_empty() {
-                vec![
-                    "model.onnx".to_string(),
-                    "tokenizer.json".to_string(),
-                    "config.json".to_string(),
-                ]
-            } else {
-                files
-            };
-            let downloaded = kb_eval::download::download_files(&repo, &revision, &files, &to)?;
-            let mut total = 0u64;
-            for (name, (path, bytes)) in files.iter().zip(downloaded.iter()) {
-                println!("downloaded {name} ({bytes} bytes) -> {}", path.display());
-                total += bytes;
-            }
-            println!(
-                "downloaded {} file(s), {total} bytes total",
-                downloaded.len()
-            );
-            Ok(())
-        }
+        } => run_download(NLI_DEFAULT_REPO, repo, revision, to, files, fp16, int8),
         Cmd::Nli {
             cmd: NliCmd::Check { path },
         } => kb_eval::nli_check::nli_check(path),
@@ -853,6 +958,47 @@ fn main() -> Result<()> {
                 .map(str::to_string)
                 .collect();
             kb_eval::rerank_check::rerank_check(model_dir, ep, ep_device, ep_mem_limit_mb)
+        }
+        Cmd::Rerank {
+            cmd:
+                RerankCmd::Download {
+                    repo,
+                    revision,
+                    to,
+                    files,
+                    fp16,
+                    int8,
+                },
+        } => run_download(RERANK_DEFAULT_REPO, repo, revision, to, files, fp16, int8),
+        Cmd::Rerank {
+            cmd:
+                RerankCmd::Set {
+                    path,
+                    model_dir,
+                    scorer,
+                    pool_size,
+                    ep,
+                    ep_device,
+                    ep_mem_limit_mb,
+                },
+        } => {
+            // Flatten repeated + comma-joined `--ep` into one ordered list (mirrors `nli set`).
+            let ep: Vec<String> = ep
+                .iter()
+                .flat_map(|s| s.split(','))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            kb_eval::rerank_check::rerank_set(
+                path,
+                model_dir,
+                scorer,
+                pool_size,
+                ep,
+                ep_device,
+                ep_mem_limit_mb,
+            )
         }
     }
 }
@@ -2429,6 +2575,66 @@ mod tests {
             }
             _ => panic!("expected Cmd::Eval Run"),
         }
+    }
+
+    #[test]
+    fn rerank_download_and_set_parse() {
+        // `rerank download --fp16` with no --repo -> repo None (default applied at dispatch).
+        let cli =
+            Cli::try_parse_from(["kbx", "rerank", "download", "--fp16", "--to", "d"]).unwrap();
+        match cli.cmd {
+            Cmd::Rerank {
+                cmd:
+                    RerankCmd::Download {
+                        repo,
+                        to,
+                        fp16,
+                        int8,
+                        files,
+                        ..
+                    },
+            } => {
+                assert!(repo.is_none());
+                assert!(fp16 && !int8);
+                assert!(files.is_empty());
+                assert_eq!(to, PathBuf::from("d"));
+            }
+            _ => panic!("expected rerank download"),
+        }
+        // `rerank set --model-dir m` -> scorer defaults to in_process, pool_size None.
+        let cli = Cli::try_parse_from(["kbx", "rerank", "set", "--model-dir", "m"]).unwrap();
+        match cli.cmd {
+            Cmd::Rerank {
+                cmd:
+                    RerankCmd::Set {
+                        model_dir,
+                        scorer,
+                        pool_size,
+                        ..
+                    },
+            } => {
+                assert_eq!(model_dir, PathBuf::from("m"));
+                assert_eq!(scorer, "in_process");
+                assert!(pool_size.is_none());
+            }
+            _ => panic!("expected rerank set"),
+        }
+    }
+
+    #[test]
+    fn variant_flags_mutually_exclusive_and_default_fp32() {
+        use kb_eval::download::Variant;
+        assert!(resolve_variant(true, true, &[]).is_err()); // --fp16 + --int8
+        assert!(resolve_variant(true, false, &["model.onnx".to_string()]).is_err()); // variant + --file
+        assert!(resolve_variant(false, false, &[]).unwrap().is_none()); // default -> fp32
+        assert_eq!(
+            resolve_variant(false, true, &[]).unwrap(),
+            Some(Variant::Int8)
+        );
+        assert_eq!(
+            resolve_variant(true, false, &[]).unwrap(),
+            Some(Variant::Fp16)
+        );
     }
 
     #[test]
