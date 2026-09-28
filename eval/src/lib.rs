@@ -14,6 +14,7 @@ pub mod distil;
 pub mod download;
 pub mod episode;
 pub mod export_tz;
+pub mod fcr;
 pub mod finetune;
 pub mod gepa;
 pub mod gepa_checkpoint;
