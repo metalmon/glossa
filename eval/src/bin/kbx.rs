@@ -497,7 +497,10 @@ enum NliCmd {
 #[derive(Subcommand)]
 enum RerankCmd {
     /// Probe the reranker's execution provider and run a fixed relevant-vs-irrelevant sanity pair
-    /// through `InProcessReranker`, reporting `ep_active` and both scores.
+    /// through `InProcessReranker`, reporting `ep_active` and both scores. Unlike `kbx nli check`
+    /// (which resolves a corpus), this checks the `--model-dir` weights directly; it does not read
+    /// the `[rerank]` config `rerank set` wrote, so a green check means the model loads and ranks,
+    /// not that retrieval is wired to use it.
     Check {
         /// Local model dir holding the cross-encoder ONNX weights + tokenizer.
         #[arg(long = "model-dir")]
@@ -597,6 +600,12 @@ fn resolve_variant(
     })
 }
 
+/// Resolve the effective HF repo: the explicit `--repo` when given, else the per-command baked
+/// default (the convenient path). Kept a pure fn so both branches are unit-tested without network.
+fn resolve_repo(repo: Option<String>, default_repo: &str) -> String {
+    repo.unwrap_or_else(|| default_repo.to_string())
+}
+
 /// Shared `download` dispatch for both `nli` and `rerank`: resolve the repo (default when omitted)
 /// and the variant, fetch (explicit `--file` list, else the variant's file set → canonical
 /// `model.onnx`), and print a summary.
@@ -609,7 +618,7 @@ fn run_download(
     fp16: bool,
     int8: bool,
 ) -> Result<()> {
-    let repo = repo.unwrap_or_else(|| default_repo.to_string());
+    let repo = resolve_repo(repo, default_repo);
     let variant = resolve_variant(fp16, int8, &files)?;
     let downloaded = if !files.is_empty() {
         kb_eval::download::download_files(&repo, &revision, &files, &to)?
@@ -2634,6 +2643,18 @@ mod tests {
         assert_eq!(
             resolve_variant(true, false, &[]).unwrap(),
             Some(Variant::Fp16)
+        );
+    }
+
+    #[test]
+    fn resolve_repo_default_when_absent_override_when_present() {
+        // `--repo` absent -> the per-command baked default repo is used.
+        assert_eq!(resolve_repo(None, RERANK_DEFAULT_REPO), RERANK_DEFAULT_REPO);
+        assert_eq!(resolve_repo(None, NLI_DEFAULT_REPO), NLI_DEFAULT_REPO);
+        // `--repo` present -> it overrides the default (third-party model).
+        assert_eq!(
+            resolve_repo(Some("someone/other-model".to_string()), RERANK_DEFAULT_REPO),
+            "someone/other-model"
         );
     }
 

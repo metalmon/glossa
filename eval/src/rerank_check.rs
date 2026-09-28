@@ -332,5 +332,20 @@ mod tests {
             Some(0.3),
             "sibling table must survive"
         );
+
+        // Substring/toml_edit checks don't prove the RUNTIME retrieval path can read the keys back.
+        // Resolve through `RerankConfig::resolve` — the same read `resolve_reranker` uses — so this
+        // test proves parity with the nli twin (`write_nli_config_roundtrips_into_ontology`), not
+        // just that bytes landed in the file.
+        let cfg = glossa::retrieve::config::RerankConfig::resolve(&g);
+        assert!(cfg.is_active(), "written [rerank] must resolve as active");
+        assert_eq!(cfg.scorer.as_deref(), Some("in_process"));
+        assert_eq!(cfg.model_dir, Some(std::path::PathBuf::from("/m")));
+        assert_eq!(cfg.pool_size, 40);
+        assert_eq!(
+            cfg.execution_providers,
+            vec!["cuda".to_string(), "cpu".to_string()]
+        );
+        assert_eq!(cfg.ep_mem_limit_mb, Some(1024));
     }
 }
