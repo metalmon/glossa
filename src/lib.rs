@@ -22,6 +22,7 @@ pub mod ontology_templates;
 pub mod prompts;
 pub mod query;
 pub mod read;
+pub mod retrieve;
 pub mod root;
 pub mod sdnotify;
 pub mod search;
