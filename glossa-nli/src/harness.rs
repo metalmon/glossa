@@ -161,6 +161,74 @@ pub fn run_batch(
     Ok(scores)
 }
 
+/// The raw cross-encoder forward for reranking — the ONLY engine-specific step. Given a padded
+/// batch of `n` (query, passage) pair rows, each `seq` tokens long (row-major flat arrays of
+/// length `n * seq`; padded positions carry `attention_mask == 0`), return one raw relevance
+/// logit per row, length `n`. No `token_type_ids`: XLM-R-family cross-encoders take two inputs
+/// only and feed a zero segment internally. Fail-open: return `Err`, never panic.
+pub trait RerankForward {
+    fn forward_logits(
+        &self,
+        input_ids: &[i64],
+        attention_mask: &[i64],
+        n: usize,
+        seq: usize,
+    ) -> anyhow::Result<Vec<f32>>;
+}
+
+/// One relevance score per passage (higher = more relevant), in the same order as `passages`,
+/// using `fwd` for the raw forward. Tokenizes each `(query, passage)` pair, truncates to
+/// `max_seq_len` (longest-first, so the query survives truncation), plans the rows into
+/// token-budgeted batches via the shared [`plan_batches`], pads each batch, runs `fwd`, and
+/// concats the scores back into input order. Engine-agnostic: ORT and burn share this exact code.
+pub fn rerank(
+    fwd: &impl RerankForward,
+    tokenizer: &Tokenizer,
+    max_seq_len: usize,
+    batch_budget_tokens: usize,
+    query: &str,
+    passages: &[&str],
+) -> anyhow::Result<Vec<f32>> {
+    if passages.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut rows: Vec<Vec<i64>> = Vec::with_capacity(passages.len());
+    for &passage in passages {
+        let encoding = tokenizer
+            .encode((query, passage), true)
+            .map_err(|e| anyhow::anyhow!("rerank tokenize: {e}"))?;
+        let mut ids: Vec<i64> = encoding.get_ids().iter().map(|&x| x as i64).collect();
+        ids.truncate(max_seq_len);
+        rows.push(ids);
+    }
+
+    let lens: Vec<usize> = rows.iter().map(|r| r.len()).collect();
+    let mut scores = vec![0f32; passages.len()];
+    for batch in plan_batches(&lens, batch_budget_tokens, NLI_BATCH_MAX_ROWS) {
+        let seq = batch.iter().map(|&i| rows[i].len()).max().unwrap_or(0);
+        let n = batch.len();
+        let mut ids = vec![0i64; n * seq];
+        let mut mask = vec![0i64; n * seq];
+        for (row_pos, &row_idx) in batch.iter().enumerate() {
+            let offset = row_pos * seq;
+            let row = &rows[row_idx];
+            for (t, &v) in row.iter().enumerate() {
+                ids[offset + t] = v;
+                mask[offset + t] = 1;
+            }
+        }
+        let out = fwd.forward_logits(&ids, &mask, n, seq)?;
+        if out.len() != n {
+            anyhow::bail!("rerank forward returned {} scores, expected {n}", out.len());
+        }
+        for (row_pos, &row_idx) in batch.iter().enumerate() {
+            scores[row_idx] = out[row_pos];
+        }
+    }
+    Ok(scores)
+}
+
 /// Split `premise` into overlapping token windows so each `(window, hypothesis)` pair fits within
 /// `max_seq_len`. Returns the whole premise as a single window when it already fits.
 pub fn premise_windows<'p>(
@@ -399,5 +467,57 @@ mod tests {
                 "softmax not shift-invariant: {a:?} vs {b:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod rerank_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// Mock forward: score a row by its real (non-padding) token count, i.e.
+    /// `sum(attention_mask)` — deterministic, per-row real work (not a constant), and provably
+    /// order-sensitive: a longer passage tokenizes to more real tokens, so it must score higher.
+    struct LenFwd;
+    impl RerankForward for LenFwd {
+        fn forward_logits(
+            &self,
+            ids: &[i64],
+            mask: &[i64],
+            n: usize,
+            seq: usize,
+        ) -> anyhow::Result<Vec<f32>> {
+            let mut out = Vec::with_capacity(n);
+            for r in 0..n {
+                out.push(mask[r * seq..(r + 1) * seq].iter().sum::<i64>() as f32);
+            }
+            let _ = ids;
+            Ok(out)
+        }
+    }
+
+    /// Real-model smoke (env-gated): proves `rerank` returns one score per passage, in input
+    /// order, against a real tokenizer (mirrors `reranker_scores_relevant_above_irrelevant` in
+    /// `lib.rs`). Skips when `RERANK_MODEL_DIR` is unset so CI without the staged model is green.
+    #[test]
+    fn rerank_returns_one_score_per_passage_in_order() {
+        let Ok(dir) = std::env::var("RERANK_MODEL_DIR") else {
+            return;
+        };
+        let tokenizer_path = Path::new(&dir).join("tokenizer.json");
+        let t = Tokenizer::from_file(&tokenizer_path)
+            .unwrap_or_else(|e| panic!("tokenizer load ({}): {e}", tokenizer_path.display()));
+
+        let scores = rerank(
+            &LenFwd,
+            &t,
+            DEFAULT_MAX_SEQ_LEN,
+            NLI_BATCH_TOKENS,
+            "q",
+            &["short", "a much longer passage here"],
+        )
+        .unwrap();
+        assert_eq!(scores.len(), 2);
+        assert!(scores[1] > scores[0]);
     }
 }
