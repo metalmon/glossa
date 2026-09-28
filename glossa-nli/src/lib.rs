@@ -31,6 +31,8 @@ pub mod harness;
 mod burn_engine;
 #[cfg(feature = "nli-burn-wgpu")]
 pub use burn_engine::InProcessBurnNli;
+#[cfg(feature = "nli-burn-wgpu")]
+pub use burn_engine::InProcessBurnReranker;
 
 #[cfg(feature = "nli-ort")]
 pub use ort_engine::{probe_gpu_ep, probe_rerank_ep, InProcessNli, InProcessReranker};

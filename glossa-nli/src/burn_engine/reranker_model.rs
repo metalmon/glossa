@@ -13,11 +13,6 @@
 //! The classification head is RoBERTa's `dense -> tanh -> out_proj` over the `<s>` (token-0) hidden
 //! state — there is NO BERT-style pooler — and the output is `[batch, num_labels]` (num_labels == 1).
 
-// The model type + config are consumed by the Task 4 engine/load (`RobertaRerankerModel::forward`,
-// `RobertaRerankerConfig::init`). Until that lands they are exercised only by this file's shape test,
-// so the non-test lib build sees them as unused; drop this allow when Task 4 wires the engine.
-#![allow(dead_code)]
-
 use burn::nn::{Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig};
 use burn::prelude::*;
 use burn::tensor::activation::tanh;

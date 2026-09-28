@@ -17,7 +17,7 @@ nli-ort = ["dep:ort", "dep:tokenizers"]       # engine CODE only, NO linking str
 # production) or `nli-burn-cpu` (NdArray, CI parity tests, no GPU runner). burn crates are pure Rust
 # (no external build/runtime deps beyond the Vulkan loader at runtime), so there is no bundled/
 # load-dynamic split like ORT.
-nli-burn-wgpu = ["dep:burn", "dep:burn-store", "dep:tokenizers"]
+nli-burn-wgpu = ["dep:burn", "dep:burn-store", "dep:tokenizers", "dep:serde_json"]
 nli-burn-vulkan = ["nli-burn-wgpu", "burn/vulkan", "burn/autotune", "burn/fusion"]  # GPU (SPIR-V)
 nli-burn-cpu = ["nli-burn-wgpu", "burn/ndarray"]                                    # tests/CI
 # Linking strategy — EXACTLY ONE (XOR, enforced by compile_error! in lib.rs). `nli-ort` (above) is
@@ -77,6 +77,9 @@ tokenizers = { version = "=0.23.2", optional = true, default-features = false, f
 # (`burn/vulkan` / `burn/ndarray`). burn-store loads the safetensors weights into the module.
 burn = { version = "0.21", optional = true, default-features = false, features = ["std"] }
 burn-store = { version = "0.21", optional = true, features = ["safetensors"] }
+# Reads the model's `config.json` (dims, layer_norm_eps, pad_token_id) for the burn reranker load.
+# Optional, pulled only by `nli-burn-wgpu`; also a dev-dependency for the parity-fixture tests.
+serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 # Temp dirs for `resolve_model_file`'s unit tests (pure filesystem resolution, no model/session).
