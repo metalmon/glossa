@@ -70,10 +70,12 @@ fn looks_empty(body: &str) -> bool {
 /// call) and return their non-empty results fused — concrete alternatives instead of the same dead
 /// result. Falls back to [`repeat_nudge`] when nothing complementary comes back. Graph-backed
 /// candidates (glossary/sql) are skipped when no graph is present.
+#[allow(clippy::too_many_arguments)]
 pub fn next_best_action(
     name: &str,
     term: &str,
     idx: &DocIndex,
+    glossa_dir: &std::path::Path,
     graph: Option<&GraphStore>,
     spec: &ChainSpec,
     trace: &TraceLog,
@@ -93,7 +95,7 @@ pub fn next_best_action(
         out.push_str(&format!("\n[{tool}]\n{snip}\n"));
     };
     if name != "search" {
-        let (body, _) = crate::tools::search(idx, term, 12, None, None, trace, None);
+        let (body, _) = crate::tools::search(idx, glossa_dir, term, 12, None, None, trace, None);
         fold("search", &body, &mut any, &mut out);
     }
     if let Some(g) = graph {

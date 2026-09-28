@@ -1630,13 +1630,19 @@ fn main() -> anyhow::Result<()> {
                 glossa::index::store::ensure_fresh_at(&rr.roots, &rr.state_base)?; // file-first: pick up new/changed docs
                 let idx =
                     glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
-                for h in idx.search_filtered(
+                // Route through the shared rerank stage so `kb search` order matches the MCP `search`
+                // tool. With no `[rerank]` config this is plain BM25 (identity) — output unchanged.
+                let glossa_dir = rr.state_base.join(".glossa");
+                let (hits, _info) = glossa::retrieve::rerank::retrieve(
+                    &idx,
+                    &glossa_dir,
                     &pattern,
                     limit,
                     glob.as_deref(),
                     file_type.as_deref(),
                     scope.as_deref(),
-                )? {
+                )?;
+                for h in hits {
                     // Lead with the copy-ready `path#ord` token (same ref the MCP tools + `kb read`
                     // consume), then the human location label + snippet. A `p.N` page label is
                     // dropped — it only duplicates the `#ord` already in the token.

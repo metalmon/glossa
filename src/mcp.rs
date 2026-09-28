@@ -449,10 +449,12 @@ impl GlossaServer {
             Some(term) => match self.handle() {
                 Ok(h) => {
                     let spec = crate::tools::ChainSpec::from_ontology(&self.ontology());
+                    let glossa_dir = self.state_base.join(".glossa");
                     crate::tools::recovery::next_best_action(
                         tool,
                         term,
                         &h.idx(),
+                        &glossa_dir,
                         Some(&h.graph),
                         &spec,
                         &self.trace,
@@ -1539,8 +1541,10 @@ impl GlossaServer {
         self.freshen_now().await;
         let h = self.handle().map_err(internal)?;
         let key = format!("search:{a:?}");
+        let glossa_dir = self.state_base.join(".glossa");
         let (body, hits) = crate::tools::search(
             &h.idx(),
+            &glossa_dir,
             &a.query,
             a.limit.unwrap_or(50),
             a.glob.as_deref(),

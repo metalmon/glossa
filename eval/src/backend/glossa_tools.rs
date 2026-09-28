@@ -274,8 +274,10 @@ mod reader_signal_render_tests {
 ///
 /// Takes a borrowed `DocIndex` so the caller opens it once per question and reuses it (with its
 /// cached reader) across every search/read in the episode, instead of reopening per tool call.
+#[allow(clippy::too_many_arguments)]
 pub fn run_search(
     idx: &DocIndex,
+    glossa_dir: &std::path::Path,
     query: &str,
     limit: usize,
     glob: Option<&str>,
@@ -283,7 +285,8 @@ pub fn run_search(
     trace: &TraceLog,
     scope: Option<&str>,
 ) -> (String, Vec<String>) {
-    let (body, hits) = glossa::tools::search(idx, query, limit, glob, file_type, trace, scope);
+    let (body, hits) =
+        glossa::tools::search(idx, glossa_dir, query, limit, glob, file_type, trace, scope);
     (body, hits.iter().map(|h| h.location.clone()).collect())
 }
 
@@ -367,7 +370,19 @@ pub fn exec(
             let glob = args.get("glob").and_then(|v| v.as_str());
             let file_type = args.get("file_type").and_then(|v| v.as_str());
             let scope = args.get("scope").and_then(|v| v.as_str());
-            let (body, titles) = run_search(idx, query, limit, glob, file_type, trace, scope);
+            // The agent index was opened from `root`; its `.glossa` dir carries any `[rerank]`
+            // config (none by default -> plain BM25, identical to before).
+            let glossa_dir = root.join(".glossa");
+            let (body, titles) = run_search(
+                idx,
+                &glossa_dir,
+                query,
+                limit,
+                glob,
+                file_type,
+                trace,
+                scope,
+            );
             (body, titles, Vec::new())
         }
         "glob" => {
@@ -687,14 +702,13 @@ pub fn unproductive_steer(name: &str) -> String {
 
 /// Next-best-action on a stuck (repeated) call — thin wrapper over the shared core
 /// [`glossa::tools::recovery::next_best_action`] so the eval reader sees the SAME fan-out a
-/// governed MCP client does (spec: dedup unification). `root` is no longer needed (the fan-out
-/// candidates are search/glossary/sql, none of which read notebook files); kept in the signature so
-/// the caller (`backend::openai`'s `nba` closure) is unchanged.
+/// governed MCP client does (spec: dedup unification). `root` is the agent index dir — its
+/// `.glossa` supplies the fan-out search's `[rerank]` config (none by default -> plain BM25).
 #[allow(clippy::too_many_arguments)]
 pub fn next_best_action(
     name: &str,
     args: &Value,
-    _root: &std::path::Path,
+    root: &std::path::Path,
     idx: &DocIndex,
     graph: Option<&glossa::graph::store::GraphStore>,
     spec: &glossa::tools::ChainSpec,
@@ -702,7 +716,16 @@ pub fn next_best_action(
 ) -> String {
     match glossa::tools::recovery::repeated_term(name, args) {
         Some(term) => {
-            glossa::tools::recovery::next_best_action(name, &term, idx, graph, spec, trace)
+            let glossa_dir = root.join(".glossa");
+            glossa::tools::recovery::next_best_action(
+                name,
+                &term,
+                idx,
+                &glossa_dir,
+                graph,
+                spec,
+                trace,
+            )
         }
         None => glossa::tools::recovery::repeat_nudge(name),
     }

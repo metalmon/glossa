@@ -74,12 +74,16 @@ fn path_not_found(idx: &DocIndex, path: &str) -> String {
     )
 }
 
-/// BM25 search (optionally scoped). Returns (model text, hits for the caller's scoring). `scope`
-/// (when `Some`) is the friendly "restrict to one document" filter (bare path or glob, via
-/// `DocIndex::search_filtered`'s `scope` param) — a SEPARATE, ANDed filter alongside the existing
-/// raw ripgrep `glob`, not a replacement for it.
+/// BM25 search (optionally scoped), routed through the config-gated rerank stage
+/// (`retrieve::rerank::retrieve`): with no `[rerank]` config under `glossa_dir` this is plain BM25,
+/// byte-identical to before; with it configured, the hits carry the rerank score. Returns (model
+/// text, hits for the caller's scoring). `scope` (when `Some`) is the friendly "restrict to one
+/// document" filter (bare path or glob, via `DocIndex::search_filtered`'s `scope` param) — a
+/// SEPARATE, ANDed filter alongside the existing raw ripgrep `glob`, not a replacement for it.
+#[allow(clippy::too_many_arguments)]
 pub fn search(
     idx: &DocIndex,
+    glossa_dir: &std::path::Path,
     query: &str,
     limit: usize,
     glob: Option<&str>,
@@ -87,13 +91,28 @@ pub fn search(
     trace: &TraceLog,
     scope: Option<&str>,
 ) -> (String, Vec<RankedHit>) {
-    match idx.search_filtered(query, limit.max(1), glob, file_type, scope) {
-        Ok(hits) => {
+    match crate::retrieve::rerank::retrieve(
+        idx,
+        glossa_dir,
+        query,
+        limit.max(1),
+        glob,
+        file_type,
+        scope,
+    ) {
+        Ok((hits, info)) => {
             let th: Vec<_> = hits
                 .iter()
                 .map(|h| json!({"path": h.path, "location": h.location, "score": h.score, "snippet": h.snippet}))
                 .collect();
             trace.log("search", json!({"query": query}), json!(th));
+            if info.reranked {
+                trace.log(
+                    "rerank",
+                    json!({"query": query}),
+                    json!({"pool": info.pool, "returned": hits.len()}),
+                );
+            }
             let body = if hits.is_empty() {
                 "(no results)".to_string()
             } else {
@@ -3563,11 +3582,25 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
     fn search_renders_numbered_or_empty() {
         let (_d, i) = idx();
         let t = TraceLog::disabled();
-        let (body, hits) = search(&i, "timeout", 10, None, None, &t, None);
+        let gd = tempfile::tempdir().unwrap(); // no [rerank] -> plain BM25
+        let (body, hits) = search(&i, gd.path(), "timeout", 10, None, None, &t, None);
         assert_eq!(hits.len(), 1);
         assert!(body.starts_with("MODULE.pdf#1") && body.contains("timeout"));
-        let (empty, _) = search(&i, "nonexistentzzz", 10, None, None, &t, None);
+        let (empty, _) = search(&i, gd.path(), "nonexistentzzz", 10, None, None, &t, None);
         assert_eq!(empty, "(no results)");
+    }
+
+    // T8: a glossa_dir with no [rerank] config keeps search on the BM25 path — hits non-empty and
+    // the display_line format is unchanged (`path#ord` lead token, no rerank reordering).
+    #[test]
+    fn search_without_rerank_config_is_unchanged() {
+        let (_d, i) = idx();
+        let t = TraceLog::disabled();
+        let gd = tempfile::tempdir().unwrap(); // no ontology.toml -> [rerank] inactive
+        let (body, hits) = search(&i, gd.path(), "timeout", 5, None, None, &t, None);
+        assert!(!hits.is_empty());
+        assert!(body.contains('#')); // display_line format unchanged
+        assert!(body.starts_with("MODULE.pdf#1"));
     }
 
     #[test]
@@ -3590,13 +3623,23 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         ])
         .unwrap();
         let t = TraceLog::disabled();
+        let gd = tempfile::tempdir().unwrap(); // no [rerank] -> plain BM25
 
         // No scope: unchanged baseline — both documents hit.
-        let (_all_body, all_hits) = search(&i, "timeout", 10, None, None, &t, None);
+        let (_all_body, all_hits) = search(&i, gd.path(), "timeout", 10, None, None, &t, None);
         assert_eq!(all_hits.len(), 2);
 
         // scope=docA.md: only that document's hit remains.
-        let (scoped_body, scoped_hits) = search(&i, "timeout", 10, None, None, &t, Some("docA.md"));
+        let (scoped_body, scoped_hits) = search(
+            &i,
+            gd.path(),
+            "timeout",
+            10,
+            None,
+            None,
+            &t,
+            Some("docA.md"),
+        );
         assert_eq!(scoped_hits.len(), 1, "{scoped_body}");
         assert!(scoped_body.starts_with("docA.md"), "{scoped_body}");
     }
