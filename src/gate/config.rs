@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::config_util::{env_bool, env_f32, env_i32, env_string, env_usize, normalize_eps};
 use crate::gate::score::Bucket;
 use crate::graph::ontology::Ontology;
 
@@ -66,33 +67,6 @@ pub struct VerifyConfig {
     pub execution_provider_mem_limit_mb: Option<usize>,
 }
 
-/// Execution providers the runtime actually knows how to register — exactly the EPs `glossa-nli`
-/// has a Cargo feature + dispatch arm for (`nli-cuda`, `nli-directml`, `nli-coreml`, `nli-rocm`)
-/// plus the implicit `"cpu"` fallback. Anything else is dropped with a warning rather than
-/// erroring — fail-open, since a bad/typo'd EP name should never block the gate from resolving.
-const KNOWN_EXECUTION_PROVIDERS: &[&str] = &["cpu", "cuda", "directml", "coreml", "rocm"];
-
-/// Lowercase + trim each entry, drop anything outside [`KNOWN_EXECUTION_PROVIDERS`] (warning, not
-/// error), and default to `["cpu"]` when the result is empty — whether because the input was empty
-/// or because every entry was unknown.
-fn normalize_eps(raw: impl Iterator<Item = String>) -> Vec<String> {
-    let normalized: Vec<String> = raw
-        .map(|s| s.trim().to_lowercase())
-        .filter(|s| {
-            let known = KNOWN_EXECUTION_PROVIDERS.contains(&s.as_str());
-            if !known {
-                tracing::warn!(execution_provider = %s, "unknown [verify.nli].execution_providers entry dropped");
-            }
-            known
-        })
-        .collect();
-    if normalized.is_empty() {
-        vec!["cpu".to_string()]
-    } else {
-        normalized
-    }
-}
-
 /// Calibrated z-score consensus stats for `combined` mode (spec §4 rev.5): AC and NLI are each
 /// standardized by their own calibrated per-bucket mean/std, summed, and compared against a
 /// calibrated z-threshold. Written by calibration (Task CZ-2); this side only reads and applies
@@ -126,36 +100,6 @@ impl CombinedStats {
 
     pub fn serves(&self, ac: f32, nli: f32) -> bool {
         self.z(ac, nli) > self.threshold
-    }
-}
-
-fn env_f32(key: &str) -> Option<f32> {
-    std::env::var(key).ok().and_then(|v| v.parse().ok())
-}
-fn env_usize(key: &str) -> Option<usize> {
-    std::env::var(key).ok().and_then(|v| v.parse().ok())
-}
-fn env_bool(key: &str) -> Option<bool> {
-    std::env::var(key).ok().and_then(|v| v.parse().ok())
-}
-fn env_string(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.is_empty())
-}
-/// Parse an env var as `i32`. Absent/empty ⇒ `None`; a set-but-non-integer value is ignored with a
-/// warning (fail-open — a typo'd device id should never take the gate down, it just falls back to
-/// the default device).
-fn env_i32(key: &str) -> Option<i32> {
-    let raw = std::env::var(key).ok()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    match trimmed.parse::<i32>() {
-        Ok(n) => Some(n),
-        Err(_) => {
-            tracing::warn!(key, value = %raw, "non-integer NLI EP device id ignored");
-            None
-        }
     }
 }
 
