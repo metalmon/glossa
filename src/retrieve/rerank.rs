@@ -1,4 +1,5 @@
 use crate::index::store::{DocIndex, RankedHit};
+use crate::retrieve::config::RerankConfig;
 
 /// Backend-agnostic cross-encoder scorer: one relevance score per passage, same length + order as
 /// `passages`. Higher = more relevant. Implemented in-process (`retrieve::rerank_engine`) and, later,
@@ -106,6 +107,40 @@ pub fn retrieve_with(
             ))
         }
     }
+}
+
+/// Build the in-process reranker from `[rerank]`, or `None` (=> plain BM25, fail-open). Any load
+/// error (bad path, corrupt export, missing runtime) logs and downgrades to `None`.
+#[cfg(all(
+    any(feature = "nli", feature = "nli-dynamic"),
+    not(feature = "nli-burn")
+))]
+pub fn resolve_reranker(cfg: &RerankConfig) -> Option<Box<dyn Reranker>> {
+    if !cfg.is_active() {
+        return None;
+    }
+    let dir = cfg.model_dir.as_ref()?;
+    match glossa_nli::InProcessReranker::load(
+        dir,
+        &cfg.execution_providers,
+        cfg.ep_device,
+        cfg.ep_mem_limit_mb,
+    ) {
+        Ok(r) => Some(Box::new(r)),
+        Err(e) => {
+            eprintln!("rerank scorer load failed ({}): {e}", dir.display());
+            None
+        }
+    }
+}
+
+/// No ORT reranker compiled (burn-only, or no engine feature) => always plain BM25.
+#[cfg(not(all(
+    any(feature = "nli", feature = "nli-dynamic"),
+    not(feature = "nli-burn")
+)))]
+pub fn resolve_reranker(_cfg: &RerankConfig) -> Option<Box<dyn Reranker>> {
+    None
 }
 
 #[cfg(test)]
@@ -218,5 +253,31 @@ mod tests {
         let (out, _info) =
             retrieve_with(&idx, "swap", 3, None, None, None, Some(&ByPath), 1).unwrap();
         assert_eq!(out.len(), 3);
+    }
+
+    // Runs identically with the ORT engine feature ON or OFF: with it off `resolve_reranker` is
+    // the always-`None` stub; with it on, `cfg.is_active()` hits the function's own early return
+    // (an inactive config is off by default). Either way this proves the fail-open default.
+    #[test]
+    fn resolve_reranker_none_when_inactive() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = crate::retrieve::config::RerankConfig::resolve(dir.path()); // off by default
+        assert!(resolve_reranker(&cfg).is_none());
+    }
+
+    #[test]
+    fn resolve_reranker_none_when_enabled_but_model_dir_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        // enabled + in_process but points at a nonexistent model dir -> load fails -> None
+        // (fail-open).
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[rerank]\nenabled=true\nscorer=\"in_process\"\nmodel_dir=\"/no/such/dir\"\n",
+        )
+        .unwrap();
+        let cfg = crate::retrieve::config::RerankConfig::resolve(&g);
+        assert!(resolve_reranker(&cfg).is_none());
     }
 }
