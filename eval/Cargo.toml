@@ -84,7 +84,8 @@ ureq = { version = "2", default-features = false, features = ["tls"] }
 # rustls (no OpenSSL).
 reqwest = { version = "0.13", features = ["json"] }
 # Shared multi-thread runtime so the (still-sync) agent loop can `block_on` reqwest's async calls.
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal"] }
+axum = "0.8"
 uuid = { version = "1", features = ["v7"] }
 rand = "0.8"
 rand_chacha = "0.3"
