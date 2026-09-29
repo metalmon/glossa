@@ -40,9 +40,8 @@ fn main() -> anyhow::Result<()> {
         let listener = tokio::net::TcpListener::bind(&bind).await?;
         println!("inference-server binding http://{bind} — loading models (health = 503 until ready)…");
         if no_cap {
-            eprintln!("note: no --max-concurrency cap; requests queue on the pool under load (no 429 shed).");
+            eprintln!("note: no --max-concurrency cap; requests queue on the model session under load (no 429 shed).");
         }
-        println!("note: --nli-workers/--rerank-workers share one cached session in Phase 1 (one VRAM copy, serialized).");
 
         // Warm on a blocking task so the server is already accepting (and answering 503) during load.
         {

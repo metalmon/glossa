@@ -34,13 +34,6 @@ pub struct ServeArgs {
     /// Bind address. Default 127.0.0.1:8071 — NOT 8080 (that is the Glossa MCP's own default).
     #[arg(long, env = "GLOSSA_INFER_BIND", default_value = "127.0.0.1:8071")]
     pub bind: String,
-    /// NLI session-pool size (default 2). Phase 1: the pool shares one cached session, so this is
-    /// serialized (one VRAM copy) until an uncached load lands.
-    #[arg(long = "nli-workers", default_value_t = 2)]
-    pub nli_workers: usize,
-    /// Reranker session-pool size (default 2). Same Phase-1 serialization note as `--nli-workers`.
-    #[arg(long = "rerank-workers", default_value_t = 2)]
-    pub rerank_workers: usize,
     /// Device: `cpu` | `cuda` | `directml` | `rocm` (default: a GPU provider if compiled in, else
     /// `cpu`). CPU fallback is automatic.
     #[arg(long = "device")]

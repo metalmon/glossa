@@ -1,7 +1,7 @@
 pub mod audit;
 pub mod cli_fmt;
 pub mod config;
-pub(crate) mod config_util;
+pub mod config_util;
 pub mod conn_cap;
 pub mod convert;
 pub mod default_ignore;

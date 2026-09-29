@@ -1,6 +1,6 @@
 //! Server state + startup: resolve each model dir (auto-download the variant when only a repo is
-//! given), load N sessions per model into a pool. The pure `resolve_model_dir` is always compiled
-//! and unit-tested; `ServerState`/`build_state` need an ORT engine and are feature-gated.
+//! given), load ONE session per model. The pure `resolve_model_dir` is always compiled and
+//! unit-tested; `ServerState`/`build_state` need an ORT engine and are feature-gated.
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
@@ -40,10 +40,7 @@ pub fn resolve_model_dir(
     Ok(Some(to))
 }
 
-// The running server holds loaded sessions, so it needs an ORT engine. NOTE: `InProcessNli::load`
-// caches by (dir, providers, device, mem), so N loads share ONE session (one `Mutex<Session>`) —
-// the pool is correct and keeps ONE VRAM copy, but `--*-workers N` is serialized until an uncached
-// load lands (Phase 2). See the plan's Task 6 ruling.
+// The running server holds one loaded session per model, so it needs an ORT engine.
 #[cfg(any(
     feature = "nli-directml",
     feature = "nli-coreml",
@@ -68,15 +65,17 @@ mod engine {
 
     use super::{parse_variant, resolve_model_dir};
     use crate::infer::cli::ServeArgs;
-    use crate::infer::pool::Pool;
 
-    /// Handler-facing state. Pools start empty and are filled by [`ServerState::warm`] AFTER the
-    /// socket binds, so `/health` reports 503 (loading) until the models are up (k8s-style
-    /// readiness). Each pool sits behind a `Mutex<Option<..>>` set once at warm; reads clone the
+    /// Handler-facing state. Each model holds exactly ONE session (its internal `Mutex<Session>`
+    /// serializes inference — on a single GPU, request parallelism comes from batching, not from N
+    /// sessions, which would only cost N× VRAM; the multi-GPU answer is multiple instances behind a
+    /// load balancer). The session slots start empty and are filled by [`ServerState::warm`] AFTER
+    /// the socket binds, so `/health` reports 503 (loading) until the models are up (k8s-style
+    /// readiness). Each slot sits behind a `Mutex<Option<..>>` set once at warm; reads clone the
     /// `Arc` under a brief, uncontended lock.
     pub struct ServerState {
-        pub nli: Mutex<Option<Arc<Pool<InProcessNli>>>>,
-        pub rerank: Mutex<Option<Arc<Pool<InProcessReranker>>>>,
+        pub nli: Mutex<Option<Arc<InProcessNli>>>,
+        pub rerank: Mutex<Option<Arc<InProcessReranker>>>,
         pub nli_ep: Mutex<Option<String>>,
         pub rerank_ep: Mutex<Option<String>>,
         pub nli_variant: Option<String>,
@@ -89,8 +88,6 @@ mod engine {
         nli_dir: Option<PathBuf>,
         rerank_dir: Option<PathBuf>,
         entail_index: usize,
-        nli_workers: usize,
-        rerank_workers: usize,
         providers: Vec<String>,
         gpu_id: Option<i32>,
         gpu_mem_mb: Option<usize>,
@@ -132,8 +129,6 @@ mod engine {
             nli_dir,
             rerank_dir,
             entail_index: args.entail_index,
-            nli_workers: args.nli_workers.max(1),
-            rerank_workers: args.rerank_workers.max(1),
             providers: glossa::config_util::expand_device(args.device.as_deref()),
             gpu_id: args.gpu_id,
             gpu_mem_mb: args.gpu_mem_mb,
@@ -141,11 +136,11 @@ mod engine {
     }
 
     impl ServerState {
-        /// Load the sessions (BLOCKING) and flip `ready`. Run on a blocking task AFTER the socket
-        /// binds, so a probe during load sees `/health` 503. A load error propagates (the caller
-        /// stops the server). NOTE (ruling T6c): `InProcessNli::load` caches by
-        /// (dir,providers,dev,mem), so the N handles share ONE session — one VRAM copy, serialized
-        /// until an uncached load lands (Phase 2).
+        /// Load the one session per configured model (BLOCKING) and flip `ready`. Run on a blocking
+        /// task AFTER the socket binds, so a probe during load sees `/health` 503. A load error
+        /// propagates (the caller stops the server). One session per model: the session's internal
+        /// `Mutex<Session>` serializes inference, request parallelism comes from batching, and a
+        /// single GPU gains nothing from a second in-process session (see [`ServerState`]).
         pub fn warm(&self) -> Result<()> {
             if let Some(d) = &self.nli_dir {
                 let ep = probe_gpu_ep(
@@ -157,35 +152,23 @@ mod engine {
                 )
                 .ok()
                 .flatten();
-                let mut sessions = Vec::new();
-                for _ in 0..self.nli_workers {
-                    sessions.push(InProcessNli::load(
-                        d,
-                        self.entail_index,
-                        &self.providers,
-                        self.gpu_id,
-                        self.gpu_mem_mb,
-                    )?);
-                }
-                *self.nli.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some(Arc::new(Pool::new(sessions)));
+                let session = InProcessNli::load(
+                    d,
+                    self.entail_index,
+                    &self.providers,
+                    self.gpu_id,
+                    self.gpu_mem_mb,
+                )?;
+                *self.nli.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(session));
                 *self.nli_ep.lock().unwrap_or_else(|e| e.into_inner()) = ep;
             }
             if let Some(d) = &self.rerank_dir {
                 let ep = probe_rerank_ep(d, &self.providers, self.gpu_id, self.gpu_mem_mb)
                     .ok()
                     .flatten();
-                let mut sessions = Vec::new();
-                for _ in 0..self.rerank_workers {
-                    sessions.push(InProcessReranker::load(
-                        d,
-                        &self.providers,
-                        self.gpu_id,
-                        self.gpu_mem_mb,
-                    )?);
-                }
-                *self.rerank.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some(Arc::new(Pool::new(sessions)));
+                let session =
+                    InProcessReranker::load(d, &self.providers, self.gpu_id, self.gpu_mem_mb)?;
+                *self.rerank.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(session));
                 *self.rerank_ep.lock().unwrap_or_else(|e| e.into_inner()) = ep;
             }
             self.ready.store(true, Ordering::SeqCst);

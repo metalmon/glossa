@@ -198,8 +198,8 @@ mod server {
         let Some(_g) = admit(&st) else {
             return overloaded();
         };
-        let pool = match st.rerank.lock().unwrap_or_else(|e| e.into_inner()).clone() {
-            Some(p) => p,
+        let scorer = match st.rerank.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            Some(s) => s,
             None => return not_available(&st, "reranker"),
         };
         let query = body
@@ -225,9 +225,8 @@ mod server {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize);
         let scored = tokio::task::spawn_blocking(move || {
-            let g = pool.acquire();
             let refs: Vec<&str> = passages.iter().map(String::as_str).collect();
-            g.rerank(&query, &refs)
+            scorer.rerank(&query, &refs)
         })
         .await;
         match scored {
@@ -247,8 +246,8 @@ mod server {
         let Some(_g) = admit(&st) else {
             return overloaded();
         };
-        let pool = match st.nli.lock().unwrap_or_else(|e| e.into_inner()).clone() {
-            Some(p) => p,
+        let scorer = match st.nli.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            Some(s) => s,
             None => return not_available(&st, "nli"),
         };
         // `inputs` is a pair ["p","h"] or a batch [["p","h"], ...]; normalize to a batch of pairs.
@@ -297,15 +296,14 @@ mod server {
         let premise = pairs.first().map(|(p, _)| p.clone()).unwrap_or_default();
         let same_premise = pairs.iter().all(|(p, _)| *p == premise);
         let scored = tokio::task::spawn_blocking(move || {
-            let g = pool.acquire();
             if same_premise {
                 let hyps: Vec<&str> = pairs.iter().map(|(_, h)| h.as_str()).collect();
-                g.entail(&premise, &hyps)
+                scorer.entail(&premise, &hyps)
             } else {
                 // Mixed premises: score each pair individually, concatenate.
                 let mut all = Vec::new();
                 for (p, h) in &pairs {
-                    match g.entail(p, &[h.as_str()]) {
+                    match scorer.entail(p, &[h.as_str()]) {
                         Ok(mut v) => all.append(&mut v),
                         Err(e) => return Err(e),
                     }

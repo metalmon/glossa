@@ -1,7 +1,6 @@
-//! `inference-server` internals: the session pool (Task 5), server state + startup (Task 6),
-//! HTTP handlers + router (Task 7), and the auth/interlock/overload guard (Task 8).
+//! `inference-server` internals: server state + startup (one session per model), HTTP handlers +
+//! router, and the auth/interlock/overload guard.
 pub mod cli;
 pub mod guard;
 pub mod handlers;
-pub mod pool;
 pub mod state;
