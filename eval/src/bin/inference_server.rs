@@ -212,25 +212,28 @@ fn serve_blocking(
             });
         }
 
+        // Report readiness NOW — right after bind, NOT after the (possibly long, download-included)
+        // model warm-up: the process is up and accepting, and `/health` returns 503 until the models
+        // load, so a supervisor's start doesn't hang on a cold download. Mirrors kb's post-bind READY
+        // (main.rs `sdnotify::ready()` after bind). `on_ready` flips the Windows SCM to Running;
+        // `sd_notify` READY satisfies a systemd Type=notify unit; the watchdog pings if configured.
+        on_ready();
+        glossa::sdnotify::ready();
+        if let Some(usec) = glossa::sdnotify::watchdog_usec() {
+            glossa::sdnotify::spawn_watchdog(usec, cancel.clone());
+        }
+
         // Warm on a blocking task so the server is already accepting (and answering 503) during load.
-        // Once warm, flip readiness: `on_ready` (SCM → Running), systemd `sd_notify` READY, and start
-        // the watchdog pinger if the supervisor configured one.
         {
             let w = st.clone();
             let bind_msg = bind.clone();
-            let wd_cancel = cancel.clone();
             tokio::task::spawn_blocking(move || match w.warm() {
                 Ok(()) => {
                     let nli_ep = w.nli_ep.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     let rerank_ep = w.rerank_ep.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    println!("inference-server READY on {scheme}://{bind_msg}  (nli_ep={nli_ep:?} rerank_ep={rerank_ep:?})");
+                    println!("inference-server models loaded on {scheme}://{bind_msg}  (nli_ep={nli_ep:?} rerank_ep={rerank_ep:?})");
                     println!("  kbx nli set    --scorer http --endpoint {scheme}://{bind_msg}");
                     println!("  kbx rerank set --scorer http --endpoint {scheme}://{bind_msg}");
-                    on_ready();
-                    glossa::sdnotify::ready();
-                    if let Some(usec) = glossa::sdnotify::watchdog_usec() {
-                        glossa::sdnotify::spawn_watchdog(usec, wd_cancel);
-                    }
                 }
                 Err(e) => {
                     eprintln!("model load failed: {e}");

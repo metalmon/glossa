@@ -23,7 +23,13 @@ pub struct ServiceSpec {
 /// Render a systemd unit for `spec` (Linux). `Type=notify` (the binary calls `sd_notify` READY once
 /// serving — see `sdnotify.rs`), `WatchdogSec=30` when the binary pings, `Restart=on-failure`.
 pub fn render_systemd_unit(spec: &ServiceSpec) -> String {
-    let exec = format!("{} {}", spec.program.display(), join_args_shell(&spec.args));
+    let program = spec.program.display().to_string();
+    let prog = if program.contains(' ') {
+        format!("\"{program}\"")
+    } else {
+        program
+    };
+    let exec = format!("{prog} {}", join_args_shell(&spec.args));
     let watchdog = if spec.watchdog { "WatchdogSec=30\n" } else { "" };
     format!(
         "[Unit]\nDescription={}\nAfter=network-online.target\nWants=network-online.target\n\n\
@@ -222,8 +228,30 @@ pub fn run_as_service(_service_name: String, run: ServiceRun) -> anyhow::Result<
             .build()
         {
             rt.block_on(async {
-                let _ = tokio::signal::ctrl_c().await;
+                // Ctrl-C (foreground) OR SIGTERM (what `systemctl stop` / container runtimes send)
+                // → graceful shutdown. Without the SIGTERM arm a systemd service would be killed
+                // abruptly instead of draining.
+                let ctrl_c = async {
+                    let _ = tokio::signal::ctrl_c().await;
+                };
+                #[cfg(unix)]
+                {
+                    let term = async {
+                        match tokio::signal::unix::signal(
+                            tokio::signal::unix::SignalKind::terminate(),
+                        ) {
+                            Ok(mut s) => {
+                                s.recv().await;
+                            }
+                            Err(_) => std::future::pending::<()>().await,
+                        }
+                    };
+                    tokio::select! { _ = ctrl_c => {}, _ = term => {} }
+                }
+                #[cfg(not(unix))]
+                ctrl_c.await;
             });
+            crate::sdnotify::stopping();
             bridge.cancel();
         }
     });
@@ -251,14 +279,22 @@ mod os {
             | ServiceAccess::QUERY_STATUS
     }
 
-    /// Map a `windows_service::Error` to a friendly one: access-denied → "run elevated".
+    /// Map a `windows_service::Error` to a friendly one: access-denied → "run elevated";
+    /// service-not-found → a clear "no such service" instead of a raw WinAPI code.
     fn map_err(e: windows_service::Error) -> anyhow::Error {
         if let windows_service::Error::Winapi(io) = &e {
-            if io.raw_os_error() == Some(5) {
-                // ERROR_ACCESS_DENIED
-                return anyhow::anyhow!(
-                    "run elevated (Administrator) to manage Windows services"
-                );
+            match io.raw_os_error() {
+                Some(5) => {
+                    // ERROR_ACCESS_DENIED
+                    return anyhow::anyhow!(
+                        "run elevated (Administrator) to manage Windows services"
+                    );
+                }
+                Some(1060) => {
+                    // ERROR_SERVICE_DOES_NOT_EXIST
+                    return anyhow::anyhow!("no such service (is it installed?)");
+                }
+                _ => {}
             }
         }
         anyhow::Error::new(e)
@@ -512,6 +548,17 @@ mod tests {
         assert!(u.contains("WantedBy=multi-user.target"));
         // ExecStart quotes the arg with a space:
         assert!(u.contains("ExecStart=/opt/kb/kb mcp \"/data/base one\" --bind 127.0.0.1:8801"));
+    }
+
+    #[test]
+    fn systemd_unit_quotes_a_spaced_program_path() {
+        let mut s = spec();
+        s.program = PathBuf::from("/opt/my kb/kb");
+        let u = render_systemd_unit(&s);
+        assert!(
+            u.contains("ExecStart=\"/opt/my kb/kb\" mcp \"/data/base one\""),
+            "unit was:\n{u}"
+        );
     }
 
     #[test]
