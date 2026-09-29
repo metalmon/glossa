@@ -29,28 +29,46 @@ fn main() -> anyhow::Result<()> {
         args.bind
     );
 
+    let bind = args.bind.clone();
+    let max_body_bytes = args.max_body_bytes;
+    let no_cap = args.max_concurrency.is_none();
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
+        // Resolve dirs (download if needed) and BIND before loading, so `/health` serves 503 while
+        // the models load rather than refusing connections (k8s-style readiness).
         let st = std::sync::Arc::new(state::build_state(&args)?);
-        println!(
-            "inference-server ready on http://{}  (nli_ep={:?} rerank_ep={:?})",
-            args.bind, st.nli_ep, st.rerank_ep
-        );
-        println!(
-            "  kbx nli set    --scorer http --endpoint http://{}",
-            args.bind
-        );
-        println!(
-            "  kbx rerank set --scorer http --endpoint http://{}",
-            args.bind
-        );
+        let listener = tokio::net::TcpListener::bind(&bind).await?;
+        println!("inference-server binding http://{bind} — loading models (health = 503 until ready)…");
+        if no_cap {
+            eprintln!("note: no --max-concurrency cap; requests queue on the pool under load (no 429 shed).");
+        }
+        println!("note: --nli-workers/--rerank-workers share one cached session in Phase 1 (one VRAM copy, serialized).");
+
+        // Warm on a blocking task so the server is already accepting (and answering 503) during load.
+        {
+            let w = st.clone();
+            let bind_msg = bind.clone();
+            tokio::task::spawn_blocking(move || match w.warm() {
+                Ok(()) => {
+                    let nli_ep = w.nli_ep.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    let rerank_ep = w.rerank_ep.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    println!("inference-server READY on http://{bind_msg}  (nli_ep={nli_ep:?} rerank_ep={rerank_ep:?})");
+                    println!("  kbx nli set    --scorer http --endpoint http://{bind_msg}");
+                    println!("  kbx rerank set --scorer http --endpoint http://{bind_msg}");
+                }
+                Err(e) => {
+                    eprintln!("model load failed: {e}");
+                    std::process::exit(1);
+                }
+            });
+        }
+
         let app = handlers::router(st.clone())
             .layer(axum::middleware::from_fn_with_state(
                 st.clone(),
                 guard::auth_layer,
             ))
-            .layer(axum::extract::DefaultBodyLimit::max(args.max_body_bytes));
-        let listener = tokio::net::TcpListener::bind(&args.bind).await?;
+            .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes));
         axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())
             .await?;

@@ -59,8 +59,9 @@ pub use engine::{build_state, ServerState};
     feature = "nli-rocm"
 ))]
 mod engine {
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
-    use std::sync::Arc;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use anyhow::{bail, Result};
     use glossa_nli::{probe_gpu_ep, probe_rerank_ep, InProcessNli, InProcessReranker};
@@ -69,108 +70,137 @@ mod engine {
     use crate::infer::cli::ServeArgs;
     use crate::infer::pool::Pool;
 
-    /// Everything a handler needs: the per-model session pools, the probed EP names (for `/info`),
-    /// the readiness flag, auth key, and the concurrency guard state.
+    /// Handler-facing state. Pools start empty and are filled by [`ServerState::warm`] AFTER the
+    /// socket binds, so `/health` reports 503 (loading) until the models are up (k8s-style
+    /// readiness). Each pool sits behind a `Mutex<Option<..>>` set once at warm; reads clone the
+    /// `Arc` under a brief, uncontended lock.
     pub struct ServerState {
-        pub nli: Option<Arc<Pool<InProcessNli>>>,
-        pub rerank: Option<Arc<Pool<InProcessReranker>>>,
-        pub nli_ep: Option<String>,
-        pub rerank_ep: Option<String>,
+        pub nli: Mutex<Option<Arc<Pool<InProcessNli>>>>,
+        pub rerank: Mutex<Option<Arc<Pool<InProcessReranker>>>>,
+        pub nli_ep: Mutex<Option<String>>,
+        pub rerank_ep: Mutex<Option<String>>,
         pub nli_variant: Option<String>,
         pub rerank_variant: Option<String>,
-        pub ready: Arc<AtomicBool>,
+        pub ready: AtomicBool,
         pub api_key: Option<String>,
         pub max_concurrency: Option<usize>,
-        pub in_flight: Arc<AtomicUsize>,
+        pub in_flight: AtomicUsize,
+        // Resolved dirs + load params, consumed by warm().
+        nli_dir: Option<PathBuf>,
+        rerank_dir: Option<PathBuf>,
+        entail_index: usize,
+        nli_workers: usize,
+        rerank_workers: usize,
+        nli_eps: Vec<String>,
+        rerank_eps: Vec<String>,
+        ep_device: Option<i32>,
+        ep_mem_limit_mb: Option<usize>,
     }
 
+    /// Resolve model dirs (downloading a variant if only a repo is given) and return a
+    /// NOT-YET-READY state (empty pools, `ready = false`). The caller binds the socket, then calls
+    /// [`ServerState::warm`].
     pub fn build_state(args: &ServeArgs) -> Result<ServerState> {
         let cache = args.cache_dir();
-        let nli_variant = parse_variant(&args.nli_variant)?;
-        let rerank_variant = parse_variant(&args.rerank_variant)?;
         let nli_dir = resolve_model_dir(
             args.nli_model_dir.as_deref(),
             args.nli_repo.as_deref(),
-            nli_variant,
+            parse_variant(&args.nli_variant)?,
             &cache,
             "nli",
         )?;
         let rerank_dir = resolve_model_dir(
             args.rerank_model_dir.as_deref(),
             args.rerank_repo.as_deref(),
-            rerank_variant,
+            parse_variant(&args.rerank_variant)?,
             &cache,
             "rerank",
         )?;
         if nli_dir.is_none() && rerank_dir.is_none() {
             bail!("no model given: pass --nli-model-dir/--nli-repo and/or --rerank-model-dir/--rerank-repo");
         }
-        let nli_eps = if args.nli_ep.is_empty() {
-            &args.ep
-        } else {
-            &args.nli_ep
-        };
-        let rerank_eps = if args.rerank_ep.is_empty() {
-            &args.ep
-        } else {
-            &args.rerank_ep
-        };
+        Ok(ServerState {
+            nli: Mutex::new(None),
+            rerank: Mutex::new(None),
+            nli_ep: Mutex::new(None),
+            rerank_ep: Mutex::new(None),
+            nli_variant: nli_dir.as_ref().map(|_| args.nli_variant.clone()),
+            rerank_variant: rerank_dir.as_ref().map(|_| args.rerank_variant.clone()),
+            ready: AtomicBool::new(false),
+            api_key: args.effective_auth()?,
+            max_concurrency: args.max_concurrency,
+            in_flight: AtomicUsize::new(0),
+            nli_dir,
+            rerank_dir,
+            entail_index: args.entail_index,
+            nli_workers: args.nli_workers.max(1),
+            rerank_workers: args.rerank_workers.max(1),
+            nli_eps: if args.nli_ep.is_empty() {
+                args.ep.clone()
+            } else {
+                args.nli_ep.clone()
+            },
+            rerank_eps: if args.rerank_ep.is_empty() {
+                args.ep.clone()
+            } else {
+                args.rerank_ep.clone()
+            },
+            ep_device: args.ep_device,
+            ep_mem_limit_mb: args.ep_mem_limit_mb,
+        })
+    }
 
-        let (nli, nli_ep) = match &nli_dir {
-            Some(d) => {
+    impl ServerState {
+        /// Load the sessions (BLOCKING) and flip `ready`. Run on a blocking task AFTER the socket
+        /// binds, so a probe during load sees `/health` 503. A load error propagates (the caller
+        /// stops the server). NOTE (ruling T6c): `InProcessNli::load` caches by
+        /// (dir,providers,dev,mem), so the N handles share ONE session — one VRAM copy, serialized
+        /// until an uncached load lands (Phase 2).
+        pub fn warm(&self) -> Result<()> {
+            if let Some(d) = &self.nli_dir {
                 let ep = probe_gpu_ep(
                     d,
-                    args.entail_index,
-                    nli_eps,
-                    args.ep_device,
-                    args.ep_mem_limit_mb,
+                    self.entail_index,
+                    &self.nli_eps,
+                    self.ep_device,
+                    self.ep_mem_limit_mb,
                 )
                 .ok()
                 .flatten();
                 let mut sessions = Vec::new();
-                for _ in 0..args.nli_workers.max(1) {
+                for _ in 0..self.nli_workers {
                     sessions.push(InProcessNli::load(
                         d,
-                        args.entail_index,
-                        nli_eps,
-                        args.ep_device,
-                        args.ep_mem_limit_mb,
+                        self.entail_index,
+                        &self.nli_eps,
+                        self.ep_device,
+                        self.ep_mem_limit_mb,
                     )?);
                 }
-                (Some(Arc::new(Pool::new(sessions))), ep)
+                *self.nli.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(Arc::new(Pool::new(sessions)));
+                *self.nli_ep.lock().unwrap_or_else(|e| e.into_inner()) = ep;
             }
-            None => (None, None),
-        };
-        let (rerank, rerank_ep) = match &rerank_dir {
-            Some(d) => {
-                let ep = probe_rerank_ep(d, rerank_eps, args.ep_device, args.ep_mem_limit_mb)
+            if let Some(d) = &self.rerank_dir {
+                let ep = probe_rerank_ep(d, &self.rerank_eps, self.ep_device, self.ep_mem_limit_mb)
                     .ok()
                     .flatten();
                 let mut sessions = Vec::new();
-                for _ in 0..args.rerank_workers.max(1) {
+                for _ in 0..self.rerank_workers {
                     sessions.push(InProcessReranker::load(
                         d,
-                        rerank_eps,
-                        args.ep_device,
-                        args.ep_mem_limit_mb,
+                        &self.rerank_eps,
+                        self.ep_device,
+                        self.ep_mem_limit_mb,
                     )?);
                 }
-                (Some(Arc::new(Pool::new(sessions))), ep)
+                *self.rerank.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(Arc::new(Pool::new(sessions)));
+                *self.rerank_ep.lock().unwrap_or_else(|e| e.into_inner()) = ep;
             }
-            None => (None, None),
-        };
-        Ok(ServerState {
-            nli,
-            rerank,
-            nli_ep,
-            rerank_ep,
-            nli_variant: nli_dir.as_ref().map(|_| args.nli_variant.clone()),
-            rerank_variant: rerank_dir.as_ref().map(|_| args.rerank_variant.clone()),
-            ready: Arc::new(AtomicBool::new(true)),
-            api_key: args.effective_auth()?,
-            max_concurrency: args.max_concurrency,
-            in_flight: Arc::new(AtomicUsize::new(0)),
-        })
+            self.ready.store(true, Ordering::SeqCst);
+            Ok(())
+        }
     }
 }
 

@@ -63,6 +63,19 @@ pub fn encode_predict(scores: &[f32]) -> String {
     }
 }
 
+/// Passage strings from a `/rerank` `texts`/`documents` array — accepts bare strings AND Jina
+/// `{ "text": "..." }` objects (external Jina clients send objects); entries with neither are
+/// skipped.
+pub fn extract_passages(arr: &[serde_json::Value]) -> Vec<String> {
+    arr.iter()
+        .filter_map(|v| {
+            v.as_str()
+                .map(String::from)
+                .or_else(|| v.get("text").and_then(|t| t.as_str()).map(String::from))
+        })
+        .collect()
+}
+
 #[cfg(any(
     feature = "nli-directml",
     feature = "nli-coreml",
@@ -115,13 +128,26 @@ mod server {
     }
 
     async fn info(State(st): State<Shared>) -> Json<serde_json::Value> {
+        let nli_loaded = st.nli.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        let rerank_loaded = st
+            .rerank
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        let nli_ep = st.nli_ep.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let rerank_ep = st
+            .rerank_ep
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         Json(serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
-            "nli": st.nli.as_ref().map(|_| serde_json::json!({
-                "variant": st.nli_variant, "ep_active": st.nli_ep,
+            "ready": st.ready.load(Ordering::Relaxed),
+            "nli": st.nli_variant.as_ref().map(|v| serde_json::json!({
+                "variant": v, "ep_active": nli_ep, "loaded": nli_loaded,
             })),
-            "rerank": st.rerank.as_ref().map(|_| serde_json::json!({
-                "variant": st.rerank_variant, "ep_active": st.rerank_ep,
+            "rerank": st.rerank_variant.as_ref().map(|v| serde_json::json!({
+                "variant": v, "ep_active": rerank_ep, "loaded": rerank_loaded,
             })),
         }))
     }
@@ -143,19 +169,28 @@ mod server {
             .into_response()
     }
 
-    /// RAII in-flight counter for the concurrency cap.
-    struct InFlight(Arc<std::sync::atomic::AtomicUsize>);
+    /// RAII in-flight counter for the concurrency cap; holds the shared state to decrement on drop.
+    struct InFlight(Shared);
     impl Drop for InFlight {
         fn drop(&mut self) {
-            self.0.fetch_sub(1, Ordering::SeqCst);
+            self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
         }
     }
-    fn admit(st: &ServerState) -> Option<InFlight> {
+    fn admit(st: &Shared) -> Option<InFlight> {
         let n = st.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-        let guard = InFlight(st.in_flight.clone());
+        let guard = InFlight(st.clone());
         match st.max_concurrency {
             Some(cap) if n > cap => None, // guard drops here → decrement
             _ => Some(guard),
+        }
+    }
+
+    /// 503 while models are still loading, else 404 (this server serves no such model).
+    fn not_available(st: &ServerState, what: &str) -> Response {
+        if !st.ready.load(Ordering::Relaxed) {
+            (StatusCode::SERVICE_UNAVAILABLE, "loading").into_response()
+        } else {
+            (StatusCode::NOT_FOUND, format!("{what} not configured")).into_response()
         }
     }
 
@@ -163,8 +198,9 @@ mod server {
         let Some(_g) = admit(&st) else {
             return overloaded();
         };
-        let Some(pool) = st.rerank.clone() else {
-            return (StatusCode::NOT_FOUND, "reranker not loaded").into_response();
+        let pool = match st.rerank.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            Some(p) => p,
+            None => return not_available(&st, "reranker"),
         };
         let query = body
             .get("query")
@@ -172,19 +208,9 @@ mod server {
             .unwrap_or("")
             .to_string();
         let (jina, passages) = match body.get("texts").and_then(|v| v.as_array()) {
-            Some(a) => (
-                false,
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect::<Vec<_>>(),
-            ),
+            Some(a) => (false, super::extract_passages(a)),
             None => match body.get("documents").and_then(|v| v.as_array()) {
-                Some(a) => (
-                    true,
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect::<Vec<_>>(),
-                ),
+                Some(a) => (true, super::extract_passages(a)),
                 None => {
                     return (
                         StatusCode::UNPROCESSABLE_ENTITY,
@@ -221,8 +247,9 @@ mod server {
         let Some(_g) = admit(&st) else {
             return overloaded();
         };
-        let Some(pool) = st.nli.clone() else {
-            return (StatusCode::NOT_FOUND, "nli not loaded").into_response();
+        let pool = match st.nli.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            Some(p) => p,
+            None => return not_available(&st, "nli"),
         };
         // `inputs` is a pair ["p","h"] or a batch [["p","h"], ...]; normalize to a batch of pairs.
         let inputs = body.get("inputs");
@@ -331,6 +358,12 @@ mod tests {
         let json = encode_rerank_bare(&[2.0, 9.0, -3.0], None);
         let back = glossa::http_scorer::wire::parse_rerank_bare(&json, 3).unwrap();
         assert_eq!(back, vec![2.0, 9.0, -3.0]);
+    }
+
+    #[test]
+    fn extract_passages_accepts_strings_and_jina_text_objects() {
+        let v: serde_json::Value = serde_json::from_str(r#"["a", {"text":"b"}, "c"]"#).unwrap();
+        assert_eq!(extract_passages(v.as_array().unwrap()), vec!["a", "b", "c"]);
     }
 
     #[test]
