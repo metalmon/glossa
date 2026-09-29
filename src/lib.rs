@@ -58,57 +58,25 @@ pub mod tls;
 /// GPU inference with nothing in the output to show it. Runtime EP selection still belongs to
 /// `kbx nli check`; this reports what was COMPILED IN.
 pub fn version() -> &'static str {
-    VERSION_WITH_ENGINE
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| format!("{} (nli engine: {})", env!("CARGO_PKG_VERSION"), engine()))
 }
 
-// Precedence, most specific first. The `not(...)` guards are not redundant: `--all-features`
-// enables several of these at once (see the `[features]` notes in Cargo.toml), and without an
-// explicit order that build would fail to compile on duplicate definitions.
-#[cfg(feature = "nli-burn")]
-const VERSION_WITH_ENGINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (nli engine: burn-wgpu)");
-#[cfg(all(feature = "nli-cuda", not(feature = "nli-burn")))]
-const VERSION_WITH_ENGINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (nli engine: ort-cuda)");
-#[cfg(all(
-    feature = "nli-rocm",
-    not(any(feature = "nli-burn", feature = "nli-cuda"))
-))]
-const VERSION_WITH_ENGINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (nli engine: ort-rocm)");
-#[cfg(all(
-    feature = "nli-directml",
-    not(any(feature = "nli-burn", feature = "nli-cuda", feature = "nli-rocm"))
-))]
-const VERSION_WITH_ENGINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (nli engine: ort-directml)");
-#[cfg(all(
-    feature = "nli-coreml",
-    not(any(
-        feature = "nli-burn",
-        feature = "nli-cuda",
-        feature = "nli-rocm",
-        feature = "nli-directml"
-    ))
-))]
-const VERSION_WITH_ENGINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (nli engine: ort-coreml)");
-#[cfg(all(
-    any(feature = "nli", feature = "nli-dynamic"),
-    not(any(
-        feature = "nli-burn",
-        feature = "nli-cuda",
-        feature = "nli-rocm",
-        feature = "nli-directml",
-        feature = "nli-coreml"
-    ))
-))]
-const VERSION_WITH_ENGINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (nli engine: ort)");
-#[cfg(not(any(
-    feature = "nli",
-    feature = "nli-dynamic",
-    feature = "nli-burn",
-    feature = "nli-cuda",
-    feature = "nli-rocm",
-    feature = "nli-directml",
-    feature = "nli-coreml"
-)))]
-const VERSION_WITH_ENGINE: &str = concat!(env!("CARGO_PKG_VERSION"), " (nli engine: none)");
+/// Ask the crate that OWNS the execution provider. glossa's own features cannot see the EP: a top
+/// crate may enable it on `glossa-nli` while enabling only `nli-dynamic` here — which is exactly how
+/// `kb` printed `ort-cuda` and `kbx` printed plain `ort` from the same cuda13 artifact.
+///
+/// Every EP feature on this crate implies one of these three (`nli-cuda`/`nli-rocm` => `nli-dynamic`,
+/// `nli-directml`/`nli-coreml` => `nli`; see `[features]` in Cargo.toml), so this gate is exactly the
+/// set of builds in which `glossa-nli` is linked at all.
+#[cfg(any(feature = "nli", feature = "nli-dynamic", feature = "nli-burn"))]
+fn engine() -> &'static str {
+    glossa_nli::engine_name()
+}
+#[cfg(not(any(feature = "nli", feature = "nli-dynamic", feature = "nli-burn")))]
+fn engine() -> &'static str {
+    "none"
+}
 
 /// Serializes tests that mutate process-global environment variables (`std::env::set_var`/
 /// `remove_var`). Rust runs tests concurrently in one process, so without this they race.
@@ -125,6 +93,14 @@ mod tests {
     #[test]
     fn version_is_non_empty() {
         assert!(!version().is_empty());
+    }
+
+    /// Review Focus 5: with no NLI feature the glossa-nli dep is not linked at all, so `version()`
+    /// must fall back rather than call into a crate that is absent.
+    #[cfg(not(any(feature = "nli", feature = "nli-dynamic", feature = "nli-burn")))]
+    #[test]
+    fn version_engine_is_none_without_an_nli_feature() {
+        assert!(version().ends_with("(nli engine: none)"), "{}", version());
     }
 
     /// The engine suffix must always be present and must name one of the known engines. A missing

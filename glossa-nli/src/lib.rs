@@ -27,6 +27,64 @@ compile_error!("enable exactly ONE inference engine: `nli-ort` or `nli-burn-wgpu
 #[cfg(any(feature = "nli-ort", feature = "nli-burn-wgpu"))]
 pub mod harness;
 
+/// The compiled inference engine and its execution provider, named by the crate that owns both.
+///
+/// It lives here rather than in `glossa` because a top-level crate can enable the EP on THIS crate
+/// without enabling a matching feature on `glossa`: `kb-eval`'s `nli-cuda` is
+/// `["glossa/nli-dynamic", "glossa-nli/nli-cuda"]`, so `glossa`'s own features cannot see that CUDA
+/// is in the build. Asking the owner is the only answer that holds for every top crate.
+///
+/// Reports what was COMPILED IN; whether the provider initializes at runtime is a separate question.
+pub const fn engine_name() -> &'static str {
+    #[cfg(feature = "nli-burn-wgpu")]
+    {
+        "burn-wgpu"
+    }
+    #[cfg(all(feature = "nli-cuda", not(feature = "nli-burn-wgpu")))]
+    {
+        "ort-cuda"
+    }
+    #[cfg(all(
+        feature = "nli-rocm",
+        not(any(feature = "nli-burn-wgpu", feature = "nli-cuda"))
+    ))]
+    {
+        "ort-rocm"
+    }
+    #[cfg(all(
+        feature = "nli-directml",
+        not(any(feature = "nli-burn-wgpu", feature = "nli-cuda", feature = "nli-rocm"))
+    ))]
+    {
+        "ort-directml"
+    }
+    #[cfg(all(
+        feature = "nli-coreml",
+        not(any(
+            feature = "nli-burn-wgpu",
+            feature = "nli-cuda",
+            feature = "nli-rocm",
+            feature = "nli-directml"
+        ))
+    ))]
+    {
+        "ort-coreml"
+    }
+    #[cfg(all(
+        feature = "nli-ort",
+        not(any(
+            feature = "nli-burn-wgpu",
+            feature = "nli-cuda",
+            feature = "nli-rocm",
+            feature = "nli-directml",
+            feature = "nli-coreml"
+        ))
+    ))]
+    {
+        "ort"
+    }
+}
+
 #[cfg(feature = "nli-burn-wgpu")]
 mod burn_engine;
 #[cfg(feature = "nli-burn-wgpu")]
@@ -972,5 +1030,22 @@ mod ort_engine {
                 padded[0]
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod engine_name_tests {
+    use super::engine_name;
+
+    #[test]
+    fn engine_name_is_one_of_the_known_providers() {
+        assert!(
+            matches!(
+                engine_name(),
+                "ort-cuda" | "ort-rocm" | "ort-directml" | "ort-coreml" | "ort" | "burn-wgpu"
+            ),
+            "unknown engine token {:?}",
+            engine_name()
+        );
     }
 }
