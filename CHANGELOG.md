@@ -6,6 +6,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-09-30
+
+### Added
+
+- **Remote inference server (`inference-server`).** A standalone HTTP server that loads the NLI + reranker cross-encoders once and serves them over the TEI/Jina protocol (`/rerank`, `/predict`, `/health`, `/ready`, `/info`, `/metrics`), so a GPU-less host can offload scoring to one shared VRAM copy. One session per model (request parallelism comes from batching, not N sessions); bearer-auth + a non-loopback interlock; a 429 overload guard; TLS/mTLS with hot-reloading certs (a TLS bind satisfies the interlock); CORS, a request timeout (408), and a `Host` allow-list (403); model auto-download. Default bind `127.0.0.1:8071`. Shipped in the GPU-execution-provider release artifacts (cuda13 / DirectML / CoreML).
+- **`scorer = "http"` for `[verify.nli]` and `[rerank]`.** New `endpoint` / `timeout_ms` / `api_key` config keys (and `GLOSSA_*_HTTP_*` env) point the in-process gate/reranker at a remote `inference-server`; `kbx nli check --endpoint` and `kbx rerank check --endpoint` probe it.
+- **`kb service` and `inference-server service`.** Cross-platform `install | uninstall | start | stop | status` — Windows via the SCM programmatically, Linux via a generated systemd unit — replacing hand-run `sc.exe` / unit files. `kb service install` is streamable-http by construction (no `--transport` flag); run several corpora from one binary with distinct `--service-name` + `--bind`. Needs elevation (a clear "run elevated" message otherwise).
+
+### Changed
+
+- **BREAKING — device flags/keys renamed, no back-compat.** The ONNX Runtime "execution provider" surface is now plain device terms everywhere: CLI `--ep` (a list) → `--device` (a single value with automatic CPU fallback), `--ep-device` → `--gpu-id`, `--ep-mem-limit-mb` → `--gpu-mem-mb`; ontology keys `execution_providers` → `device`, `ep_device` → `gpu_id`, `ep_mem_limit_mb` → `gpu_mem_mb`; env `GLOSSA_*_EP_DEVICE` / `_EP_MEM_LIMIT_MB` → `_GPU_ID` / `_GPU_MEM_MB` (and the provider list → `_DEVICE`). The old names are no longer accepted — update `ontology.toml` by hand (e.g. `device = "cuda"` in `[verify.nli]` / `[rerank]`).
+
 ## [0.5.1] — 2026-09-29
 
 ### Added
