@@ -17,6 +17,7 @@ pub mod export_tz;
 pub mod fcr;
 pub mod finetune;
 pub mod gepa;
+pub mod infer;
 pub mod gepa_checkpoint;
 pub mod gepa_graph;
 pub mod judge;
