@@ -292,7 +292,8 @@ pub fn write_rerank_config(
 #[cfg(feature = "http-scorer")]
 pub fn probe_remote_rerank(endpoint: &str, timeout_ms: u64, api_key: Option<String>) -> String {
     use glossa::retrieve::rerank::Reranker;
-    let r = glossa::http_scorer::client::new_ureq_reranker(endpoint.to_string(), timeout_ms, api_key);
+    let r =
+        glossa::http_scorer::client::new_ureq_reranker(endpoint.to_string(), timeout_ms, api_key);
     match r.rerank(
         "What is the capital of France?",
         &[
@@ -302,9 +303,16 @@ pub fn probe_remote_rerank(endpoint: &str, timeout_ms: u64, api_key: Option<Stri
     ) {
         Ok(s) if s.len() == 2 => format!(
             "remote = tei @ {endpoint} reachable (relevant {} irrelevant)",
-            if rerank_check_ok(s[0], s[1]) { ">" } else { "<=" }
+            if rerank_check_ok(s[0], s[1]) {
+                ">"
+            } else {
+                "<="
+            }
         ),
-        Ok(s) => format!("remote = tei @ {endpoint} BAD RESPONSE ({} scores, expected 2)", s.len()),
+        Ok(s) => format!(
+            "remote = tei @ {endpoint} BAD RESPONSE ({} scores, expected 2)",
+            s.len()
+        ),
         Err(e) => format!("remote = tei @ {endpoint} UNREACHABLE: {e}"),
     }
 }

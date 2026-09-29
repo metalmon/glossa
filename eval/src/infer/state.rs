@@ -45,7 +45,6 @@ pub fn resolve_model_dir(
 // the pool is correct and keeps ONE VRAM copy, but `--*-workers N` is serialized until an uncached
 // load lands (Phase 2). See the plan's Task 6 ruling.
 #[cfg(any(
-    feature = "nli",
     feature = "nli-directml",
     feature = "nli-coreml",
     feature = "nli-cuda",
@@ -54,7 +53,6 @@ pub fn resolve_model_dir(
 pub use engine::{build_state, ServerState};
 
 #[cfg(any(
-    feature = "nli",
     feature = "nli-directml",
     feature = "nli-coreml",
     feature = "nli-cuda",
@@ -107,14 +105,28 @@ mod engine {
         if nli_dir.is_none() && rerank_dir.is_none() {
             bail!("no model given: pass --nli-model-dir/--nli-repo and/or --rerank-model-dir/--rerank-repo");
         }
-        let nli_eps = if args.nli_ep.is_empty() { &args.ep } else { &args.nli_ep };
-        let rerank_eps = if args.rerank_ep.is_empty() { &args.ep } else { &args.rerank_ep };
+        let nli_eps = if args.nli_ep.is_empty() {
+            &args.ep
+        } else {
+            &args.nli_ep
+        };
+        let rerank_eps = if args.rerank_ep.is_empty() {
+            &args.ep
+        } else {
+            &args.rerank_ep
+        };
 
         let (nli, nli_ep) = match &nli_dir {
             Some(d) => {
-                let ep = probe_gpu_ep(d, args.entail_index, nli_eps, args.ep_device, args.ep_mem_limit_mb)
-                    .ok()
-                    .flatten();
+                let ep = probe_gpu_ep(
+                    d,
+                    args.entail_index,
+                    nli_eps,
+                    args.ep_device,
+                    args.ep_mem_limit_mb,
+                )
+                .ok()
+                .flatten();
                 let mut sessions = Vec::new();
                 for _ in 0..args.nli_workers.max(1) {
                     sessions.push(InProcessNli::load(
@@ -190,9 +202,18 @@ mod tests {
 
     #[test]
     fn parse_variant_maps_names() {
-        assert_eq!(parse_variant("fp16").unwrap(), crate::download::Variant::Fp16);
-        assert_eq!(parse_variant("int8").unwrap(), crate::download::Variant::Int8);
-        assert_eq!(parse_variant("fp32").unwrap(), crate::download::Variant::Fp32);
+        assert_eq!(
+            parse_variant("fp16").unwrap(),
+            crate::download::Variant::Fp16
+        );
+        assert_eq!(
+            parse_variant("int8").unwrap(),
+            crate::download::Variant::Int8
+        );
+        assert_eq!(
+            parse_variant("fp32").unwrap(),
+            crate::download::Variant::Fp32
+        );
         assert!(parse_variant("bogus").is_err());
     }
 }

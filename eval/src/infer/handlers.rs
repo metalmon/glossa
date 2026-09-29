@@ -47,7 +47,6 @@ pub fn encode_rerank_jina(scores: &[f32], top_n: Option<usize>, model: &str) -> 
 }
 
 #[cfg(any(
-    feature = "nli",
     feature = "nli-directml",
     feature = "nli-coreml",
     feature = "nli-cuda",
@@ -56,7 +55,6 @@ pub fn encode_rerank_jina(scores: &[f32], top_n: Option<usize>, model: &str) -> 
 pub use server::router;
 
 #[cfg(any(
-    feature = "nli",
     feature = "nli-directml",
     feature = "nli-coreml",
     feature = "nli-cuda",
@@ -113,7 +111,11 @@ mod server {
 
     async fn metrics() -> Response {
         // Minimal Prometheus text; richer scorer series are a Phase-2 addition.
-        (StatusCode::OK, "# glossa inference-server\nglossa_infer_up 1\n").into_response()
+        (
+            StatusCode::OK,
+            "# glossa inference-server\nglossa_infer_up 1\n",
+        )
+            .into_response()
     }
 
     fn overloaded() -> Response {
@@ -147,15 +149,38 @@ mod server {
         let Some(pool) = st.rerank.clone() else {
             return (StatusCode::NOT_FOUND, "reranker not loaded").into_response();
         };
-        let query = body.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let query = body
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let (jina, passages) = match body.get("texts").and_then(|v| v.as_array()) {
-            Some(a) => (false, a.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>()),
+            Some(a) => (
+                false,
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>(),
+            ),
             None => match body.get("documents").and_then(|v| v.as_array()) {
-                Some(a) => (true, a.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>()),
-                None => return (StatusCode::UNPROCESSABLE_ENTITY, "missing `texts` or `documents`").into_response(),
+                Some(a) => (
+                    true,
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect::<Vec<_>>(),
+                ),
+                None => {
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "missing `texts` or `documents`",
+                    )
+                        .into_response()
+                }
             },
         };
-        let top_n = body.get("top_n").and_then(|v| v.as_u64()).map(|n| n as usize);
+        let top_n = body
+            .get("top_n")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize);
         let scored = tokio::task::spawn_blocking(move || {
             let g = pool.acquire();
             let refs: Vec<&str> = passages.iter().map(String::as_str).collect();
@@ -187,20 +212,35 @@ mod server {
         let pairs: Vec<(String, String)> = match inputs.and_then(|v| v.as_array()) {
             Some(a) if a.iter().all(|e| e.is_string()) => {
                 // single pair ["p","h"]
-                let s: Vec<String> = a.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+                let s: Vec<String> = a
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
                 if s.len() == 2 {
                     vec![(s[0].clone(), s[1].clone())]
                 } else {
-                    return (StatusCode::UNPROCESSABLE_ENTITY, "pair must be [premise, hypothesis]").into_response();
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "pair must be [premise, hypothesis]",
+                    )
+                        .into_response();
                 }
             }
             Some(a) => {
                 let mut out = Vec::new();
                 for e in a {
-                    let p: Vec<String> = e.as_array().into_iter().flatten()
-                        .filter_map(|v| v.as_str().map(String::from)).collect();
+                    let p: Vec<String> = e
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect();
                     if p.len() != 2 {
-                        return (StatusCode::UNPROCESSABLE_ENTITY, "each pair must be [premise, hypothesis]").into_response();
+                        return (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            "each pair must be [premise, hypothesis]",
+                        )
+                            .into_response();
                     }
                     out.push((p[0].clone(), p[1].clone()));
                 }

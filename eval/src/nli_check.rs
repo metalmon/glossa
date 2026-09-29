@@ -214,7 +214,10 @@ pub fn probe_remote_nli(
             "remote = tei @ {endpoint} reachable (P(entail): entailing={:.2} contradicting={:.2})",
             s[0], s[1]
         ),
-        Ok(s) => format!("remote = tei @ {endpoint} BAD RESPONSE ({} scores, expected 2)", s.len()),
+        Ok(s) => format!(
+            "remote = tei @ {endpoint} BAD RESPONSE ({} scores, expected 2)",
+            s.len()
+        ),
         Err(e) => format!("remote = tei @ {endpoint} UNREACHABLE: {e}"),
     }
 }

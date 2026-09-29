@@ -22,7 +22,9 @@ impl HttpTransport for UreqTransport {
         if let Some(k) = api_key {
             req = req.set("authorization", &format!("Bearer {k}"));
         }
-        let resp = req.send_string(body).context("http scorer request failed")?;
+        let resp = req
+            .send_string(body)
+            .context("http scorer request failed")?;
         resp.into_string().context("reading http scorer response")
     }
 }
@@ -37,7 +39,9 @@ impl NliScorer for HttpNli {
     fn entail(&self, premise: &str, hypotheses: &[&str]) -> Result<Vec<f32>> {
         let body = serde_json::to_string(&wire::build_predict_request(premise, hypotheses))?;
         let url = join(&self.endpoint, "predict");
-        let resp = self.transport.post_json(&url, &body, self.api_key.as_deref())?;
+        let resp = self
+            .transport
+            .post_json(&url, &body, self.api_key.as_deref())?;
         wire::parse_predict(&resp, self.entail_index, hypotheses.len())
     }
 }
@@ -51,7 +55,9 @@ impl Reranker for HttpReranker {
     fn rerank(&self, query: &str, passages: &[&str]) -> Result<Vec<f32>> {
         let body = serde_json::to_string(&wire::build_rerank_request(query, passages, true))?;
         let url = join(&self.endpoint, "rerank");
-        let resp = self.transport.post_json(&url, &body, self.api_key.as_deref())?;
+        let resp = self
+            .transport
+            .post_json(&url, &body, self.api_key.as_deref())?;
         wire::parse_rerank_bare(&resp, passages.len())
     }
 }
@@ -74,7 +80,11 @@ pub fn new_ureq_nli(
         api_key,
     }
 }
-pub fn new_ureq_reranker(endpoint: String, timeout_ms: u64, api_key: Option<String>) -> HttpReranker {
+pub fn new_ureq_reranker(
+    endpoint: String,
+    timeout_ms: u64,
+    api_key: Option<String>,
+) -> HttpReranker {
     HttpReranker {
         endpoint,
         transport: Box::new(UreqTransport { timeout_ms }),

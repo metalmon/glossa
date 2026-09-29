@@ -3,7 +3,6 @@
 //! without one prints how to build it. Runs in the foreground; Phase 2 adds `service install`.
 
 #[cfg(any(
-    feature = "nli",
     feature = "nli-directml",
     feature = "nli-coreml",
     feature = "nli-cuda",
@@ -35,8 +34,14 @@ fn main() -> anyhow::Result<()> {
             "inference-server ready on http://{}  (nli_ep={:?} rerank_ep={:?})",
             args.bind, st.nli_ep, st.rerank_ep
         );
-        println!("  kbx nli set    --scorer http --endpoint http://{}", args.bind);
-        println!("  kbx rerank set --scorer http --endpoint http://{}", args.bind);
+        println!(
+            "  kbx nli set    --scorer http --endpoint http://{}",
+            args.bind
+        );
+        println!(
+            "  kbx rerank set --scorer http --endpoint http://{}",
+            args.bind
+        );
         let app = handlers::router(st.clone())
             .layer(axum::middleware::from_fn_with_state(
                 st.clone(),
@@ -52,7 +57,6 @@ fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(any(
-    feature = "nli",
     feature = "nli-directml",
     feature = "nli-coreml",
     feature = "nli-cuda",
@@ -63,7 +67,6 @@ async fn shutdown_signal() {
 }
 
 #[cfg(not(any(
-    feature = "nli",
     feature = "nli-directml",
     feature = "nli-coreml",
     feature = "nli-cuda",

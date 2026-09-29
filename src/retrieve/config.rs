@@ -64,13 +64,19 @@ impl RerankConfig {
                 .or_else(|| ont.as_ref().and_then(|o| o.rerank_ep_device())),
             ep_mem_limit_mb: env_usize("GLOSSA_RERANK_EP_MEM_LIMIT_MB")
                 .or_else(|| ont.as_ref().and_then(|o| o.rerank_ep_mem_limit_mb())),
-            endpoint: env_string("GLOSSA_RERANK_HTTP_ENDPOINT")
-                .or_else(|| ont.as_ref().and_then(|o| o.rerank_endpoint()).map(str::to_string)),
+            endpoint: env_string("GLOSSA_RERANK_HTTP_ENDPOINT").or_else(|| {
+                ont.as_ref()
+                    .and_then(|o| o.rerank_endpoint())
+                    .map(str::to_string)
+            }),
             timeout_ms: env_usize("GLOSSA_RERANK_HTTP_TIMEOUT_MS")
                 .or_else(|| ont.as_ref().and_then(|o| o.rerank_timeout_ms()))
                 .unwrap_or(5000) as u64,
-            api_key: env_string("GLOSSA_RERANK_HTTP_API_KEY")
-                .or_else(|| ont.as_ref().and_then(|o| o.rerank_api_key()).map(str::to_string)),
+            api_key: env_string("GLOSSA_RERANK_HTTP_API_KEY").or_else(|| {
+                ont.as_ref()
+                    .and_then(|o| o.rerank_api_key())
+                    .map(str::to_string)
+            }),
         }
     }
 

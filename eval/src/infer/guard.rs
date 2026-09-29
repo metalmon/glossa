@@ -22,7 +22,6 @@ pub fn auth_ok(path: &str, auth_header: Option<&str>, key: Option<&str>) -> bool
 }
 
 #[cfg(any(
-    feature = "nli",
     feature = "nli-directml",
     feature = "nli-coreml",
     feature = "nli-cuda",
@@ -31,7 +30,6 @@ pub fn auth_ok(path: &str, auth_header: Option<&str>, key: Option<&str>) -> bool
 pub use layer::auth_layer;
 
 #[cfg(any(
-    feature = "nli",
     feature = "nli-directml",
     feature = "nli-coreml",
     feature = "nli-cuda",

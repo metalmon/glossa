@@ -90,7 +90,11 @@ pub fn parse_predict(body: &str, entail_index: usize, n: usize) -> Result<Vec<f3
             .get(entail_index)
             .with_context(|| format!("entail_index {entail_index} >= {} classes", row.len()))?;
         if !p.score.is_finite() || !(0.0..=1.0).contains(&p.score) {
-            bail!("predict score {} for label {:?} out of [0,1]", p.score, p.label);
+            bail!(
+                "predict score {} for label {:?} out of [0,1]",
+                p.score,
+                p.label
+            );
         }
         out.push(p.score);
     }
