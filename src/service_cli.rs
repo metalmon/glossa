@@ -145,7 +145,10 @@ mod tests {
             .args
             .starts_with(&["mcp".to_string(), "C:/kb/base".to_string()]));
         // transport is ALWAYS streamable-http — there is no way to ask for stdio:
-        assert!(s.args.windows(2).any(|w| w == ["--transport", "streamable-http"]));
+        assert!(s
+            .args
+            .windows(2)
+            .any(|w| w == ["--transport", "streamable-http"]));
         // --vision and --dedup are baked when requested.
         assert!(s.args.iter().any(|a| a == "--vision"));
         assert!(s.args.iter().any(|a| a == "--dedup"));

@@ -34,7 +34,10 @@ pub fn normalize_eps(raw: impl Iterator<Item = String>) -> Vec<String> {
 /// unknown device drops to `["cpu"]`). Replaces the old comma-list `--ep`; the internal
 /// `execution_providers: Vec<String>` is unchanged.
 pub fn expand_device(device: Option<&str>) -> Vec<String> {
-    match device.map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()) {
+    match device
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+    {
         None => normalize_eps(std::iter::once("cpu".to_string())),
         Some(d) if d == "cpu" => normalize_eps(std::iter::once("cpu".to_string())),
         Some(d) => normalize_eps([d, "cpu".to_string()].into_iter()),

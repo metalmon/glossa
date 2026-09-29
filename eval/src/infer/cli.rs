@@ -112,9 +112,11 @@ impl ServeArgs {
     #[allow(clippy::type_complexity)]
     pub fn tls_paths(&self) -> anyhow::Result<Option<(PathBuf, PathBuf, Option<PathBuf>)>> {
         match (&self.tls_cert, &self.tls_key) {
-            (Some(cert), Some(key)) => {
-                Ok(Some((cert.clone(), key.clone(), self.tls_client_ca.clone())))
-            }
+            (Some(cert), Some(key)) => Ok(Some((
+                cert.clone(),
+                key.clone(),
+                self.tls_client_ca.clone(),
+            ))),
             (None, None) => Ok(None),
             _ => anyhow::bail!("--tls-cert and --tls-key must be given together"),
         }

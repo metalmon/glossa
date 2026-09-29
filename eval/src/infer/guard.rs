@@ -155,10 +155,13 @@ mod tests {
             &["scorer.example.com".into()]
         ));
         assert!(!host_allowed(None, &["scorer.example.com".into()])); // missing Host, non-empty list
-        // Bracketed IPv6 literals: the port after `]` is ignored, and the bare address matches.
+                                                                      // Bracketed IPv6 literals: the port after `]` is ignored, and the bare address matches.
         assert!(host_allowed(Some("[::1]:8071"), &["::1".into()]));
         assert!(host_allowed(Some("[::1]"), &["::1".into()]));
-        assert!(!host_allowed(Some("[::1]:8071"), &["scorer.example.com".into()]));
+        assert!(!host_allowed(
+            Some("[::1]:8071"),
+            &["scorer.example.com".into()]
+        ));
     }
 
     #[test]

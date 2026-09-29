@@ -1004,13 +1004,7 @@ fn main() -> Result<()> {
                     gpu_mem_mb,
                 },
         } => kb_eval::rerank_check::rerank_set(
-            path,
-            model_dir,
-            scorer,
-            pool_size,
-            device,
-            gpu_id,
-            gpu_mem_mb,
+            path, model_dir, scorer, pool_size, device, gpu_id, gpu_mem_mb,
         ),
     }
 }

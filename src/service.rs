@@ -30,7 +30,11 @@ pub fn render_systemd_unit(spec: &ServiceSpec) -> String {
         program
     };
     let exec = format!("{prog} {}", join_args_shell(&spec.args));
-    let watchdog = if spec.watchdog { "WatchdogSec=30\n" } else { "" };
+    let watchdog = if spec.watchdog {
+        "WatchdogSec=30\n"
+    } else {
+        ""
+    };
     format!(
         "[Unit]\nDescription={}\nAfter=network-online.target\nWants=network-online.target\n\n\
          [Service]\nType=notify\nExecStart={exec}\n{watchdog}Restart=on-failure\nRestartSec=2\n\n\
@@ -323,7 +327,9 @@ mod os {
             }
             // ERROR_SERVICE_EXISTS (1073): open it, refresh the description, report it clearly.
             Err(windows_service::Error::Winapi(io)) if io.raw_os_error() == Some(1073) => {
-                let svc = mgr.open_service(&spec.name, manage_access()).map_err(map_err)?;
+                let svc = mgr
+                    .open_service(&spec.name, manage_access())
+                    .map_err(map_err)?;
                 svc.set_description(&spec.description).map_err(map_err)?;
                 eprintln!(
                     "service {} already exists — left in place (uninstall first to recreate)",
@@ -409,7 +415,10 @@ mod os {
                 || stderr.contains("Interactive authentication required")
                 || out.status.code() == Some(4)
             {
-                anyhow::bail!("run elevated (sudo) to manage systemd services: {}", stderr.trim());
+                anyhow::bail!(
+                    "run elevated (sudo) to manage systemd services: {}",
+                    stderr.trim()
+                );
             }
             anyhow::bail!("systemctl {:?} failed: {}", args, stderr.trim());
         }
