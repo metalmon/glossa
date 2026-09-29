@@ -393,7 +393,10 @@ mod tests {
         let mut r = FcrReport::default();
         r.add("multihop", false, true, 0.5);
         let out = r.render(20);
-        assert!(out.contains("any-of="), "render must expose the aggregate: {out}");
+        assert!(
+            out.contains("any-of="),
+            "render must expose the aggregate: {out}"
+        );
         assert!(out.contains("ALL"), "{out}");
     }
 
