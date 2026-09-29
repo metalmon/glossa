@@ -143,6 +143,15 @@ pub fn retrieve(
     not(feature = "nli-burn")
 ))]
 pub fn resolve_reranker(cfg: &RerankConfig) -> Option<Box<dyn Reranker>> {
+    #[cfg(feature = "http-scorer")]
+    if cfg.enabled && cfg.scorer.as_deref() == Some("http") {
+        let endpoint = cfg.endpoint.clone()?;
+        return Some(Box::new(crate::http_scorer::client::new_ureq_reranker(
+            endpoint,
+            cfg.timeout_ms,
+            cfg.api_key.clone(),
+        )));
+    }
     if !cfg.is_active() {
         return None;
     }
@@ -167,6 +176,15 @@ pub fn resolve_reranker(cfg: &RerankConfig) -> Option<Box<dyn Reranker>> {
 /// BM25), never propagated.
 #[cfg(feature = "nli-burn")]
 pub fn resolve_reranker(cfg: &RerankConfig) -> Option<Box<dyn Reranker>> {
+    #[cfg(feature = "http-scorer")]
+    if cfg.enabled && cfg.scorer.as_deref() == Some("http") {
+        let endpoint = cfg.endpoint.clone()?;
+        return Some(Box::new(crate::http_scorer::client::new_ureq_reranker(
+            endpoint,
+            cfg.timeout_ms,
+            cfg.api_key.clone(),
+        )));
+    }
     if !cfg.is_active() {
         return None;
     }
@@ -182,7 +200,18 @@ pub fn resolve_reranker(cfg: &RerankConfig) -> Option<Box<dyn Reranker>> {
 
 /// No engine feature on => no in-process reranker even compiled; always plain BM25.
 #[cfg(not(any(feature = "nli", feature = "nli-dynamic", feature = "nli-burn")))]
-pub fn resolve_reranker(_cfg: &RerankConfig) -> Option<Box<dyn Reranker>> {
+pub fn resolve_reranker(cfg: &RerankConfig) -> Option<Box<dyn Reranker>> {
+    #[cfg(feature = "http-scorer")]
+    if cfg.enabled && cfg.scorer.as_deref() == Some("http") {
+        let endpoint = cfg.endpoint.clone()?;
+        return Some(Box::new(crate::http_scorer::client::new_ureq_reranker(
+            endpoint,
+            cfg.timeout_ms,
+            cfg.api_key.clone(),
+        )));
+    }
+    #[cfg(not(feature = "http-scorer"))]
+    let _ = cfg;
     None
 }
 
@@ -336,6 +365,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = crate::retrieve::config::RerankConfig::resolve(dir.path());
         assert!(resolve_reranker(&cfg).is_none());
+    }
+
+    #[cfg(feature = "http-scorer")]
+    #[test]
+    fn resolve_reranker_builds_http_when_enabled_http_and_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[rerank]\nenabled=true\nscorer=\"http\"\nendpoint=\"http://gpu:8080\"\n",
+        )
+        .unwrap();
+        let cfg = crate::retrieve::config::RerankConfig::resolve(&g);
+        assert!(resolve_reranker(&cfg).is_some());
     }
 
     #[test]

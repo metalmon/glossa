@@ -62,6 +62,16 @@ pub fn verify_outcome(
     not(feature = "nli-burn")
 ))]
 pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
+    #[cfg(feature = "http-scorer")]
+    if cfg.scorer.as_deref() == Some("http") {
+        let endpoint = cfg.endpoint.clone()?;
+        return Some(Box::new(crate::http_scorer::client::new_ureq_nli(
+            endpoint,
+            cfg.entail_index,
+            cfg.timeout_ms,
+            cfg.api_key.clone(),
+        )));
+    }
     if cfg.scorer.as_deref() != Some("in_process") {
         return None;
     }
@@ -88,6 +98,16 @@ pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
 /// downgrades to `None` (AC-only), never propagated.
 #[cfg(feature = "nli-burn")]
 pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
+    #[cfg(feature = "http-scorer")]
+    if cfg.scorer.as_deref() == Some("http") {
+        let endpoint = cfg.endpoint.clone()?;
+        return Some(Box::new(crate::http_scorer::client::new_ureq_nli(
+            endpoint,
+            cfg.entail_index,
+            cfg.timeout_ms,
+            cfg.api_key.clone(),
+        )));
+    }
     if cfg.scorer.as_deref() != Some("in_process") {
         return None;
     }
@@ -103,7 +123,19 @@ pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
 
 /// No engine feature on => no in-process scorer is even compiled; always `None` (AC-only).
 #[cfg(not(any(feature = "nli", feature = "nli-dynamic", feature = "nli-burn")))]
-pub fn resolve_scorer(_cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
+pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
+    #[cfg(feature = "http-scorer")]
+    if cfg.scorer.as_deref() == Some("http") {
+        let endpoint = cfg.endpoint.clone()?;
+        return Some(Box::new(crate::http_scorer::client::new_ureq_nli(
+            endpoint,
+            cfg.entail_index,
+            cfg.timeout_ms,
+            cfg.api_key.clone(),
+        )));
+    }
+    #[cfg(not(feature = "http-scorer"))]
+    let _ = cfg;
     None
 }
 
@@ -254,6 +286,24 @@ mod resolve_scorer_tests {
             timeout_ms: 5000,
             api_key: None,
         }
+    }
+
+    #[cfg(feature = "http-scorer")]
+    #[test]
+    fn resolve_scorer_builds_http_when_scorer_http_and_endpoint_set() {
+        let mut cfg = base_cfg();
+        cfg.scorer = Some("http".into());
+        cfg.endpoint = Some("http://gpu:8080".into());
+        assert!(resolve_scorer(&cfg).is_some());
+    }
+
+    #[cfg(feature = "http-scorer")]
+    #[test]
+    fn resolve_scorer_none_when_http_but_no_endpoint() {
+        let mut cfg = base_cfg();
+        cfg.scorer = Some("http".into());
+        cfg.endpoint = None;
+        assert!(resolve_scorer(&cfg).is_none());
     }
 
     // Runs identically with the `nli` feature ON or OFF: with it off `resolve_scorer` is the
