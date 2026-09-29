@@ -17,6 +17,13 @@ pub struct RerankConfig {
     pub execution_providers: Vec<String>,
     pub ep_device: Option<i32>,
     pub ep_mem_limit_mb: Option<usize>,
+    /// Remote reranker (`scorer = "http"`) endpoint base URL; `None` ⇒ `resolve_reranker` cannot
+    /// build an `HttpReranker`. Env `GLOSSA_RERANK_HTTP_ENDPOINT`.
+    pub endpoint: Option<String>,
+    /// Remote reranker per-call timeout in ms (default 5000). Env `GLOSSA_RERANK_HTTP_TIMEOUT_MS`.
+    pub timeout_ms: u64,
+    /// Optional Bearer api-key for the remote reranker. Env `GLOSSA_RERANK_HTTP_API_KEY`.
+    pub api_key: Option<String>,
 }
 
 impl RerankConfig {
@@ -57,6 +64,13 @@ impl RerankConfig {
                 .or_else(|| ont.as_ref().and_then(|o| o.rerank_ep_device())),
             ep_mem_limit_mb: env_usize("GLOSSA_RERANK_EP_MEM_LIMIT_MB")
                 .or_else(|| ont.as_ref().and_then(|o| o.rerank_ep_mem_limit_mb())),
+            endpoint: env_string("GLOSSA_RERANK_HTTP_ENDPOINT")
+                .or_else(|| ont.as_ref().and_then(|o| o.rerank_endpoint()).map(str::to_string)),
+            timeout_ms: env_usize("GLOSSA_RERANK_HTTP_TIMEOUT_MS")
+                .or_else(|| ont.as_ref().and_then(|o| o.rerank_timeout_ms()))
+                .unwrap_or(5000) as u64,
+            api_key: env_string("GLOSSA_RERANK_HTTP_API_KEY")
+                .or_else(|| ont.as_ref().and_then(|o| o.rerank_api_key()).map(str::to_string)),
         }
     }
 
@@ -107,6 +121,28 @@ mod tests {
             c.execution_providers,
             vec!["cuda".to_string(), "cpu".to_string()]
         );
+    }
+
+    #[test]
+    fn rerank_http_config_round_trips() {
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_RERANK_HTTP_ENDPOINT");
+        std::env::remove_var("GLOSSA_RERANK_HTTP_TIMEOUT_MS");
+        std::env::remove_var("GLOSSA_RERANK_HTTP_API_KEY");
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[rerank]\nenabled=true\nscorer=\"http\"\nendpoint=\"http://gpu:8080\"\n",
+        )
+        .unwrap();
+        let c = RerankConfig::resolve(&g);
+        assert_eq!(c.scorer.as_deref(), Some("http"));
+        assert_eq!(c.endpoint.as_deref(), Some("http://gpu:8080"));
+        assert_eq!(c.timeout_ms, 5000);
     }
 
     #[test]

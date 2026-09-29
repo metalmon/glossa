@@ -147,6 +147,15 @@ struct RawVerifyNli {
     /// (see [`Ontology::verify_nli_ep_mem_limit_mb`]).
     #[serde(default)]
     ep_mem_limit_mb: Option<usize>,
+    /// Remote scorer endpoint base URL (`scorer = "http"`); `None`/absent when unset.
+    #[serde(default)]
+    endpoint: Option<String>,
+    /// Remote scorer per-call timeout in ms; `None`/absent ⇒ engine default (5000).
+    #[serde(default)]
+    timeout_ms: Option<usize>,
+    /// Optional Bearer api-key for the remote scorer; `None`/absent when unset.
+    #[serde(default)]
+    api_key: Option<String>,
 }
 
 /// `[rerank]` overlay: the retrieve→rerank cross-encoder's runtime selection. Top-level sibling of
@@ -170,6 +179,15 @@ struct RawRerank {
     ep_device: Option<i32>,
     #[serde(default)]
     ep_mem_limit_mb: Option<usize>,
+    /// Remote reranker endpoint base URL (`scorer = "http"`); `None`/absent when unset.
+    #[serde(default)]
+    endpoint: Option<String>,
+    /// Remote reranker per-call timeout in ms; `None`/absent ⇒ engine default (5000).
+    #[serde(default)]
+    timeout_ms: Option<usize>,
+    /// Optional Bearer api-key for the remote reranker; `None`/absent when unset.
+    #[serde(default)]
+    api_key: Option<String>,
 }
 
 /// `[verify.combined]` overlay: per-bucket z-score consensus calibration (see
@@ -460,6 +478,10 @@ pub struct Ontology {
     /// Per-corpus `[verify.nli].ep_mem_limit_mb` GPU memory cap (MB), or `None` when unset.
     /// See [`Ontology::verify_nli_ep_mem_limit_mb`].
     verify_nli_ep_mem_limit_mb: Option<usize>,
+    /// Per-corpus `[verify.nli]` remote scorer keys (`scorer = "http"`): endpoint / timeout / api-key.
+    verify_nli_endpoint: Option<String>,
+    verify_nli_timeout_ms: Option<usize>,
+    verify_nli_api_key: Option<String>,
     /// Per-corpus `[verify.combined.<bucket>]` z-score consensus calibration (Task CZ-2's output).
     /// `None` when the bucket's table is absent OR only partially populated — see
     /// [`Ontology::verify_combined_single`].
@@ -475,6 +497,10 @@ pub struct Ontology {
     rerank_execution_providers: Vec<String>,
     rerank_ep_device: Option<i32>,
     rerank_ep_mem_limit_mb: Option<usize>,
+    /// Per-corpus `[rerank]` remote scorer keys (`scorer = "http"`): endpoint / timeout / api-key.
+    rerank_endpoint: Option<String>,
+    rerank_timeout_ms: Option<usize>,
+    rerank_api_key: Option<String>,
 }
 
 fn entity_id_prefix(v: &toml::Value) -> Option<String> {
@@ -656,6 +682,9 @@ impl Ontology {
                 .unwrap_or_default(),
             verify_nli_ep_device: raw.verify.nli.as_ref().and_then(|n| n.ep_device),
             verify_nli_ep_mem_limit_mb: raw.verify.nli.as_ref().and_then(|n| n.ep_mem_limit_mb),
+            verify_nli_endpoint: raw.verify.nli.as_ref().and_then(|n| n.endpoint.clone()),
+            verify_nli_timeout_ms: raw.verify.nli.as_ref().and_then(|n| n.timeout_ms),
+            verify_nli_api_key: raw.verify.nli.as_ref().and_then(|n| n.api_key.clone()),
             verify_combined_single: raw
                 .verify
                 .combined
@@ -675,6 +704,9 @@ impl Ontology {
             rerank_execution_providers: raw.rerank.execution_providers.clone().unwrap_or_default(),
             rerank_ep_device: raw.rerank.ep_device,
             rerank_ep_mem_limit_mb: raw.rerank.ep_mem_limit_mb,
+            rerank_endpoint: raw.rerank.endpoint.clone(),
+            rerank_timeout_ms: raw.rerank.timeout_ms,
+            rerank_api_key: raw.rerank.api_key.clone(),
             reasoning: raw.reasoning,
             constraint_types: raw
                 .constraint_types
@@ -1000,6 +1032,21 @@ impl Ontology {
         self.verify_nli_ep_mem_limit_mb
     }
 
+    /// Per-corpus `[verify.nli].endpoint` remote scorer base URL (`scorer="http"`), or `None`.
+    pub fn verify_nli_endpoint(&self) -> Option<&str> {
+        self.verify_nli_endpoint.as_deref()
+    }
+
+    /// Per-corpus `[verify.nli].timeout_ms` remote scorer per-call timeout, or `None` (engine default).
+    pub fn verify_nli_timeout_ms(&self) -> Option<usize> {
+        self.verify_nli_timeout_ms
+    }
+
+    /// Per-corpus `[verify.nli].api_key` Bearer key for the remote scorer, or `None`.
+    pub fn verify_nli_api_key(&self) -> Option<&str> {
+        self.verify_nli_api_key.as_deref()
+    }
+
     /// Per-corpus `[rerank].enabled`, or `None` when unset.
     pub fn rerank_enabled(&self) -> Option<bool> {
         self.rerank_enabled
@@ -1033,6 +1080,21 @@ impl Ontology {
     /// Per-corpus `[rerank].ep_mem_limit_mb` GPU arena cap (MB), or `None` when unset.
     pub fn rerank_ep_mem_limit_mb(&self) -> Option<usize> {
         self.rerank_ep_mem_limit_mb
+    }
+
+    /// Per-corpus `[rerank].endpoint` remote reranker base URL (`scorer="http"`), or `None`.
+    pub fn rerank_endpoint(&self) -> Option<&str> {
+        self.rerank_endpoint.as_deref()
+    }
+
+    /// Per-corpus `[rerank].timeout_ms` remote reranker per-call timeout, or `None` (engine default).
+    pub fn rerank_timeout_ms(&self) -> Option<usize> {
+        self.rerank_timeout_ms
+    }
+
+    /// Per-corpus `[rerank].api_key` Bearer key for the remote reranker, or `None`.
+    pub fn rerank_api_key(&self) -> Option<&str> {
+        self.rerank_api_key.as_deref()
     }
 
     /// Per-corpus `[verify.combined.single]` z-score consensus calibration, or `None` when the

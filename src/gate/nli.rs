@@ -153,6 +153,9 @@ mod tests {
             execution_providers: vec!["cpu".into()],
             execution_provider_device: None,
             execution_provider_mem_limit_mb: None,
+            endpoint: None,
+            timeout_ms: 5000,
+            api_key: None,
         }
     }
 

@@ -65,6 +65,13 @@ pub struct VerifyConfig {
     /// expose no memory option in this ort version and ignore it. Sourced from env
     /// `GLOSSA_VERIFY_NLI_EP_MEM_LIMIT_MB` else ontology `[verify.nli].ep_mem_limit_mb`.
     pub execution_provider_mem_limit_mb: Option<usize>,
+    /// Remote scorer (`scorer = "http"`) endpoint base URL; `None` ⇒ `resolve_scorer` cannot build
+    /// an `HttpNli` and fails open to `None`. Env `GLOSSA_VERIFY_NLI_HTTP_ENDPOINT`.
+    pub endpoint: Option<String>,
+    /// Remote scorer per-call timeout in ms (default 5000). Env `GLOSSA_VERIFY_NLI_HTTP_TIMEOUT_MS`.
+    pub timeout_ms: u64,
+    /// Optional Bearer api-key for the remote scorer. Env `GLOSSA_VERIFY_NLI_HTTP_API_KEY`.
+    pub api_key: Option<String>,
 }
 
 /// Calibrated z-score consensus stats for `combined` mode (spec §4 rev.5): AC and NLI are each
@@ -182,6 +189,13 @@ impl VerifyConfig {
             // (no memory options — today's behavior). Non-integer env value is dropped by env_usize.
             execution_provider_mem_limit_mb: env_usize("GLOSSA_VERIFY_NLI_EP_MEM_LIMIT_MB")
                 .or_else(|| ont.as_ref().and_then(|o| o.verify_nli_ep_mem_limit_mb())),
+            endpoint: env_string("GLOSSA_VERIFY_NLI_HTTP_ENDPOINT")
+                .or_else(|| ont.as_ref().and_then(|o| o.verify_nli_endpoint()).map(str::to_string)),
+            timeout_ms: env_usize("GLOSSA_VERIFY_NLI_HTTP_TIMEOUT_MS")
+                .or_else(|| ont.as_ref().and_then(|o| o.verify_nli_timeout_ms()))
+                .unwrap_or(5000) as u64,
+            api_key: env_string("GLOSSA_VERIFY_NLI_HTTP_API_KEY")
+                .or_else(|| ont.as_ref().and_then(|o| o.verify_nli_api_key()).map(str::to_string)),
         }
     }
 
@@ -400,6 +414,29 @@ mod tests {
         assert_eq!(c.scorer.as_deref(), Some("in_process"));
         assert_eq!(c.model_dir, Some(std::path::PathBuf::from("/x")));
         assert_eq!(c.entail_index, 2);
+    }
+
+    #[test]
+    fn http_scorer_config_round_trips_from_ontology() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_VERIFY_NLI_SCORER");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_HTTP_ENDPOINT");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_HTTP_TIMEOUT_MS");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_HTTP_API_KEY");
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[verify.nli]\nscorer=\"http\"\nendpoint=\"http://gpu:8080\"\ntimeout_ms=1500\n",
+        )
+        .unwrap();
+        let c = VerifyConfig::resolve(&g);
+        assert_eq!(c.scorer.as_deref(), Some("http"));
+        assert_eq!(c.endpoint.as_deref(), Some("http://gpu:8080"));
+        assert_eq!(c.timeout_ms, 1500);
     }
 
     #[test]
