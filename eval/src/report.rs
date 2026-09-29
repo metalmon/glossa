@@ -119,7 +119,10 @@ fn verdict_label(v: Verdict) -> &'static str {
 /// Verdict tallies shared by `quality`, `summary_text`, and `lexical_text` so the three never
 /// disagree on how a run's cases are counted.
 struct Tally {
-    /// All cases, including endpoint-errored ones (used only for the `total` line + verdict %).
+    /// All cases, including endpoint-errored ones. Reported as the bare `total` line and as the
+    /// right-hand side of `graded (scoring denominator): N of total` — deliberately NOT a
+    /// percentage base: verdict shares are taken over [`Tally::graded`], the population the
+    /// verdicts actually partition.
     total: usize,
     correct: usize,
     partial: usize,
@@ -271,15 +274,26 @@ pub fn confusion_text(results: &[CaseResult]) -> String {
 /// Detail-first, numbers-last (the shared `cli_fmt` output contract): the per-hop-type breakdown
 /// prints as DETAIL above, then the headline (judge quality, correct/partial/wrong/unscored/total,
 /// errored) renders through `cli_fmt::summary_string` as the FINAL block — the same separator +
-/// `label: value` format `kb` uses, so a `kb`/`kbx` run looks like one tool. Only the rendering
-/// changed here; every value/percentage is computed exactly as before.
+/// `label: value` format `kb` uses, so a `kb`/`kbx` run looks like one tool.
+///
+/// ONE denominator in the block: every verdict percentage is a share of the GRADED cases, the same
+/// population `judge quality (graded)` scores. `total` and the excluded counts are printed as bare
+/// numbers beside them. When graded differs from total, a `graded (scoring denominator)` pair says
+/// so outright — a reader must never have to subtract the pairs by hand to discover that part of a
+/// run was never scored.
 pub fn summary_text(results: &[CaseResult]) -> String {
     let t = tally(results);
+    // Verdict percentages share the denominator the verdicts PARTITION — the graded cases — so the
+    // block does not mix two bases. Dividing by `total` folded endpoint-errored cases (deliberately
+    // excluded from scoring) into every percentage, making `correct` look smaller than the score it
+    // sits next to: a run with 107 graded of 197 printed `correct: 70 (35.5%)` beside
+    // `judge quality (graded): 0.706`, two numbers over different populations.
+    let graded = t.graded();
     let pct = |n: usize| -> f32 {
-        if t.total == 0 {
+        if graded == 0 {
             0.0
         } else {
-            100.0 * n as f32 / t.total as f32
+            100.0 * n as f32 / graded as f32
         }
     };
     let q = quality(results);
@@ -298,12 +312,22 @@ pub fn summary_text(results: &[CaseResult]) -> String {
         ("correct", format!("{} ({:.1}%)", t.correct, pct(t.correct))),
         ("partial", format!("{} ({:.1}%)", t.partial, pct(t.partial))),
         ("wrong", format!("{} ({:.1}%)", t.wrong, pct(t.wrong))),
-        (
-            "unscored",
-            format!("{} ({:.1}%)", t.unscored, pct(t.unscored)),
-        ),
+        // NOT a percentage: `unscored` is outside the graded population by definition (it is the
+        // count of cases that reached the judge and got no verdict — a judge error, or no judge
+        // configured). Printing it as a share of graded would invite reading it as part of the same
+        // split as correct/partial/wrong, which is exactly the confusion this line used to cause.
+        ("unscored (no judge verdict)", t.unscored.to_string()),
         ("total", t.total.to_string()),
     ];
+    // Make the scoring population explicit whenever it differs from `total`. Without this the only
+    // way to learn that a third of a run was never scored is to subtract the pairs by hand — and a
+    // `0` on the unscored line reads as "everything was graded".
+    if graded != t.total {
+        pairs.push((
+            "graded (scoring denominator)",
+            format!("{} of {}", graded, t.total),
+        ));
+    }
     // Surface endpoint-errored cases as their own pair (never silently dropped): they are excluded
     // from the graded-quality denominator above, so this makes the exclusion visible in the headline.
     if t.errored > 0 {
@@ -938,6 +962,56 @@ mod tests {
                 c
             },
         ]
+    }
+
+    /// Verdict percentages must share the denominator the verdicts actually partition — the GRADED
+    /// cases — not `total`, which includes cases deliberately excluded from scoring.
+    ///
+    /// The bug this pins: with 2 graded (1 correct, 1 wrong) and 2 endpoint-errored, the old code
+    /// divided by total=4 and printed `correct: 1 (25.0%)` while `judge quality (graded)` divided by
+    /// 2 and printed 0.500. Two denominators in one block, and the smaller-looking percentages
+    /// silently folded in the excluded cases. `unscored: 0 (0.0%)` then read as "nothing went
+    /// ungraded" even though half the run produced no score at all.
+    #[test]
+    fn verdict_percentages_use_the_graded_denominator_not_total() {
+        let mut cases = quality_cases();
+        for id in ["e1", "e2"] {
+            let mut c = case(id, Verdict::Unscored);
+            c.errored = true;
+            cases.push(c);
+        }
+        let s = summary_text(&cases);
+
+        assert!(s.contains("judge quality (graded): 0.500"), "{s}");
+        // 1 of 2 GRADED, not 1 of 4 total.
+        assert!(s.contains("correct: 1 (50.0%)"), "{s}");
+        assert!(s.contains("wrong: 1 (50.0%)"), "{s}");
+        assert!(s.contains("total: 4"), "{s}");
+        assert!(s.contains("errored (endpoint, excluded): 2"), "{s}");
+        // The accounting must be visible: a reader should not have to subtract to discover that
+        // half the run was never scored.
+        assert!(
+            s.contains("graded (scoring denominator): 2 of 4"),
+            "the excluded cases must not hide behind a 0.0% line:\n{s}"
+        );
+    }
+
+    /// A case that reached the judge but got no verdict (judge error, or no judge configured) is
+    /// what `unscored` means. It is NOT the same as an endpoint-errored case, and both must be
+    /// visible rather than one masking the other.
+    #[test]
+    fn unscored_counts_judge_failures_separately_from_endpoint_errors() {
+        let mut cases = quality_cases();
+        cases.push(case("nojudge", Verdict::Unscored)); // errored == false
+        let mut errored = case("e1", Verdict::Unscored);
+        errored.errored = true;
+        cases.push(errored);
+        let s = summary_text(&cases);
+
+        // 1 of the 3 non-errored cases had no verdict; percentages stay on the graded base (2).
+        assert!(s.contains("unscored (no judge verdict): 1"), "{s}");
+        assert!(s.contains("errored (endpoint, excluded): 1"), "{s}");
+        assert!(s.contains("total: 4"), "{s}");
     }
 
     #[test]
