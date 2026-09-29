@@ -20,6 +20,15 @@ pub fn chain_recall(gold: &HashSet<String>, retrieved: &HashSet<String>) -> (boo
     (hit == gold.len(), hit as f32 / gold.len() as f32)
 }
 
+/// Whether AT LEAST ONE `gold` entry is contained in `retrieved` — the counterpart of
+/// [`chain_recall`]'s all-of question. A case whose golds are ALTERNATIVES (any one of several
+/// locations answers it) cannot satisfy all-of by construction, so full-chain coverage understates
+/// it while this aggregate measures it correctly. Empty gold is vacuously satisfied, matching
+/// [`chain_recall`]'s convention so the two never disagree on the same case.
+pub fn any_gold(gold: &HashSet<String>, retrieved: &HashSet<String>) -> bool {
+    gold.is_empty() || gold.iter().any(|g| retrieved.contains(g))
+}
+
 /// Chunk refs (`path#N`) named by a glossary rendering's `— read <ref>` grounding anchors — the
 /// graph-retrieval counterpart of a BM25 hit list. Tolerant by design: on each line it takes the
 /// text after the LAST `read ` when that text ends in `#<digits>`, so a stray "read" in a label
@@ -51,15 +60,21 @@ pub struct BucketFcr {
     pub n: usize,
     /// Cases whose entire gold chain was retrieved.
     pub full: usize,
+    /// Cases where at least one gold entry was retrieved. The meaningful measure for
+    /// alternative-style golds, where `full` asks for more than the case actually requires.
+    pub any: usize,
     /// Sum of per-case gold-retrieved fractions (mean = `partial()`).
     pub partial_sum: f32,
 }
 
 impl BucketFcr {
-    pub fn add(&mut self, full: bool, partial: f32) {
+    pub fn add(&mut self, full: bool, any: bool, partial: f32) {
         self.n += 1;
         if full {
             self.full += 1;
+        }
+        if any {
+            self.any += 1;
         }
         self.partial_sum += partial;
     }
@@ -68,6 +83,13 @@ impl BucketFcr {
             0.0
         } else {
             self.full as f32 / self.n as f32
+        }
+    }
+    pub fn any_rate(&self) -> f32 {
+        if self.n == 0 {
+            0.0
+        } else {
+            self.any as f32 / self.n as f32
         }
     }
     pub fn partial(&self) -> f32 {
@@ -87,31 +109,45 @@ pub struct FcrReport {
 }
 
 impl FcrReport {
-    pub fn add(&mut self, hop: &str, full: bool, partial: f32) {
+    pub fn add(&mut self, hop: &str, full: bool, any: bool, partial: f32) {
         let key = if hop.is_empty() { "(untyped)" } else { hop };
         self.by_hop
             .entry(key.to_string())
             .or_default()
-            .add(full, partial);
+            .add(full, any, partial);
     }
     pub fn overall(&self) -> BucketFcr {
         let mut t = BucketFcr::default();
         for b in self.by_hop.values() {
             t.n += b.n;
             t.full += b.full;
+            t.any += b.any;
             t.partial_sum += b.partial_sum;
         }
         t
     }
     /// Human table: one line per hop_type plus an ALL row.
+    ///
+    /// Read the three numbers TOGETHER; none of them is "the" score.
+    /// - `FCR` (all-of) is the meaningful one for chain cases, where every gold chunk is needed.
+    /// - `any-of` is the meaningful one for cases whose golds are ALTERNATIVES, where all-of asks for
+    ///   more than the question requires. It is also the most flattering of the three and is nearly
+    ///   vacuous on a chain case — "one of the two hops was found" does not answer anything.
+    /// - `partial-recall` is the continuous middle ground.
+    ///
+    /// The dataset does not record which shape a case is (`source` is a flat list, and `hop_type`
+    /// does not separate them), so the reader has to supply that context. A case that MIXES a chain
+    /// with alternatives is not measured exactly by any of the three.
     pub fn render(&self, k: usize) -> String {
-        let mut s =
-            format!("FCR@{k} (whole gold chain retrieved) + partial recall, by hop_type:\n");
+        let mut s = format!(
+            "FCR@{k} (whole gold chain) + any-of (at least one gold) + partial recall, by hop_type:\n"
+        );
         let line = |name: &str, b: &BucketFcr| {
             format!(
-                "  {name:<12} n={:<4} FCR={:5.1}%  partial-recall={:5.1}%\n",
+                "  {name:<12} n={:<4} FCR={:5.1}%  any-of={:5.1}%  partial-recall={:5.1}%\n",
                 b.n,
                 100.0 * b.fcr(),
+                100.0 * b.any_rate(),
                 100.0 * b.partial()
             )
         };
@@ -218,7 +254,8 @@ pub fn run_fcr(args: FcrArgs) -> anyhow::Result<()> {
                 .collect(),
         };
         let (full, partial) = chain_recall(&gold, &retrieved);
-        report.add(&q.hop_type, full, partial);
+        let any = any_gold(&gold, &retrieved);
+        report.add(&q.hop_type, full, any, partial);
     }
 
     println!(
@@ -264,6 +301,53 @@ mod tests {
     }
 
     #[test]
+    fn any_gold_true_when_one_of_several_hit() {
+        let gold = set(&["a.pdf#1", "b.pdf#2", "c.pdf#3"]);
+        let retrieved = set(&["b.pdf#2"]);
+        assert!(any_gold(&gold, &retrieved));
+        // The sibling metric disagrees on purpose: that gap is the reason this aggregate exists.
+        let (full, partial) = chain_recall(&gold, &retrieved);
+        assert!(!full);
+        assert!((partial - 1.0 / 3.0).abs() < 1e-6, "partial={partial}");
+    }
+
+    /// Nothing retrieved must be a clean `false` / 0.0 — not a panic, not a vacuous `true`.
+    #[test]
+    fn any_gold_false_when_nothing_hit() {
+        let gold = set(&["a.pdf#1"]);
+        assert!(!any_gold(&gold, &set(&[])));
+        assert_eq!(chain_recall(&gold, &set(&[])), (false, 0.0));
+    }
+
+    /// Empty gold must follow `chain_recall`'s vacuous-true convention, so the two never disagree.
+    #[test]
+    fn any_gold_agrees_with_chain_recall_on_empty_gold() {
+        assert!(any_gold(&set(&[]), &set(&["a.pdf#1"])));
+        assert_eq!(chain_recall(&set(&[]), &set(&["a.pdf#1"])), (true, 1.0));
+    }
+
+    #[test]
+    fn bucket_counts_any_separately_from_full() {
+        let mut b = BucketFcr::default();
+        b.add(true, true, 1.0);
+        b.add(false, true, 0.5);
+        b.add(false, false, 0.0);
+        assert_eq!((b.n, b.full, b.any), (3, 1, 2));
+        assert!((b.fcr() - 1.0 / 3.0).abs() < 1e-6);
+        assert!((b.any_rate() - 2.0 / 3.0).abs() < 1e-6);
+        assert!((b.partial() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn render_reports_any_of_column() {
+        let mut r = FcrReport::default();
+        r.add("multihop", false, true, 0.5);
+        let out = r.render(20);
+        assert!(out.contains("any-of="), "render must expose the aggregate: {out}");
+        assert!(out.contains("ALL"), "{out}");
+    }
+
+    #[test]
     fn extract_graph_refs_reads_grounding_anchors_only() {
         let body = "res:abc  [Resolution]  Foo   — read Runtime/CODESYS Redundancy.pdf#18\n\
                     task:def  [Task]  how to read the manual\n\
@@ -284,15 +368,16 @@ mod tests {
     #[test]
     fn report_aggregates_by_hop_and_overall() {
         let mut r = FcrReport::default();
-        r.add("multihop", false, 0.5);
-        r.add("multihop", true, 1.0);
-        r.add("lexical", true, 1.0);
+        // partial 0.5 means half the golds were hit, so any-of holds even where the chain broke.
+        r.add("multihop", false, true, 0.5);
+        r.add("multihop", true, true, 1.0);
+        r.add("lexical", true, true, 1.0);
         let mh = &r.by_hop["multihop"];
-        assert_eq!((mh.n, mh.full), (2, 1));
+        assert_eq!((mh.n, mh.full, mh.any), (2, 1, 2));
         assert!((mh.fcr() - 0.5).abs() < 1e-6);
         assert!((mh.partial() - 0.75).abs() < 1e-6);
         let o = r.overall();
-        assert_eq!((o.n, o.full), (3, 2));
+        assert_eq!((o.n, o.full, o.any), (3, 2, 3));
         let table = r.render(20);
         assert!(table.contains("multihop") && table.contains("ALL"));
     }
