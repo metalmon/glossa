@@ -234,6 +234,16 @@ pub struct AgentLayerDeleteStats {
     pub edges_removed: usize,
 }
 
+/// How a [`GraphStore::resolve_ranked`] result was produced — and therefore whether its ORDER
+/// carries information. `ExactLabel` results share one normalized label and are near-duplicates of
+/// each other, emitted by SQLite with no `ORDER BY`; ranking them is reading meaning into a query
+/// plan. `Ranked` results come from BM25 over the node index, best first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveKind {
+    ExactLabel,
+    Ranked,
+}
+
 pub struct GraphStore {
     conn: Mutex<Connection>,
     /// BM25 search view over node labels/aliases, for `resolve`'s fuzzy match. Derived from the
@@ -1836,19 +1846,26 @@ impl GraphStore {
     /// label/alias equality is always honored too. NOTE: this is morphology- + order-tolerant,
     /// NOT transliteration-aware — a phonetic respelling in another script still won't match
     /// the Latin original.
+    /// See [`resolve_ranked`](Self::resolve_ranked) when the ORDER of the result matters.
     pub fn resolve(&self, name: &str) -> anyhow::Result<Vec<String>> {
+        Ok(self.resolve_ranked(name)?.0)
+    }
+
+    /// [`resolve`](Self::resolve) plus which path answered — see [`ResolveKind`]. Callers that
+    /// weight results by position MUST use this: the exact-label path has no meaningful order.
+    pub fn resolve_ranked(&self, name: &str) -> anyhow::Result<(Vec<String>, ResolveKind)> {
         let c = self.conn();
         // Fast path: exact (normalized) label match via the label_norm index — the common case
         // during enrichment. Returns ALL nodes sharing that normalized label (near-dups expected).
         let exact = Self::ids_by_label_norm_c(&c, &normalize_label(name))?;
         if !exact.is_empty() {
-            return Ok(exact);
+            return Ok((exact, ResolveKind::ExactLabel));
         }
         // Fuzzy fallback: BM25 over the node index. The agent asks in long natural phrases while
         // labels are short, so a strict `query ⊆ label` almost always misses; BM25 ranks nodes by
         // shared (morphology-stemmed) terms and rarity, best first.
         self.ensure_node_index_fresh(&c)?;
-        self.node_index.search(name, 10)
+        Ok((self.node_index.search(name, 10)?, ResolveKind::Ranked))
     }
 
     /// True when `term` is a discriminating (rare, proper-noun-like) mention in the node index —
@@ -2287,6 +2304,42 @@ strict = true
             "chaining edge with empty provenance must be written: {:?}",
             out
         );
+    }
+
+    #[test]
+    fn resolve_ranked_reports_exact_label_matches_as_unranked() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+        // Three distinct nodes sharing ONE label: near-duplicates, no order among them. Built the
+        // way the neighbouring resolve tests build nodes (`Node` literal + `upsert`), not through
+        // an invented helper.
+        let mk = |id: &str| Node {
+            id: id.into(),
+            node_type: "Organization".into(),
+            label: "Widget".into(),
+            aliases: vec![],
+            prov: agent_prov(),
+        };
+        g.upsert(&ont, &[mk("n1"), mk("n2"), mk("n3")], &[])
+            .unwrap();
+
+        let (ids, kind) = g.resolve_ranked("Widget").unwrap();
+        assert_eq!(ids.len(), 3, "{ids:?}");
+        assert_eq!(kind, ResolveKind::ExactLabel);
+        // The convenience wrapper must be unchanged for existing callers.
+        assert_eq!(g.resolve("Widget").unwrap().len(), 3);
+    }
+
+    /// Review Focus 2: nothing matched on either path.
+    #[test]
+    fn resolve_ranked_on_no_match_is_empty_and_ranked() {
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        let (ids, kind) = g.resolve_ranked("nothing here").unwrap();
+        assert!(ids.is_empty(), "{ids:?}");
+        // An empty fuzzy result is still the fuzzy path — the caller must not treat it as exact.
+        assert_eq!(kind, ResolveKind::Ranked);
     }
 }
 

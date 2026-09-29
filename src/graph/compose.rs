@@ -6,7 +6,7 @@
 //! the weak model fails at lives here; the model only supplies anchor strings + the query.
 
 use crate::graph::ppr;
-use crate::graph::store::GraphStore;
+use crate::graph::store::{GraphStore, ResolveKind};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 const STOP: &[&str] = &[
@@ -224,6 +224,28 @@ pub fn compose(
     Ok(scored)
 }
 
+/// Seed mass for a resolve result. A `Ranked` result carries real information in its order, so mass
+/// decays with position. An `ExactLabel` result does not — its members are near-duplicates sharing a
+/// label, emitted in whatever order SQLite chose — so they share `base` equally. Weighting those by
+/// position handed the whole mass to whichever row came out first, which is a query-plan detail, not
+/// a relevance signal.
+fn seed_weights(ids: &[String], kind: ResolveKind, base: f32) -> HashMap<String, f32> {
+    let mut out: HashMap<String, f32> = HashMap::new();
+    match kind {
+        ResolveKind::ExactLabel => {
+            for id in ids {
+                *out.entry(id.clone()).or_default() += base;
+            }
+        }
+        ResolveKind::Ranked => {
+            for (rank, id) in ids.iter().enumerate() {
+                *out.entry(id.clone()).or_default() += base / (1.0 + rank as f32);
+            }
+        }
+    }
+    out
+}
+
 /// PPR-ranked composed candidates — the connectivity-based successor to [`compose`]. Seed a random
 /// walk with restart from the question's lexical hits (`resolve` over the node index) plus the
 /// anchor entity, rank every node by connectivity, and surface the top-`k` non-structural
@@ -238,12 +260,20 @@ pub fn compose_ppr(
 ) -> anyhow::Result<Vec<Candidate>> {
     // Two SEPARATE seed maps (today's code summed them into one). The query gets BM25-rank mass;
     // the anchor `name` — the reader's second endpoint — gets a strong boost.
-    let mut query_seeds: HashMap<String, f32> = HashMap::new();
-    for (rank, id) in g.resolve(query)?.into_iter().take(20).enumerate() {
-        *query_seeds.entry(id).or_default() += 1.0 / (1.0 + rank as f32);
-    }
+    // `take(20)`/`take(5)` bound the near-duplicate fan-out of an exact-label match (which returns
+    // EVERY node sharing the label). They are not a ranking cut: the fuzzy path already returns at
+    // most 10, so on that path the query cap never fires.
+    const MAX_QUERY_SEEDS: usize = 20;
+    const MAX_NAME_SEEDS: usize = 5;
+    let (q_ids, q_kind) = g.resolve_ranked(query)?;
+    let query_seeds = seed_weights(&q_ids[..q_ids.len().min(MAX_QUERY_SEEDS)], q_kind, 1.0);
+    // NAME seeds stay FLAT, exactly as before. They never decayed by position on either path — the
+    // anchor is one endpoint of the walk, and every node resolving to it is equally that endpoint.
+    // Routing them through `seed_weights` would introduce a 2.0/(1+rank) decay on the fuzzy path
+    // that has never existed, silently moving `ppr_push_scored`'s geomean results. The defect being
+    // fixed here is only in the QUERY seeds.
     let mut name_seeds: HashMap<String, f32> = HashMap::new();
-    for id in g.resolve(name)?.into_iter().take(5) {
+    for id in g.resolve(name)?.into_iter().take(MAX_NAME_SEEDS) {
         *name_seeds.entry(id).or_default() += 2.0;
     }
     if query_seeds.is_empty() && name_seeds.is_empty() {
@@ -412,6 +442,37 @@ mod tests {
             score: 0.0,
         }
     }
+
+    /// Review Focus 1: every exact-label match is a near-duplicate of the others, so they must
+    /// share the seed mass equally. Decaying it hands 1.0 to whichever row SQLite emitted first.
+    #[test]
+    fn exact_label_seeds_get_equal_mass() {
+        let w = seed_weights(
+            &["a".into(), "b".into(), "c".into()],
+            ResolveKind::ExactLabel,
+            1.0,
+        );
+        assert_eq!(w.len(), 3);
+        let first = w["a"];
+        assert!((w["b"] - first).abs() < 1e-6, "{w:?}");
+        assert!((w["c"] - first).abs() < 1e-6, "{w:?}");
+    }
+
+    #[test]
+    fn ranked_seeds_still_decay_by_position() {
+        let w = seed_weights(&["a".into(), "b".into()], ResolveKind::Ranked, 1.0);
+        assert!(w["a"] > w["b"], "BM25 order is real information: {w:?}");
+    }
+
+    /// Review Focus 2, second half: no match on either path must yield an empty map, not a
+    /// fabricated seed. `compose_ppr` already returns early on two empty maps; this pins the
+    /// helper itself so that early return keeps being reachable.
+    #[test]
+    fn no_matches_yields_no_seeds() {
+        assert!(seed_weights(&[], ResolveKind::ExactLabel, 1.0).is_empty());
+        assert!(seed_weights(&[], ResolveKind::Ranked, 1.0).is_empty());
+    }
+
 
     #[test]
     fn fuse_floats_the_consensus_node_above_single_source_ones() {
