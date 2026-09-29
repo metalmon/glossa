@@ -53,6 +53,16 @@ pub struct ServeArgs {
     /// Allow a non-loopback bind without an api-key (otherwise refused).
     #[arg(long, env = "GLOSSA_INFER_INSECURE")]
     pub insecure: bool,
+    /// TLS certificate chain (PEM). Set together with `--tls-key` to serve HTTPS; certs hot-reload
+    /// on file change. A TLS bind satisfies the non-loopback interlock (auth-at-transport).
+    #[arg(long = "tls-cert", env = "GLOSSA_INFER_TLS_CERT")]
+    pub tls_cert: Option<PathBuf>,
+    /// TLS private key (PEM). Required together with `--tls-cert`.
+    #[arg(long = "tls-key", env = "GLOSSA_INFER_TLS_KEY")]
+    pub tls_key: Option<PathBuf>,
+    /// Client-CA bundle (PEM): require and verify client certificates (mTLS). Ignored without TLS.
+    #[arg(long = "tls-client-ca", env = "GLOSSA_INFER_TLS_CLIENT_CA")]
+    pub tls_client_ca: Option<PathBuf>,
     /// Hard cap on concurrent in-flight requests; over it ⇒ HTTP 429. Unset ⇒ no cap (requests
     /// queue on the pool). (`--allowed-host`, CORS, and a request timeout are Phase-2, with TLS.)
     #[arg(long = "max-concurrency")]
@@ -80,6 +90,20 @@ impl ServeArgs {
     /// `has_auth` — a named-but-empty `--api-key-file` must NOT count as auth.
     pub fn effective_auth(&self) -> anyhow::Result<Option<String>> {
         resolve_key(self.api_key.as_deref(), self.api_key_file.as_deref())
+    }
+
+    /// The TLS file set: `Some` only when BOTH `--tls-cert` and `--tls-key` are given (optionally
+    /// with `--tls-client-ca` for mTLS); giving only one is a config error. `None` ⇒ plain HTTP.
+    pub fn tls_files(&self) -> anyhow::Result<Option<glossa::tls::TlsFiles>> {
+        match (&self.tls_cert, &self.tls_key) {
+            (Some(cert), Some(key)) => Ok(Some(glossa::tls::TlsFiles {
+                cert: cert.clone(),
+                key: key.clone(),
+                client_ca: self.tls_client_ca.clone(),
+            })),
+            (None, None) => Ok(None),
+            _ => anyhow::bail!("--tls-cert and --tls-key must be given together"),
+        }
     }
 }
 

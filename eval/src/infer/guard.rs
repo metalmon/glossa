@@ -2,10 +2,11 @@
 //! `glossa::mcp_auth`) so the two servers behave identically. The decisions are pure and
 //! unit-tested here; the axum layer that applies them is feature-gated with the rest of the server.
 
-/// Refuse a non-loopback bind without auth. Reuses the MCP interlock (`interlock_refuses`); Phase 1
-/// has no TLS, so `tls_active = false`.
-pub fn interlock_ok(bind: &str, has_auth: bool, insecure: bool) -> bool {
-    glossa::serve_guard::interlock_refuses(bind, has_auth, false, insecure).is_none()
+/// Refuse a non-loopback bind without auth. Reuses the MCP interlock (`interlock_refuses`). A TLS
+/// bind counts as authentication-at-transport, so `tls_active` satisfies the interlock the same way
+/// an api-key does.
+pub fn interlock_ok(bind: &str, has_auth: bool, tls_active: bool, insecure: bool) -> bool {
+    glossa::serve_guard::interlock_refuses(bind, has_auth, tls_active, insecure).is_none()
 }
 
 /// Per-request auth decision: `/health` and `/ready` are exempt; with a key configured, require the
@@ -72,10 +73,19 @@ mod tests {
 
     #[test]
     fn interlock_refuses_public_bind_without_auth() {
-        assert!(!interlock_ok("0.0.0.0:8071", false, false));
-        assert!(interlock_ok("0.0.0.0:8071", true, false));
-        assert!(interlock_ok("0.0.0.0:8071", false, true));
-        assert!(interlock_ok("127.0.0.1:8071", false, false));
+        assert!(!interlock_ok("0.0.0.0:8071", false, false, false));
+        assert!(interlock_ok("0.0.0.0:8071", true, false, false));
+        assert!(interlock_ok("0.0.0.0:8071", false, false, true));
+        assert!(interlock_ok("127.0.0.1:8071", false, false, false));
+    }
+
+    #[test]
+    fn interlock_allows_public_bind_with_tls_and_no_key() {
+        // TLS is auth-at-transport: a public bind with TLS but no api-key is allowed.
+        assert!(interlock_ok("0.0.0.0:8071", false, true, false)); // tls only
+        assert!(!interlock_ok("0.0.0.0:8071", false, false, false)); // neither -> refuse
+        assert!(interlock_ok("0.0.0.0:8071", true, false, false)); // auth only
+        assert!(interlock_ok("127.0.0.1:8071", false, false, false)); // loopback
     }
 
     #[test]

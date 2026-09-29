@@ -380,8 +380,7 @@ async fn accept_loop(
         // silently vanishing. `fault_inject` lets a test force exactly this branch deterministically.
         let accept_result = if fault_inject.load(Ordering::SeqCst) > 0 {
             fault_inject.fetch_sub(1, Ordering::SeqCst);
-            Err(io::Error::new(
-                io::ErrorKind::Other,
+            Err(io::Error::other(
                 "injected test failure (I3/M1 regression test)",
             ))
         } else {

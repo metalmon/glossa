@@ -23,13 +23,17 @@ fn main() -> anyhow::Result<()> {
     // Derive has_auth from the RESOLVED key (a named-but-empty --api-key-file must not count as
     // auth, and resolving it here also fails fast on an empty key-file).
     let has_auth = args.effective_auth()?.is_some();
+    // TLS: Some only when both cert+key are given (bail on only one). A TLS bind is
+    // auth-at-transport, so it satisfies the non-loopback interlock the same way an api-key does.
+    let tls = args.tls_files()?;
     anyhow::ensure!(
-        guard::interlock_ok(&args.bind, has_auth, args.insecure),
-        "refusing non-loopback bind {} without authentication (use --insecure to override)",
+        guard::interlock_ok(&args.bind, has_auth, tls.is_some(), args.insecure),
+        "refusing non-loopback bind {} without authentication or TLS (use --insecure to override)",
         args.bind
     );
 
     let bind = args.bind.clone();
+    let scheme = if tls.is_some() { "https" } else { "http" };
     let max_body_bytes = args.max_body_bytes;
     let no_cap = args.max_concurrency.is_none();
     let rt = tokio::runtime::Runtime::new()?;
@@ -38,7 +42,7 @@ fn main() -> anyhow::Result<()> {
         // the models load rather than refusing connections (k8s-style readiness).
         let st = std::sync::Arc::new(state::build_state(&args)?);
         let listener = tokio::net::TcpListener::bind(&bind).await?;
-        println!("inference-server binding http://{bind} — loading models (health = 503 until ready)…");
+        println!("inference-server binding {scheme}://{bind} — loading models (health = 503 until ready)…");
         if no_cap {
             eprintln!("note: no --max-concurrency cap; requests queue on the model session under load (no 429 shed).");
         }
@@ -51,14 +55,25 @@ fn main() -> anyhow::Result<()> {
                 Ok(()) => {
                     let nli_ep = w.nli_ep.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     let rerank_ep = w.rerank_ep.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    println!("inference-server READY on http://{bind_msg}  (nli_ep={nli_ep:?} rerank_ep={rerank_ep:?})");
-                    println!("  kbx nli set    --scorer http --endpoint http://{bind_msg}");
-                    println!("  kbx rerank set --scorer http --endpoint http://{bind_msg}");
+                    println!("inference-server READY on {scheme}://{bind_msg}  (nli_ep={nli_ep:?} rerank_ep={rerank_ep:?})");
+                    println!("  kbx nli set    --scorer http --endpoint {scheme}://{bind_msg}");
+                    println!("  kbx rerank set --scorer http --endpoint {scheme}://{bind_msg}");
                 }
                 Err(e) => {
                     eprintln!("model load failed: {e}");
                     std::process::exit(1);
                 }
+            });
+        }
+
+        // One cancellation token drives graceful shutdown for both the HTTP and HTTPS serve loops
+        // (and the TLS cert-reload poller); ctrl_c cancels it.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        {
+            let c = cancel.clone();
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                c.cancel();
             });
         }
 
@@ -68,21 +83,30 @@ fn main() -> anyhow::Result<()> {
                 guard::auth_layer,
             ))
             .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes));
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
-            .await?;
+
+        match tls {
+            Some(files) => {
+                let reloadable = std::sync::Arc::new(glossa::tls::ReloadableTls::new(files)?);
+                glossa::tls::spawn_reload_poll(reloadable.clone(), cancel.clone());
+                glossa::tls::serve_tls(
+                    listener,
+                    app,
+                    reloadable,
+                    cancel,
+                    glossa::tls::handshake_timeout_from_env(),
+                    glossa::tls::max_handshakes_from_env(),
+                    None,
+                )
+                .await?;
+            }
+            None => {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async move { cancel.cancelled().await })
+                    .await?;
+            }
+        }
         anyhow::Ok(())
     })
-}
-
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
 }
 
 #[cfg(not(any(
