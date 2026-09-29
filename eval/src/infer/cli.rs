@@ -34,8 +34,8 @@ pub struct ServeArgs {
     /// Bind address. Default 127.0.0.1:8071 — NOT 8080 (that is the Glossa MCP's own default).
     #[arg(long, env = "GLOSSA_INFER_BIND", default_value = "127.0.0.1:8071")]
     pub bind: String,
-    /// Device: `cpu` | `cuda` | `directml` | `rocm` (default: a GPU provider if compiled in, else
-    /// `cpu`). CPU fallback is automatic.
+    /// Device: `cpu` | `cuda` | `directml` | `rocm` (default: `cpu`). Naming a GPU device adds an
+    /// automatic CPU fallback (e.g. `--device cuda` runs on the GPU, falling back to CPU).
     #[arg(long = "device")]
     pub device: Option<String>,
     /// GPU device id the provider binds to.
@@ -77,7 +77,9 @@ pub struct ServeArgs {
     /// CORS allowed origin(s); repeat to allow several. Empty ⇒ permissive (`Any`, no credentials).
     #[arg(long = "cors-allow-origin")]
     pub cors_allow_origin: Vec<String>,
-    /// Per-request timeout in seconds; a request exceeding it gets HTTP 408 (default 60).
+    /// Per-request timeout in seconds; a request exceeding it gets HTTP 408 (default 60). The 408
+    /// is returned to the client, but in-flight model compute (a `spawn_blocking` forward pass) is
+    /// not cancellable and runs to completion, so a timeout frees the response, not the GPU.
     #[arg(long = "request-timeout-secs", default_value_t = 60)]
     pub request_timeout_secs: u64,
     /// Internal: launched under the Windows Service control manager.

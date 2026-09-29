@@ -18,10 +18,26 @@ pub fn host_allowed(host: Option<&str>, allowed: &[String]) -> bool {
     }
     match host {
         Some(h) => {
-            let bare = h.split(':').next().unwrap_or(h);
+            let bare = strip_host_port(h);
             allowed.iter().any(|a| a == bare)
         }
         None => false,
+    }
+}
+
+/// Strip a trailing `:port` from a `Host` header value, returning the bare host. Handles bracketed
+/// IPv6 literals (`[::1]:8071` / `[::1]` -> `::1`), where a naive `split(':')` would yield `"["`.
+fn strip_host_port(h: &str) -> &str {
+    if let Some(rest) = h.strip_prefix('[') {
+        // Bracketed IPv6: the address is inside the brackets; ignore any `:port` after `]`.
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        // Bare host or host:port. Strip only a single trailing `:port` — an unbracketed multi-colon
+        // value isn't a valid Host header, so leave it untouched rather than truncate at the first `:`.
+        match h.rsplit_once(':') {
+            Some((host, _port)) if !host.contains(':') => host,
+            _ => h,
+        }
     }
 }
 
@@ -139,6 +155,10 @@ mod tests {
             &["scorer.example.com".into()]
         ));
         assert!(!host_allowed(None, &["scorer.example.com".into()])); // missing Host, non-empty list
+        // Bracketed IPv6 literals: the port after `]` is ignored, and the bare address matches.
+        assert!(host_allowed(Some("[::1]:8071"), &["::1".into()]));
+        assert!(host_allowed(Some("[::1]"), &["::1".into()]));
+        assert!(!host_allowed(Some("[::1]:8071"), &["scorer.example.com".into()]));
     }
 
     #[test]

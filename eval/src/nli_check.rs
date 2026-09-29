@@ -341,7 +341,7 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
         println!("gpu_id      = {id}");
     }
     if let Some(mb) = cfg.execution_provider_mem_limit_mb {
-        println!("ep_mem_limit   = {mb} MB");
+        println!("gpu_mem_mb     = {mb} MB");
     }
     println!(
         "ORT_DYLIB_PATH = {}",
