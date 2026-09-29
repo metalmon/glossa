@@ -28,6 +28,7 @@ pub mod root;
 pub mod sdnotify;
 pub mod search;
 pub mod serve_guard;
+pub mod service;
 pub mod session_idle;
 pub mod tables;
 pub mod tools;
