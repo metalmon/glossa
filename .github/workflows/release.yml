@@ -80,6 +80,13 @@ jobs:
         # kbx is the file-first eval/train/build toolkit (lives in the kb-eval crate).
         run: cargo build --release --locked --target ${{ matrix.target }} -p kb-eval --bin kbx ${{ matrix.kbx_flags }}
 
+      - name: Build inference-server
+        # The standalone HTTP scorer (NLI + reranker over TEI/Jina). Only ORT-engine rows build it —
+        # the `none` row would ship the useless "needs an engine feature" stub. Shares kbx_flags
+        # (the engine feature per row: --features nli-cuda for cuda13, --features nli for ort-linux, …).
+        if: matrix.engine != 'none'
+        run: cargo build --release --locked --target ${{ matrix.target }} -p kb-eval --bin inference-server ${{ matrix.kbx_flags }}
+
       - name: Fetch ONNX Runtime CUDA-13 DLLs (cuda13 only)
         # nli-cuda uses ort's `load-dynamic`: nothing is linked/downloaded at build time, so the
         # GPU-capable ONNX Runtime must be supplied at RUNTIME. Fetch the ORT 1.28 CUDA-13 build
@@ -115,6 +122,8 @@ jobs:
           mkdir -p "dist/${stem}"
           cp "target/${{ matrix.target }}/release/kb" "dist/${stem}/"
           cp "target/${{ matrix.target }}/release/kbx" "dist/${stem}/"
+          # inference-server exists only for ORT-engine rows (skipped for `none`).
+          cp "target/${{ matrix.target }}/release/inference-server" "dist/${stem}/" 2>/dev/null || true
           # ort/bundled may place a shared ONNX Runtime lib beside the binary — ship it if present
           # (no-op for the `none` variant and for static links).
           cp target/${{ matrix.target }}/release/libonnxruntime*.dylib "dist/${stem}/" 2>/dev/null || true
@@ -131,6 +140,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path "dist/$stem"
           Copy-Item "target/${{ matrix.target }}/release/kb.exe" "dist/$stem/"
           Copy-Item "target/${{ matrix.target }}/release/kbx.exe" "dist/$stem/"
+          # inference-server.exe exists only for ORT-engine rows (skipped for `none`).
+          Get-ChildItem "target/${{ matrix.target }}/release/inference-server.exe" -ErrorAction SilentlyContinue | Copy-Item -Destination "dist/$stem/"
           # ort/bundled may place onnxruntime*.dll beside the binary — ship it if present.
           Get-ChildItem "target/${{ matrix.target }}/release/onnxruntime*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination "dist/$stem/"
           Copy-Item README.md, LICENSE "dist/$stem/"
