@@ -34,9 +34,6 @@ pub struct ServeArgs {
     /// Bind address. Default 127.0.0.1:8071 — NOT 8080 (that is the Glossa MCP's own default).
     #[arg(long, env = "GLOSSA_INFER_BIND", default_value = "127.0.0.1:8071")]
     pub bind: String,
-    /// Allowed Host header value(s); empty ⇒ no Host allowlist.
-    #[arg(long = "allowed-host")]
-    pub allowed_host: Vec<String>,
     /// NLI session-pool size (default 2).
     #[arg(long = "nli-workers", default_value_t = 2)]
     pub nli_workers: usize,
@@ -67,21 +64,13 @@ pub struct ServeArgs {
     /// Allow a non-loopback bind without an api-key (otherwise refused).
     #[arg(long, env = "GLOSSA_INFER_INSECURE")]
     pub insecure: bool,
-    /// Hard cap on concurrent in-flight requests; over it ⇒ HTTP 429.
+    /// Hard cap on concurrent in-flight requests; over it ⇒ HTTP 429. Unset ⇒ no cap (requests
+    /// queue on the pool). (`--allowed-host`, CORS, and a request timeout are Phase-2, with TLS.)
     #[arg(long = "max-concurrency")]
     pub max_concurrency: Option<usize>,
-    /// Per-request read/write timeout (seconds).
-    #[arg(long = "request-timeout-secs", default_value_t = 120)]
-    pub request_timeout_secs: u64,
     /// Max request body size (bytes).
     #[arg(long = "max-body-bytes", default_value_t = 4 * 1024 * 1024)]
     pub max_body_bytes: usize,
-    /// Enable `/metrics` (Prometheus).
-    #[arg(long = "metrics")]
-    pub metrics: bool,
-    /// CORS allowed origin(s).
-    #[arg(long = "cors-allow-origin")]
-    pub cors_allow_origin: Vec<String>,
     /// Internal: launched under the Windows Service control manager.
     #[arg(long = "windows-service", hide = true)]
     pub windows_service: bool,
@@ -91,26 +80,73 @@ pub struct ServeArgs {
 }
 
 impl ServeArgs {
-    /// The Bearer key: `--api-key`, else the first non-blank, non-`#` line of `--api-key-file`.
-    pub fn resolved_api_key(&self) -> anyhow::Result<Option<String>> {
-        if let Some(k) = &self.api_key {
-            return Ok(Some(k.clone()));
-        }
-        if let Some(f) = &self.api_key_file {
-            let content = std::fs::read_to_string(f)?;
-            return Ok(content
-                .lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty() && !l.starts_with('#'))
-                .map(str::to_string));
-        }
-        Ok(None)
-    }
-
     /// The download cache dir (explicit `--cache-dir`, else a temp-based default).
     pub fn cache_dir(&self) -> PathBuf {
         self.cache_dir
             .clone()
             .unwrap_or_else(|| std::env::temp_dir().join("glossa-inference-cache"))
+    }
+
+    /// The RESOLVED Bearer key (see [`resolve_key`]). Use its `.is_some()` for the interlock's
+    /// `has_auth` — a named-but-empty `--api-key-file` must NOT count as auth.
+    pub fn effective_auth(&self) -> anyhow::Result<Option<String>> {
+        resolve_key(self.api_key.as_deref(), self.api_key_file.as_deref())
+    }
+}
+
+/// Resolve the Bearer key: inline `--api-key` wins; else the first non-blank, non-`#` line of
+/// `--api-key-file`. A key-file that is named but resolves empty is a config ERROR (`Err`) — not a
+/// silent "no auth", which would let the non-loopback interlock pass on a public bind.
+pub fn resolve_key(
+    api_key: Option<&str>,
+    api_key_file: Option<&std::path::Path>,
+) -> anyhow::Result<Option<String>> {
+    if let Some(k) = api_key {
+        return Ok(Some(k.to_string()));
+    }
+    let Some(f) = api_key_file else {
+        return Ok(None);
+    };
+    let content = std::fs::read_to_string(f)?;
+    match content
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+    {
+        Some(k) => Ok(Some(k.to_string())),
+        None => anyhow::bail!(
+            "--api-key-file {} has no key (every line blank or a # comment)",
+            f.display()
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_key_bails_on_empty_or_comment_only_file() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("k.txt");
+        std::fs::write(&f, "# just a comment\n\n   \n").unwrap();
+        assert!(resolve_key(None, Some(&f)).is_err());
+    }
+
+    #[test]
+    fn resolve_key_reads_first_real_line() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("k.txt");
+        std::fs::write(&f, "# c\nsekret\nignored\n").unwrap();
+        assert_eq!(
+            resolve_key(None, Some(&f)).unwrap(),
+            Some("sekret".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_key_inline_wins_and_none_when_absent() {
+        assert_eq!(resolve_key(Some("k"), None).unwrap(), Some("k".to_string()));
+        assert_eq!(resolve_key(None, None).unwrap(), None);
     }
 }

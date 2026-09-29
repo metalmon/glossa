@@ -167,7 +167,7 @@ mod engine {
             nli_variant: nli_dir.as_ref().map(|_| args.nli_variant.clone()),
             rerank_variant: rerank_dir.as_ref().map(|_| args.rerank_variant.clone()),
             ready: Arc::new(AtomicBool::new(true)),
-            api_key: args.resolved_api_key()?,
+            api_key: args.effective_auth()?,
             max_concurrency: args.max_concurrency,
             in_flight: Arc::new(AtomicUsize::new(0)),
         })

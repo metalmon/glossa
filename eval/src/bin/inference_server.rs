@@ -20,10 +20,12 @@ fn main() -> anyhow::Result<()> {
     }
 
     let args = Cli::parse().serve;
-    let has_auth = args.api_key.is_some() || args.api_key_file.is_some();
+    // Derive has_auth from the RESOLVED key (a named-but-empty --api-key-file must not count as
+    // auth, and resolving it here also fails fast on an empty key-file).
+    let has_auth = args.effective_auth()?.is_some();
     anyhow::ensure!(
         guard::interlock_ok(&args.bind, has_auth, args.insecure),
-        "refusing non-loopback bind {} without --api-key (use --insecure to override)",
+        "refusing non-loopback bind {} without authentication (use --insecure to override)",
         args.bind
     );
 

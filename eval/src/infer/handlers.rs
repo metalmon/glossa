@@ -46,6 +46,23 @@ pub fn encode_rerank_jina(scores: &[f32], top_n: Option<usize>, model: &str) -> 
     .to_string()
 }
 
+/// TEI `/predict` response for pre-resolved entailment scores: one row per hypothesis, each a
+/// single-class `[{"label":"entailment","score":P}]`. The glossa server already applied the model's
+/// entail_index server-side, so entailment sits at index 0 — the http client reads index 0 (see
+/// `resolve_scorer`'s http arm). One hypothesis emits the union's single form (`Vec<Prediction>`),
+/// many emit the batch form (`Vec<Vec<Prediction>>`); both decode via the client's `parse_predict`.
+pub fn encode_predict(scores: &[f32]) -> String {
+    let rows: Vec<serde_json::Value> = scores
+        .iter()
+        .map(|s| serde_json::json!([{ "label": "entailment", "score": s }]))
+        .collect();
+    if rows.len() == 1 {
+        serde_json::to_string(&rows[0]).unwrap_or_else(|_| "[]".to_string())
+    } else {
+        serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string())
+    }
+}
+
 #[cfg(any(
     feature = "nli-directml",
     feature = "nli-coreml",
@@ -271,20 +288,11 @@ mod server {
         })
         .await;
         match scored {
-            Ok(Ok(scores)) => {
-                // TEI union: one row per pair, each row a single-class [{label, score}] for entailment.
-                let rows: Vec<serde_json::Value> = scores
-                    .iter()
-                    .map(|s| serde_json::json!([{ "label": "entailment", "score": s }]))
-                    .collect();
-                let payload = if rows.len() == 1 {
-                    serde_json::to_string(&rows[0])
-                } else {
-                    serde_json::to_string(&rows)
-                }
-                .unwrap_or_else(|_| "[]".to_string());
-                ([("content-type", "application/json")], payload).into_response()
-            }
+            Ok(Ok(scores)) => (
+                [("content-type", "application/json")],
+                super::encode_predict(&scores),
+            )
+                .into_response(),
             _ => (StatusCode::INTERNAL_SERVER_ERROR, "predict failed").into_response(),
         }
     }
@@ -323,5 +331,19 @@ mod tests {
         let json = encode_rerank_bare(&[2.0, 9.0, -3.0], None);
         let back = glossa::http_scorer::wire::parse_rerank_bare(&json, 3).unwrap();
         assert_eq!(back, vec![2.0, 9.0, -3.0]);
+    }
+
+    #[test]
+    fn predict_encode_roundtrips_through_client_wire_parse_at_index_0() {
+        // The server pre-resolves entailment to index 0; the http client reads index 0. Pin it.
+        let json = encode_predict(&[0.9, 0.2]);
+        let back = glossa::http_scorer::wire::parse_predict(&json, 0, 2).unwrap();
+        assert_eq!(back, vec![0.9, 0.2]);
+        // single-hypothesis union form
+        let one = encode_predict(&[0.7]);
+        assert_eq!(
+            glossa::http_scorer::wire::parse_predict(&one, 0, 1).unwrap(),
+            vec![0.7]
+        );
     }
 }

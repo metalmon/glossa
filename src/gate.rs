@@ -67,7 +67,9 @@ pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
         let endpoint = cfg.endpoint.clone()?;
         return Some(Box::new(crate::http_scorer::client::new_ureq_nli(
             endpoint,
-            cfg.entail_index,
+            // The glossa inference-server pre-resolves entailment (applies the model's entail_index
+            // server-side) and emits a single "entailment" class at index 0, so the client reads 0.
+            0,
             cfg.timeout_ms,
             cfg.api_key.clone(),
         )));
@@ -103,7 +105,9 @@ pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
         let endpoint = cfg.endpoint.clone()?;
         return Some(Box::new(crate::http_scorer::client::new_ureq_nli(
             endpoint,
-            cfg.entail_index,
+            // The glossa inference-server pre-resolves entailment (applies the model's entail_index
+            // server-side) and emits a single "entailment" class at index 0, so the client reads 0.
+            0,
             cfg.timeout_ms,
             cfg.api_key.clone(),
         )));
@@ -129,7 +133,9 @@ pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
         let endpoint = cfg.endpoint.clone()?;
         return Some(Box::new(crate::http_scorer::client::new_ureq_nli(
             endpoint,
-            cfg.entail_index,
+            // The glossa inference-server pre-resolves entailment (applies the model's entail_index
+            // server-side) and emits a single "entailment" class at index 0, so the client reads 0.
+            0,
             cfg.timeout_ms,
             cfg.api_key.clone(),
         )));
