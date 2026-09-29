@@ -6,6 +6,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-09-29
+
+### Added
+
+- **`kbx rerank download` / `set`.** The `kbx rerank` group reaches parity with `kbx nli`: `download` fetches the cross-encoder ONNX + tokenizer into a local dir, and `set` writes `[rerank]` (`model_dir`, `scorer`, optional `pool_size` / `execution_providers` / `ep_device` / `ep_mem_limit_mb`) into the corpus `ontology.toml`, preserving every other table and comment — so the full `download` → `set` → `check` flow needs no hand-edited TOML.
+- **Precision-variant model downloads.** Both `kbx nli download` and `kbx rerank download` take `--fp16` / `--int8` (mutually exclusive) and fall back to a baked default repo when `--repo` is omitted; the chosen variant is saved locally as the canonical `model.onnx` (fp32 also brings `model.onnx.data`). `--repo` / `--file` still override for third-party models. The two published model repos now carry three precision variants each (`model.onnx` fp32, `model.fp16.onnx`, `model.int8.onnx`), validated so ordering is preserved on every probe pair and each variant tracks fp32.
+
+### Changed
+
+- **Consistent `download` default.** With neither `--fp16` nor `--int8`, both download commands fetch fp32 (`model.onnx`); the engines' model resolution is unchanged.
+
 ## [0.5.0] — 2026-09-24
 
 ### Added
