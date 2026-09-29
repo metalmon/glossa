@@ -149,18 +149,22 @@ where
             .and_then(Value::as_array)
             .map(|arr| {
                 arr.iter()
-                    .map(|call| ToolCall {
-                        id: call
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string(),
-                        name: call
-                            .pointer("/function/name")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string(),
-                        args: parse_tool_args(call),
+                    .map(|call| {
+                        let (args, args_malformed) = parse_tool_args(call);
+                        ToolCall {
+                            id: call
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
+                            name: call
+                                .pointer("/function/name")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
+                            args,
+                            args_malformed,
+                        }
                     })
                     .collect()
             })

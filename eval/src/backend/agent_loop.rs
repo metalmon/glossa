@@ -533,6 +533,18 @@ pub fn run_agent_loop_capturing(
 
         let mut results: Vec<(String, String)> = Vec::with_capacity(reply.tool_calls.len());
         for call in &reply.tool_calls {
+            if call.args_malformed {
+                // Dispatch is deliberately unchanged — refusing the call is a behaviour change with
+                // its own effect on eval numbers. But it must not stay invisible: `{}` args from a
+                // truncated payload read exactly like a model that chose to call with no arguments,
+                // and a repeat of one is then hidden by the (name, args) dedup below.
+                eprintln!(
+                    "[agent] tool `{}` was called with UNUSABLE arguments (unparseable or truncated; \
+                     finish_reason={:?}) — dispatching with empty args; this is NOT a model that \
+                     chose to call with no arguments",
+                    call.name, reply.finish_reason
+                );
+            }
             let key = format!(
                 "{}\u{1}{}",
                 call.name,
@@ -687,6 +699,7 @@ mod tests {
                 id: id.to_string(),
                 name: name.to_string(),
                 args,
+                args_malformed: false,
             }],
             finish_reason: Some("tool_calls".to_string()),
             raw: json!({ "role": "assistant", "content": null }),
@@ -705,6 +718,7 @@ mod tests {
                 id: id.to_string(),
                 name: name.to_string(),
                 args,
+                args_malformed: false,
             }],
             finish_reason: Some("tool_calls".to_string()),
             raw: json!({ "role": "assistant", "content": text }),

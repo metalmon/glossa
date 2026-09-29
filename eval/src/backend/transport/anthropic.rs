@@ -156,6 +156,10 @@ fn parse_response(resp: Value) -> TurnReply {
                 .unwrap_or("")
                 .to_string(),
             args: b.get("input").cloned().unwrap_or_else(|| json!({})),
+            // Anthropic sends `input` as a parsed object, so there is no encoded-string payload to
+            // fail on here. Left false rather than guessing at a detection this wire shape does not
+            // need; only the OpenAI-compatible path can observe the condition today.
+            args_malformed: false,
         })
         .collect();
 
@@ -388,6 +392,7 @@ mod tests {
                 id: "t1".to_string(),
                 name: "search".to_string(),
                 args: json!({"q": "x"}),
+                args_malformed: false,
             }],
             finish_reason: None,
             raw: json!({
@@ -415,6 +420,7 @@ mod tests {
                 id: "t1".to_string(),
                 name: "search".to_string(),
                 args: json!({"q": "x"}),
+                args_malformed: false,
             }],
             finish_reason: None,
             raw: json!({ "no_content_here": true }),

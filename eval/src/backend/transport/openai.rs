@@ -367,11 +367,24 @@ pub(crate) fn content_of(msg: &Value) -> String {
 
 /// Tool-call `function.arguments` is a JSON-encoded string per the OpenAI spec, but some servers
 /// (incl. some LM Studio builds) return it as an already-parsed object. Accept both.
-pub(crate) fn parse_tool_args(call: &Value) -> Value {
+///
+/// Returns the arguments as an object PLUS whether the provider's payload was unusable. The second
+/// value matters because every unusable payload collapses to the same `{}` a genuine zero-arg call
+/// produces: without the flag, a tool call truncated mid-serialization by a completion-token cap is
+/// indistinguishable in the transcript from a model that deliberately called a tool with no
+/// arguments. An ABSENT or empty `arguments` field is the legitimate zero-arg case and is NOT
+/// flagged; anything present that does not parse into a JSON OBJECT is — including valid JSON of
+/// the wrong shape (`null`, an array, a bare number), which silently became `{}` as well.
+pub(crate) fn parse_tool_args(call: &Value) -> (Value, bool) {
     match call.pointer("/function/arguments") {
-        Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
-        Some(v @ Value::Object(_)) => v.clone(),
-        _ => json!({}),
+        None => (json!({}), false),
+        Some(Value::String(s)) if s.trim().is_empty() => (json!({}), false),
+        Some(Value::String(s)) => match serde_json::from_str::<Value>(s) {
+            Ok(Value::Object(m)) => (Value::Object(m), false),
+            _ => (json!({}), true),
+        },
+        Some(v @ Value::Object(_)) => (v.clone(), false),
+        Some(_) => (json!({}), true),
     }
 }
 
@@ -396,18 +409,22 @@ pub(crate) fn reply_from_response(full: &Value) -> anyhow::Result<TurnReply> {
         .and_then(Value::as_array)
         .map(|arr| {
             arr.iter()
-                .map(|call| ToolCall {
-                    id: call
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    name: call
-                        .pointer("/function/name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    args: parse_tool_args(call),
+                .map(|call| {
+                    let (args, args_malformed) = parse_tool_args(call);
+                    ToolCall {
+                        id: call
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        name: call
+                            .pointer("/function/name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        args,
+                        args_malformed,
+                    }
                 })
                 .collect()
         })
@@ -639,11 +656,58 @@ mod tests {
     #[test]
     fn parse_tool_args_handles_string_and_object() {
         let s = json!({ "function": { "arguments": "{\"query\":\"abc\"}" } });
-        assert_eq!(parse_tool_args(&s)["query"], "abc");
+        assert_eq!(parse_tool_args(&s), (json!({"query": "abc"}), false));
         let o = json!({ "function": { "arguments": { "query": "abc" } } });
-        assert_eq!(parse_tool_args(&o)["query"], "abc");
+        assert_eq!(parse_tool_args(&o), (json!({"query": "abc"}), false));
+    }
+
+    #[test]
+    fn parse_tool_args_flags_unparseable_arguments() {
         let bad = json!({ "function": { "arguments": "not json" } });
-        assert_eq!(parse_tool_args(&bad), json!({}));
+        assert_eq!(parse_tool_args(&bad), (json!({}), true));
+        // The real-world case: a completion-token cap cuts the JSON mid-serialization, and that
+        // used to arrive as an indistinguishable empty-args call.
+        let cut = json!({ "function": { "arguments": "{\"query\":\"abc" } });
+        assert_eq!(parse_tool_args(&cut), (json!({}), true));
+    }
+
+    /// Valid JSON of the wrong shape is still unusable as an argument map, and silently became
+    /// `{}` too.
+    #[test]
+    fn parse_tool_args_flags_valid_json_that_is_not_an_object() {
+        for raw in ["null", "[1,2]", "42", "\"str\""] {
+            let v = json!({ "function": { "arguments": raw } });
+            assert_eq!(parse_tool_args(&v), (json!({}), true), "raw={raw}");
+        }
+    }
+
+    /// An ABSENT or empty arguments field is a legitimate zero-arg call, NOT malformed.
+    #[test]
+    fn parse_tool_args_absent_arguments_is_not_malformed() {
+        let none = json!({ "function": { "name": "ls" } });
+        assert_eq!(parse_tool_args(&none), (json!({}), false));
+        let empty = json!({ "function": { "arguments": "" } });
+        assert_eq!(parse_tool_args(&empty), (json!({}), false));
+    }
+
+    #[test]
+    fn reply_from_response_marks_malformed_call() {
+        let full = json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "t1",
+                        "function": { "name": "search", "arguments": "{\"query\":\"ab" }
+                    }]
+                }
+            }]
+        });
+        let reply = reply_from_response(&full).expect("parses");
+        assert_eq!(reply.tool_calls.len(), 1);
+        assert!(reply.tool_calls[0].args_malformed);
+        assert_eq!(reply.finish_reason.as_deref(), Some("length"));
     }
 
     /// New Task-2 test: `OpenAiTransport.tools_schema(true, true)` renders the OpenAI function-tool

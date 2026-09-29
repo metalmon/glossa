@@ -159,18 +159,22 @@ fn parse_response(resp: Value) -> TurnReply {
     let tool_calls: Vec<ToolCall> = items
         .iter()
         .filter(|it| it.get("type").and_then(Value::as_str) == Some("function_call"))
-        .map(|it| ToolCall {
-            id: it
-                .get("call_id")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            name: it
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            args: parse_tool_args_responses(it),
+        .map(|it| {
+            let (args, args_malformed) = parse_tool_args_responses(it);
+            ToolCall {
+                id: it
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                name: it
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                args,
+                args_malformed,
+            }
         })
         .collect();
 
@@ -201,10 +205,17 @@ fn parse_response(resp: Value) -> TurnReply {
 /// (mirroring `openai::parse_tool_args`'s leniency for Chat Completions) accept an
 /// already-parsed object too. Reuses `openai::parse_tool_args`'s string-or-object logic by
 /// wrapping the item in the `{"function":{"arguments":...}}` shape that helper expects.
-fn parse_tool_args_responses(item: &Value) -> Value {
-    parse_tool_args(
-        &json!({ "function": { "arguments": item.get("arguments").cloned().unwrap_or(Value::Null) } }),
-    )
+/// Returns `(args, malformed)` exactly as [`parse_tool_args`] does, so this transport gets the
+/// truncated/unusable-payload detection for free.
+///
+/// An ABSENT `arguments` field must not reach the helper as `Value::Null`: null is valid JSON of the
+/// wrong shape, which the helper correctly flags as malformed — but a `function_call` item with no
+/// `arguments` at all is the legitimate zero-arg case, so it is answered here instead.
+fn parse_tool_args_responses(item: &Value) -> (Value, bool) {
+    match item.get("arguments") {
+        None => (json!({}), false),
+        Some(a) => parse_tool_args(&json!({ "function": { "arguments": a.clone() } })),
+    }
 }
 
 /// Sync HTTP bridge: POST our `{model, input, instructions?, tools?, max_output_tokens,
@@ -411,6 +422,7 @@ mod tests {
                 id: "c1".to_string(),
                 name: "search".to_string(),
                 args: json!({"q": "x"}),
+                args_malformed: false,
             }],
             finish_reason: None,
             raw: json!({
@@ -440,6 +452,7 @@ mod tests {
                 id: "c1".to_string(),
                 name: "search".to_string(),
                 args: json!({"q": "x"}),
+                args_malformed: false,
             }],
             finish_reason: None,
             raw: json!({ "no_output_here": true }),

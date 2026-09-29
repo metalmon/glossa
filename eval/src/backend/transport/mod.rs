@@ -39,6 +39,17 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub args: serde_json::Value,
+    /// True when the provider sent an `arguments` payload that could not be used as an argument map
+    /// — unparseable, cut off mid-serialization by a completion-token cap, or valid JSON that is not
+    /// an object. `args` is then `{}`, which is otherwise indistinguishable from a genuine zero-arg
+    /// call, so the condition would be invisible in the transcript without this flag.
+    ///
+    /// Recorded for observability only: dispatch is unaffected. Whether such a call should be
+    /// REFUSED instead of executed is a separate question with its own effect on eval numbers.
+    ///
+    /// Only the OpenAI-compatible transport detects this today; the other transports leave it
+    /// `false` rather than guessing.
+    pub args_malformed: bool,
 }
 
 /// One assistant turn, normalized away from the provider's wire shape: `text` is the answer (or
@@ -163,6 +174,7 @@ mod tests {
                 id: "t".into(),
                 name: "search".into(),
                 args: json!({"q": "y"}),
+                args_malformed: false,
             }],
             finish_reason: None,
             raw: json!({}),

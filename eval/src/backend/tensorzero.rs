@@ -126,6 +126,10 @@ pub(crate) fn turn_reply_from_content(
                 id: id.clone(),
                 name: name.clone(),
                 args: norm.exec,
+                // TensorZero normalizes arguments upstream via `normalize_tool_call_arguments`,
+                // which has its own notion of a usable payload; left false rather than
+                // second-guessing it from here.
+                args_malformed: false,
             });
             normalized_blocks.push(json!({
                 "type": "tool_call", "id": id, "name": name, "arguments": norm.echo

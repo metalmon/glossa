@@ -298,6 +298,7 @@ mod tests {
             id: "c1".into(),
             name: "search".into(),
             args: json!({"q": "x"}),
+            args_malformed: false,
         }];
         assert!(!is_degenerate(&reply("", "tool_calls", tc)));
     }
@@ -346,6 +347,7 @@ mod tests {
             id: "c1".into(),
             name: "search".into(),
             args: json!({"q": "x"}),
+            args_malformed: false,
         }];
         let (out, calls, rs) = run(vec![reply("", "tool_calls", tc)], ResamplePolicy::default());
         assert_eq!(calls, 1, "a normal tool-call turn must not be resampled");
