@@ -94,6 +94,14 @@ pub fn build_alias_index(g: &GraphStore) -> anyhow::Result<AliasIndex> {
     })
 }
 
+/// Result of [`reachable`]: the facts found, and whether `visit_cap` cut the search short. The flag
+/// matters because a truncated set is otherwise indistinguishable from a complete one — and the cap
+/// deciding the answer is exactly what makes a dense graph's results unreproducible.
+pub struct Reached {
+    pub facts: HashSet<String>,
+    pub truncated: bool,
+}
+
 /// Facts reachable from `seeds` by joining on SPECIFIC aliases only (df ≤ `df_cap` — generic hub
 /// entities are skipped, which is what keeps the intersection clean). Bounded by `max_hop` and
 /// `visit_cap`.
@@ -103,34 +111,49 @@ pub fn reachable(
     df_cap: usize,
     max_hop: usize,
     visit_cap: usize,
-) -> HashSet<String> {
+) -> Reached {
     let mut seen: HashSet<String> = seeds.clone();
     let mut out: HashSet<String> = seeds.clone();
-    let mut q: VecDeque<(String, usize)> = seeds.iter().map(|s| (s.clone(), 0)).collect();
+    // Sorted, not hash order: the frontier decides which facts survive `visit_cap`, so an
+    // unordered start makes the truncated result differ between runs on the same graph.
+    let mut start: Vec<&String> = seeds.iter().collect();
+    start.sort();
+    let mut q: VecDeque<(String, usize)> = start.into_iter().map(|s| (s.clone(), 0)).collect();
+    let mut truncated = false;
     while let Some((f, h)) = q.pop_front() {
         if seen.len() >= visit_cap {
+            truncated = true;
             break;
         }
         if h >= max_hop {
             continue;
         }
-        if let Some(als) = idx.fact_aliases.get(&f) {
-            for a in als {
-                if idx.alias_df.get(a).copied().unwrap_or(0) > df_cap {
-                    continue; // skip generic hub aliases
-                }
-                if let Some(fs) = idx.alias_facts.get(a) {
-                    for nf in fs {
-                        if seen.insert(nf.clone()) {
-                            out.insert(nf.clone());
-                            q.push_back((nf.clone(), h + 1));
-                        }
+        let Some(als) = idx.fact_aliases.get(&f) else {
+            continue;
+        };
+        // Same reason as the frontier: alias order drives insertion order drives who survives.
+        let mut als: Vec<&String> = als.iter().collect();
+        als.sort();
+        for a in als {
+            if idx.alias_df.get(a).copied().unwrap_or(0) > df_cap {
+                continue; // skip generic hub aliases
+            }
+            if let Some(fs) = idx.alias_facts.get(a) {
+                let mut fs: Vec<&String> = fs.iter().collect();
+                fs.sort();
+                for nf in fs {
+                    if seen.insert(nf.clone()) {
+                        out.insert(nf.clone());
+                        q.push_back((nf.clone(), h + 1));
                     }
                 }
             }
         }
     }
-    out
+    Reached {
+        facts: out,
+        truncated,
+    }
 }
 
 /// A narrowed, grounded candidate fact.
@@ -177,7 +200,16 @@ pub fn compose(
                 }
             }
         }
-        reach_sets.push(reachable(idx, &seeds, df_cap, 3, 4000));
+        let reached = reachable(idx, &seeds, df_cap, 3, 4000);
+        if reached.truncated {
+            tracing::debug!(
+                anchor = %anc,
+                cap = 4000,
+                found = reached.facts.len(),
+                "compose: reachable hit its visit cap — candidate set is truncated"
+            );
+        }
+        reach_sets.push(reached.facts);
     }
     let cand: HashSet<String> = if reach_sets.len() > 1 {
         let mut it = reach_sets.iter();
@@ -443,6 +475,73 @@ mod tests {
         }
     }
 
+    /// `n` facts in a chain, each sharing a specific (low-df) alias with its neighbour, so a BFS
+    /// from `f0` reaches all of them. Synthetic — no corpus values.
+    fn alias_index_fixture(n: usize) -> AliasIndex {
+        let mut fact_aliases: HashMap<String, Vec<String>> = HashMap::new();
+        let mut alias_facts: HashMap<String, Vec<String>> = HashMap::new();
+        let mut alias_df: HashMap<String, usize> = HashMap::new();
+        for i in 0..n {
+            let a = format!("link{i}");
+            let f = format!("f{i}");
+            let g = format!("f{}", (i + 1) % n);
+            fact_aliases.entry(f.clone()).or_default().push(a.clone());
+            fact_aliases.entry(g.clone()).or_default().push(a.clone());
+            alias_facts.entry(a.clone()).or_default().extend([f, g]);
+            alias_df.insert(a, 2);
+        }
+        AliasIndex {
+            fact_aliases,
+            alias_facts,
+            alias_df,
+            fact_label: HashMap::new(),
+            tok_df: HashMap::new(),
+            n_facts: n,
+        }
+    }
+
+    /// Review Focus 4: the defect itself. Two INDEPENDENTLY BUILT fixtures over the same logical
+    /// graph must give the same truncated set.
+    ///
+    /// Building the fixture twice is the point: `RandomState` seeds each `HashMap`/`HashSet`
+    /// separately, so the two indexes iterate the same keys in different orders. Calling twice with
+    /// ONE fixture proves nothing — iteration order is stable for a given map, so that version of
+    /// this test passes against the unfixed code.
+    ///
+    /// `max_hop` bounds the reachable set, NOT `n`: a 40-cycle at `max_hop = 3` yields only 7 facts
+    /// and never reaches a cap of 8. Use a hop budget large enough that the cap is what bites.
+    #[test]
+    fn reachable_is_deterministic_under_the_visit_cap() {
+        let seeds: HashSet<String> = ["f0".to_string()].into_iter().collect();
+        let a = reachable(&alias_index_fixture(40), &seeds, 5, 10, 8);
+        let b = reachable(&alias_index_fixture(40), &seeds, 5, 10, 8);
+        assert!(
+            a.truncated && b.truncated,
+            "cap 8 must bite: a={} b={}",
+            a.facts.len(),
+            b.facts.len()
+        );
+        assert_eq!(
+            a.facts, b.facts,
+            "a truncated frontier must not depend on hash order"
+        );
+    }
+
+    /// Review Focus 3: a cap at exactly one below the complete set must report truncation rather
+    /// than passing for a complete result.
+    #[test]
+    fn reachable_reports_truncation_at_the_boundary() {
+        let seeds: HashSet<String> = ["f0".to_string()].into_iter().collect();
+        let big = reachable(&alias_index_fixture(6), &seeds, 5, 10, 1000);
+        assert!(
+            !big.truncated,
+            "a cap far above the graph must not claim truncation"
+        );
+        let tight = reachable(&alias_index_fixture(6), &seeds, 5, 10, big.facts.len() - 1);
+        assert!(tight.truncated);
+        assert!(tight.facts.len() <= big.facts.len());
+    }
+
     /// Review Focus 1: every exact-label match is a near-duplicate of the others, so they must
     /// share the seed mass equally. Decaying it hands 1.0 to whichever row SQLite emitted first.
     #[test]
@@ -577,7 +676,7 @@ mod tests {
         let idx = build_alias_index(&g).unwrap();
         let seeds: HashSet<String> = ["ann".to_string()].into_iter().collect();
         // df_cap 5: 'uni' (df 21) is skipped, 'prize2020' (df 2) is followed.
-        let r = reachable(&idx, &seeds, 5, 3, 1000);
+        let r = reachable(&idx, &seeds, 5, 3, 1000).facts;
         assert!(r.contains("prize"), "specific bridge followed");
         assert!(!r.contains("hub0"), "generic hub NOT followed");
     }
