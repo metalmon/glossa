@@ -12,6 +12,7 @@ pub mod glob;
 pub mod graph;
 pub mod grep;
 pub mod http_metrics;
+pub mod http_scorer;
 pub mod index;
 pub mod json_util;
 pub mod logreload;
