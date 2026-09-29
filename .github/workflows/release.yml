@@ -55,9 +55,9 @@ jobs:
           - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
           - { os: macos-latest,   target: aarch64-apple-darwin,     archive: tar.gz, engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
           - { os: macos-latest,   target: x86_64-apple-darwin,      archive: tar.gz, engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: ort,  kb_flags: "--features nli-directml", kbx_flags: "--features nli-directml" }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: cuda13, kb_flags: "--features nli-cuda", kbx_flags: "--features nli-cuda" }
-          - { os: macos-latest,   target: aarch64-apple-darwin,     archive: tar.gz, engine: ort,  kb_flags: "--features nli-coreml",   kbx_flags: "--features nli-coreml" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: ort,  kb_flags: "--features nli-directml", kbx_flags: "--features nli-directml", build_server: true }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: cuda13, kb_flags: "--features nli-cuda", kbx_flags: "--features nli-cuda", build_server: true }
+          - { os: macos-latest,   target: aarch64-apple-darwin,     archive: tar.gz, engine: ort,  kb_flags: "--features nli-coreml",   kbx_flags: "--features nli-coreml", build_server: true }
           # NOTE: no x86_64-apple-darwin · ort — ort-sys ships no `download-binaries` ONNX Runtime for
           # Intel Mac ("no prebuilt binaries available for target x86_64-apple-darwin"), so a
           # self-contained ort build is impossible there. Intel Mac gets the `none` variant only.
@@ -81,10 +81,11 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }} -p kb-eval --bin kbx ${{ matrix.kbx_flags }}
 
       - name: Build inference-server
-        # The standalone HTTP scorer (NLI + reranker over TEI/Jina). Only ORT-engine rows build it —
-        # the `none` row would ship the useless "needs an engine feature" stub. Shares kbx_flags
-        # (the engine feature per row: --features nli-cuda for cuda13, --features nli for ort-linux, …).
-        if: matrix.engine != 'none'
+        # The standalone HTTP scorer (NLI + reranker over TEI/Jina). Built ONLY on rows whose feature
+        # enables the server — the GPU execution providers (nli-cuda/nli-directml/nli-coreml). The
+        # `none` and CPU-`nli` rows would ship the useless "needs an engine feature" stub (the server
+        # is gated on a GPU EP, not plain `nli`), so `build_server` marks the rows that build a real one.
+        if: matrix.build_server
         run: cargo build --release --locked --target ${{ matrix.target }} -p kb-eval --bin inference-server ${{ matrix.kbx_flags }}
 
       - name: Fetch ONNX Runtime CUDA-13 DLLs (cuda13 only)
@@ -122,7 +123,7 @@ jobs:
           mkdir -p "dist/${stem}"
           cp "target/${{ matrix.target }}/release/kb" "dist/${stem}/"
           cp "target/${{ matrix.target }}/release/kbx" "dist/${stem}/"
-          # inference-server exists only for ORT-engine rows (skipped for `none`).
+          # inference-server exists only on GPU-EP rows (build_server); the copy no-ops elsewhere.
           cp "target/${{ matrix.target }}/release/inference-server" "dist/${stem}/" 2>/dev/null || true
           # ort/bundled may place a shared ONNX Runtime lib beside the binary — ship it if present
           # (no-op for the `none` variant and for static links).
@@ -140,7 +141,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "dist/$stem"
           Copy-Item "target/${{ matrix.target }}/release/kb.exe" "dist/$stem/"
           Copy-Item "target/${{ matrix.target }}/release/kbx.exe" "dist/$stem/"
-          # inference-server.exe exists only for ORT-engine rows (skipped for `none`).
+          # inference-server.exe exists only on GPU-EP rows (build_server); the copy no-ops elsewhere.
           Get-ChildItem "target/${{ matrix.target }}/release/inference-server.exe" -ErrorAction SilentlyContinue | Copy-Item -Destination "dist/$stem/"
           # ort/bundled may place onnxruntime*.dll beside the binary — ship it if present.
           Get-ChildItem "target/${{ matrix.target }}/release/onnxruntime*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination "dist/$stem/"
