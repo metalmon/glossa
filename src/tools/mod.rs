@@ -580,8 +580,22 @@ pub fn read(
     // Lead with THIS chunk's own copy-ready `path#n` — the token to reuse as a node's source_path
     // or to `read` again. Without it a reader only sees the prev/next footer and has to infer the
     // current ref (the number between them).
+    // Name the substitution when the clamp above actually moved the ordinal. The header alone
+    // implies it, but only to a reader who compares it against what they asked for — a caller
+    // validating a locator by "did the read succeed?" gets a false confirmation and treats a bogus
+    // `path#N` as real. (That is not hypothetical: it nearly wrote unreachable golds into the eval
+    // dataset, which would have depressed FCR for a reason unrelated to retrieval.) The clamp
+    // itself stays: erroring here is what makes a small model loop.
+    let clamp_note = if resolved_ord != n {
+        format!("note: #{n} is out of range for this document — showing #{resolved_ord} instead\n")
+    } else {
+        String::new()
+    };
     ReadOut {
-        text: format!("── {path}#{resolved_ord} ──\n{}{}", body, footer),
+        text: format!(
+            "{clamp_note}── {path}#{resolved_ord} ──\n{}{}",
+            body, footer
+        ),
         images,
     }
 }
@@ -2343,6 +2357,55 @@ mod tests {
         assert_eq!(out.text, "page_image sample.pdf#1");
         assert_eq!(out.images.len(), 1);
         assert_eq!(out.images[0].mime, "image/jpeg");
+    }
+
+    /// An out-of-range ord is clamped on purpose (erroring makes a small model loop), but the
+    /// substitution must be NAMED, not merely implied by the header. A caller validating a
+    /// `path#N` locator by "did the read succeed?" otherwise gets a false confirmation and treats
+    /// a bogus reference as real.
+    #[test]
+    fn read_names_the_clamp_when_the_ord_was_out_of_range() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("one.md"), b"# Only\nsingle chunk body\n").unwrap();
+        crate::index::store::index_dir(d.path(), true).unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+
+        let out = read(
+            d.path(),
+            &i,
+            None,
+            "one.md",
+            99,
+            false,
+            &TraceLog::disabled(),
+        );
+        assert!(
+            out.text.contains("#99 is out of range"),
+            "the clamp must be stated, not inferred: {}",
+            out.text
+        );
+        assert!(
+            out.text.contains("showing #1 instead"),
+            "and it must say what was served instead: {}",
+            out.text
+        );
+        assert!(out.text.contains("── one.md#1 ──"), "{}", out.text);
+
+        // An in-range read stays byte-identical to before — no note, nothing prepended.
+        let ok = read(
+            d.path(),
+            &i,
+            None,
+            "one.md",
+            1,
+            false,
+            &TraceLog::disabled(),
+        );
+        assert!(
+            ok.text.starts_with("── one.md#1 ──"),
+            "a valid read must not gain a note: {}",
+            ok.text
+        );
     }
 
     #[test]
