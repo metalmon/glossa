@@ -20,6 +20,22 @@ pub fn chain_recall(gold: &HashSet<String>, retrieved: &HashSet<String>) -> (boo
     (hit == gold.len(), hit as f32 / gold.len() as f32)
 }
 
+/// One-line description of the retrieval path a run actually used. `reranked` is
+/// [`glossa::retrieve::rerank::RerankInfo::reranked`] — false covers both "no `[rerank]` configured"
+/// and "configured but the model failed to load", which `retrieve()` treats identically (fail-open
+/// to BM25). Reporting which path RAN matters more than which was requested: a spike whose reranker
+/// silently failed to load would otherwise read its control arm as its treatment arm.
+pub fn retrieval_line(via_search: bool, reranked: bool, pool: usize) -> String {
+    if !via_search {
+        return "retrieval: graph (glossary over the reasoning graph)".to_string();
+    }
+    if reranked {
+        format!("retrieval: search (BM25 pool of {pool}, reranked by the configured cross-encoder)")
+    } else {
+        "retrieval: search (BM25 over the index; no rerank applied)".to_string()
+    }
+}
+
 /// Whether AT LEAST ONE `gold` entry is contained in `retrieved` — the counterpart of
 /// [`chain_recall`]'s all-of question. A case whose golds are ALTERNATIVES (any one of several
 /// locations answers it) cannot satisfy all-of by construction, so full-chain coverage understates
@@ -215,6 +231,15 @@ pub fn run_fcr(args: FcrArgs) -> anyhow::Result<()> {
     };
     let spec = glossa::tools::ChainSpec::default();
     let trace = glossa::trace::TraceLog::disabled();
+    // The overlay that carries `[rerank]`. `state_base` — not `root` — because the two diverge
+    // whenever a caller went through `resolve_with` with an explicit `--state-dir`.
+    let glossa_dir = crate::workspace::glossa_dir(&paths.state_base);
+    // What the search arm actually did, for the header line. Every question takes the same path, so
+    // the last observation describes the run.
+    let mut rerank_seen = (false, 0usize);
+    // Queries whose retrieval call errored. They score as zero coverage, so a non-zero count means
+    // the reported percentages understate retrieval for a non-retrieval reason.
+    let mut retrieval_errors = 0usize;
 
     let mut report = FcrReport::default();
     for q in &golds {
@@ -246,12 +271,34 @@ pub fn run_fcr(args: FcrArgs) -> anyhow::Result<()> {
                 );
                 extract_graph_refs(&body).into_iter().collect()
             }
-            None => idx
-                .search_filtered(&q.question, args.k, None, None, None)
-                .unwrap_or_default()
-                .iter()
-                .map(|h| format!("{}#{}", h.path, h.ord))
-                .collect(),
+            // The config-driven entry, NOT `search_filtered` directly: it is the same path
+            // `tools::search` and `kb search` take, so whatever `[rerank]` says production does,
+            // this measures. With no active `[rerank]` it is plain BM25, so the numbers are
+            // unchanged from before this call site was swapped.
+            None => match glossa::retrieve::rerank::retrieve(
+                &idx,
+                &glossa_dir,
+                &q.question,
+                args.k,
+                None,
+                None,
+                None,
+            ) {
+                Ok((hits, info)) => {
+                    rerank_seen = (info.reranked, info.pool);
+                    hits.iter()
+                        .map(|h| format!("{}#{}", h.path, h.ord))
+                        .collect()
+                }
+                // One failed query must not abort a whole run, so it scores as zero coverage — the
+                // behaviour this call site already had. Counted so the tally is not mistaken for a
+                // retrieval result: a swallowed error depresses FCR for a reason that has nothing
+                // to do with retrieval quality.
+                Err(_) => {
+                    retrieval_errors += 1;
+                    HashSet::new()
+                }
+            },
         };
         let (full, partial) = chain_recall(&gold, &retrieved);
         let any = any_gold(&gold, &retrieved);
@@ -259,13 +306,16 @@ pub fn run_fcr(args: FcrArgs) -> anyhow::Result<()> {
     }
 
     println!(
-        "retrieval: {}",
-        match args.via {
-            Via::Search => "search (BM25 over the index)",
-            Via::Graph => "graph (glossary over the reasoning graph)",
-        }
+        "{}",
+        retrieval_line(args.via == Via::Search, rerank_seen.0, rerank_seen.1)
     );
     print!("{}", report.render(args.k));
+    if retrieval_errors > 0 {
+        println!(
+            "WARNING: {retrieval_errors} question(s) failed retrieval and scored as zero coverage — \
+             the percentages above understate retrieval quality by that much"
+        );
+    }
     if report.skipped_no_gold > 0 {
         println!(
             "({} answerable case(s) skipped: no gold source chunks to score against)",
@@ -345,6 +395,26 @@ mod tests {
         let out = r.render(20);
         assert!(out.contains("any-of="), "render must expose the aggregate: {out}");
         assert!(out.contains("ALL"), "{out}");
+    }
+
+    /// A configured-but-unloadable reranker fails open to BM25. The report must say rerank did NOT
+    /// apply rather than implying it did — otherwise a spike silently reads its own control arm as
+    /// the treatment arm.
+    #[test]
+    fn retrieval_line_distinguishes_reranked_from_failed_open() {
+        let on = retrieval_line(true, true, 200);
+        assert!(on.contains("rerank"), "{on}");
+        assert!(on.contains("200"), "pool size must be visible: {on}");
+
+        let off = retrieval_line(true, false, 0);
+        assert!(off.contains("BM25"), "{off}");
+        assert!(
+            !off.contains("reranked"),
+            "must not claim rerank applied when it did not: {off}"
+        );
+
+        let graph = retrieval_line(false, false, 0);
+        assert!(graph.contains("graph"), "{graph}");
     }
 
     #[test]
