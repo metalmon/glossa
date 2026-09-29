@@ -391,7 +391,9 @@ Parsed by [`eval/src/dataset.rs`](../eval/src/dataset.rs). Sample Hotpot: [sampl
 just eval-metrics
 ```
 
-Columns: `run`, `f1`, `recall_at_10`, `judge`.
+Columns: `run`, `arm`, `n`, `f1`, `r10`, `judge` — `r10` is the `recall_at_10` metric averaged per
+run. These come from TensorZero metric feedback in ClickHouse (see the `eval-metrics` recipe in the
+justfile), not from the eval crate's own scoring code.
 
 ---
 

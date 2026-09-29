@@ -154,30 +154,6 @@ pub fn ranked_titles(transcript: &[glossa::trace::TraceEntry]) -> Vec<String> {
     out
 }
 
-/// Fraction of gold titles found within the top-k of the merged ranked list.
-pub fn recall_at_k(ranked: &[String], gold: &[String], k: usize) -> f32 {
-    if gold.is_empty() {
-        return 1.0;
-    }
-    let top: Vec<String> = ranked.iter().take(k).map(|t| normalize(t)).collect();
-    let hit = gold.iter().filter(|g| top.contains(&normalize(g))).count();
-    hit as f32 / gold.len() as f32
-}
-
-/// Reciprocal rank of the first gold title in the merged ranked list (0 if none).
-pub fn mrr(ranked: &[String], gold: &[String]) -> f32 {
-    if gold.is_empty() {
-        return 0.0;
-    }
-    let goldn: Vec<String> = gold.iter().map(|g| normalize(g)).collect();
-    for (i, t) in ranked.iter().enumerate() {
-        if goldn.contains(&normalize(t)) {
-            return 1.0 / (i as f32 + 1.0);
-        }
-    }
-    0.0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,24 +233,13 @@ mod retrieval_at_k_tests {
         );
     }
 
-    #[test]
-    fn recall_and_mrr() {
-        let ranked = vec![
-            "A".to_string(),
-            "B".to_string(),
-            "C".to_string(),
-            "D".to_string(),
-        ];
-        let gold = vec!["C".to_string(), "E".to_string()];
-        assert!((recall_at_k(&ranked, &gold, 2) - 0.0).abs() < 1e-6); // C is rank 3
-        assert!((recall_at_k(&ranked, &gold, 3) - 0.5).abs() < 1e-6);
-        assert!((mrr(&ranked, &gold) - (1.0 / 3.0)).abs() < 1e-4);
-    }
-
+    /// `recall_at_k`/`mrr` were removed as dead code (nothing but their own tests called them after
+    /// the `kb-eval` binary retirement), but the case-insensitive matching they demonstrated is
+    /// `normalize`'s, which is still used — so the check moves here rather than disappearing with
+    /// its former vehicle.
     #[test]
     fn matching_is_normalized() {
-        let ranked = vec!["The Beatles".to_string()];
-        assert_eq!(recall_at_k(&ranked, &["the beatles".to_string()], 1), 1.0);
+        assert_eq!(normalize("The Beatles"), normalize("the beatles"));
     }
 }
 
