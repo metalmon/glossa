@@ -94,9 +94,18 @@ pub fn build_alias_index(g: &GraphStore) -> anyhow::Result<AliasIndex> {
     })
 }
 
-/// Result of [`reachable`]: the facts found, and whether `visit_cap` cut the search short. The flag
-/// matters because a truncated set is otherwise indistinguishable from a complete one — and the cap
-/// deciding the answer is exactly what makes a dense graph's results unreproducible.
+/// Result of [`reachable`]: the facts found, and whether `visit_cap` stopped the search before the
+/// frontier was exhausted. The flag matters because a truncated set is otherwise indistinguishable
+/// from a complete one — and the cap deciding the answer is exactly what makes a dense graph's
+/// results unreproducible.
+///
+/// Two honest limits on the pair. `truncated` says the walk STOPPED EARLY, not that unexplored nodes
+/// would have yielded new facts: when the cap equals the size of the complete set, the queue still
+/// holds already-discovered nodes and the flag goes up although nothing was lost. And `visit_cap` is
+/// a floor, not a ceiling — it is checked once per popped fact, so `facts.len()` can overshoot it by
+/// one fact's whole fan-out. Both are conservative in the safe direction (never a silent truncation),
+/// and tightening either would change which facts a capped search returns, which is a retrieval
+/// change and not this fix.
 pub struct Reached {
     pub facts: HashSet<String>,
     pub truncated: bool,
@@ -247,10 +256,16 @@ pub fn compose(
             Candidate { id, label, score }
         })
         .collect();
+    // Break ties by id. Candidates arrive from a `HashSet` and a tie is the NORMAL case — every fact
+    // that shares no query token scores exactly 0.0 — so a score-only comparison left the closing
+    // `truncate(k)` picking whichever facts hash order happened to put first, which made the top-k
+    // differ between two calls over the same graph. Determinism in `reachable` is worth nothing if
+    // the ranking above it re-introduces hash order.
     scored.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.id.cmp(&b.id))
     });
     scored.truncate(k);
     Ok(scored)
@@ -258,15 +273,28 @@ pub fn compose(
 
 /// Seed mass for a resolve result. A `Ranked` result carries real information in its order, so mass
 /// decays with position. An `ExactLabel` result does not — its members are near-duplicates sharing a
-/// label, emitted in whatever order SQLite chose — so they share `base` equally. Weighting those by
+/// label, emitted in whatever order SQLite chose — so they SPLIT `base` equally. Weighting those by
 /// position handed the whole mass to whichever row came out first, which is a query-plan detail, not
 /// a relevance signal.
+///
+/// Splitting rather than replicating `base` is deliberate: `push_estimate` normalizes by the summed
+/// seed total, and `compose_ppr`'s default path sums the query and anchor maps into ONE push, so
+/// giving each of m duplicates the full `base` would have handed the query m× its former share of
+/// the restart mass and quietly demoted the anchor. The total a resolve result contributes must not
+/// depend on how many near-duplicate rows the corpus happens to hold — that is the same class of
+/// artifact as the row order this function exists to stop trusting. For the common single-match case
+/// both readings agree, so nothing moves there.
 fn seed_weights(ids: &[String], kind: ResolveKind, base: f32) -> HashMap<String, f32> {
     let mut out: HashMap<String, f32> = HashMap::new();
     match kind {
         ResolveKind::ExactLabel => {
+            let share = if ids.is_empty() {
+                base
+            } else {
+                base / ids.len() as f32
+            };
             for id in ids {
-                *out.entry(id.clone()).or_default() += base;
+                *out.entry(id.clone()).or_default() += share;
             }
         }
         ResolveKind::Ranked => {
@@ -290,8 +318,11 @@ pub fn compose_ppr(
     query: &str,
     k: usize,
 ) -> anyhow::Result<Vec<Candidate>> {
-    // Two SEPARATE seed maps (today's code summed them into one). The query gets BM25-rank mass;
-    // the anchor `name` — the reader's second endpoint — gets a strong boost.
+    // Two SEPARATE seed maps (today's code summed them into one). The query gets BM25-rank mass; the
+    // anchor `name` — the reader's second endpoint — gets 2.0 per resolved node. That is a boost
+    // relative to any single query seed, but not to the query as a whole: the summed path normalizes
+    // by the total, so the balance depends on how many nodes each side resolves to (see
+    // `seed_weights`, which keeps a resolve result's total independent of its duplicate count).
     // `take(20)`/`take(5)` bound the near-duplicate fan-out of an exact-label match (which returns
     // EVERY node sharing the label). They are not a ranking cut: the fuzzy path already returns at
     // most 10, so on that path the query cap never fires.
@@ -557,6 +588,24 @@ mod tests {
         assert!((w["c"] - first).abs() < 1e-6, "{w:?}");
     }
 
+    /// Review finding: how many near-duplicate rows happen to share a label must not decide how
+    /// much RESTART MASS the query contributes. `push_estimate` normalizes by the summed seed total
+    /// (`ppr.rs`), and `compose_ppr`'s default path sums the query and anchor maps into one push, so
+    /// a 20-way exact match contributing 20.0 would cut the anchor's share of the walk from ~36% to
+    /// ~9%. That is a silent re-weighting of retrieval, not the duplicate split this fix is about.
+    #[test]
+    fn exact_label_seed_mass_is_invariant_to_duplicate_count() {
+        let sum = |w: &HashMap<String, f32>| w.values().sum::<f32>();
+        let one = seed_weights(&["a".into()], ResolveKind::ExactLabel, 1.0);
+        let many = seed_weights(
+            &["a".into(), "b".into(), "c".into(), "d".into()],
+            ResolveKind::ExactLabel,
+            1.0,
+        );
+        assert!((sum(&one) - 1.0).abs() < 1e-6, "{one:?}");
+        assert!((sum(&many) - 1.0).abs() < 1e-6, "{many:?}");
+    }
+
     #[test]
     fn ranked_seeds_still_decay_by_position() {
         let w = seed_weights(&["a".into(), "b".into()], ResolveKind::Ranked, 1.0);
@@ -616,6 +665,37 @@ mod tests {
             "heavier ppr weight wins: {:?}",
             out.iter().map(|c| (&c.id, c.score)).collect::<Vec<_>>()
         );
+    }
+
+    /// Review finding: a deterministic `reachable` is not enough. `compose` collects its candidates
+    /// in a `HashSet` and sorted them by SCORE ALONE — and a tie is the normal case, since every fact
+    /// sharing no query token scores exactly 0.0. `sort_by` is stable, so ties kept hash order and
+    /// the closing `truncate(k)` returned a different top-k on each call over the same graph: the
+    /// very symptom Task 2 exists to remove.
+    #[test]
+    fn compose_top_k_is_deterministic_across_calls() {
+        let d = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(d.path()).unwrap();
+        // 20 facts on one anchor alias, none carrying a query token: all score 0.0, so the top-5 is
+        // decided purely by the tie-break.
+        for i in 0..20 {
+            fact(&g, &format!("f{i}"), "filler item", &["Widget"]);
+        }
+        let idx = build_alias_index(&g).unwrap();
+        let ids = || -> Vec<String> {
+            compose(&g, &idx, &["Widget"], "unrelated question terms", 5, 25)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.id)
+                .collect()
+        };
+        let first = ids();
+        assert_eq!(first.len(), 5, "{first:?}");
+        // Every call builds its own HashSet, hence its own RandomState: without a tie-break the
+        // order differs between calls. A handful of repeats turns "likely red" into "certainly red".
+        for _ in 0..5 {
+            assert_eq!(ids(), first, "top-k must not depend on hash order");
+        }
     }
 
     fn prov() -> Provenance {
