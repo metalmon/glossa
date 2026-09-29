@@ -3524,6 +3524,7 @@ dependencies = [
  "tower_governor",
  "tracing",
  "tracing-subscriber",
+ "ureq 2.12.1",
  "walkdir",
  "windows-service",
  "zip 8.6.0",

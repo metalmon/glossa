@@ -25,6 +25,7 @@ rdocx = "0.1"
 tantivy = { version = "0.26", default-features = false, features = ["mmap", "lz4-compression", "stemmer", "stopwords"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
 rust-stemmers = "1.2"
 rusqlite = { version = "0.40", features = ["bundled", "hooks", "functions"] }
 toml = "1.1"
@@ -90,6 +91,9 @@ sd-notify = "0.4"
 # standard release binary by default (no need for `--features constraint` to pull it in).
 default = ["notebook"]
 notebook = []
+# Light remote HTTP scorer clients (`HttpNli`/`HttpReranker`) — ureq + serde only, NO ORT/CUDA/tokio,
+# so a remote-only host carries zero ML deps. Sync (the scorer call site is already spawn_blocking).
+http-scorer = ["dep:ureq"]
 # End-to-end tests that spawn the real `kb` binary and drive it over real sockets (tests/e2e_*.rs
 # + tests/e2e/harness.rs). OFF by default so a normal `cargo test` is completely unaffected; opt in
 # with `--features e2e` (add `,tls` for the HTTPS/mTLS e2e). Carries no extra deps of its own.
