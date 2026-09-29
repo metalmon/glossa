@@ -82,6 +82,7 @@ mod engine {
         pub rerank_variant: Option<String>,
         pub ready: AtomicBool,
         pub api_key: Option<String>,
+        pub allowed_host: Vec<String>,
         pub max_concurrency: Option<usize>,
         pub in_flight: AtomicUsize,
         // Resolved dirs + load params, consumed by warm().
@@ -124,6 +125,7 @@ mod engine {
             rerank_variant: rerank_dir.as_ref().map(|_| args.rerank_variant.clone()),
             ready: AtomicBool::new(false),
             api_key: args.effective_auth()?,
+            allowed_host: args.allowed_host.clone(),
             max_concurrency: args.max_concurrency,
             in_flight: AtomicUsize::new(0),
             nli_dir,

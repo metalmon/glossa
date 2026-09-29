@@ -64,12 +64,22 @@ pub struct ServeArgs {
     #[arg(long = "tls-client-ca", env = "GLOSSA_INFER_TLS_CLIENT_CA")]
     pub tls_client_ca: Option<PathBuf>,
     /// Hard cap on concurrent in-flight requests; over it ⇒ HTTP 429. Unset ⇒ no cap (requests
-    /// queue on the pool). (`--allowed-host`, CORS, and a request timeout are Phase-2, with TLS.)
+    /// queue on the model session).
     #[arg(long = "max-concurrency")]
     pub max_concurrency: Option<usize>,
     /// Max request body size (bytes).
     #[arg(long = "max-body-bytes", default_value_t = 4 * 1024 * 1024)]
     pub max_body_bytes: usize,
+    /// Allowed `Host` header value(s); repeat to allow several. Empty ⇒ any Host (default). A
+    /// request whose Host is not on a non-empty list gets 403 (DNS-rebinding / Host-confusion guard).
+    #[arg(long = "allowed-host")]
+    pub allowed_host: Vec<String>,
+    /// CORS allowed origin(s); repeat to allow several. Empty ⇒ permissive (`Any`, no credentials).
+    #[arg(long = "cors-allow-origin")]
+    pub cors_allow_origin: Vec<String>,
+    /// Per-request timeout in seconds; a request exceeding it gets HTTP 408 (default 60).
+    #[arg(long = "request-timeout-secs", default_value_t = 60)]
+    pub request_timeout_secs: u64,
     /// Internal: launched under the Windows Service control manager.
     #[arg(long = "windows-service", hide = true)]
     pub windows_service: bool,
@@ -92,15 +102,17 @@ impl ServeArgs {
         resolve_key(self.api_key.as_deref(), self.api_key_file.as_deref())
     }
 
-    /// The TLS file set: `Some` only when BOTH `--tls-cert` and `--tls-key` are given (optionally
-    /// with `--tls-client-ca` for mTLS); giving only one is a config error. `None` ⇒ plain HTTP.
-    pub fn tls_files(&self) -> anyhow::Result<Option<glossa::tls::TlsFiles>> {
+    /// Validated TLS paths: `Some((cert, key, client_ca))` only when BOTH `--tls-cert` and
+    /// `--tls-key` are given (optionally with `--tls-client-ca` for mTLS); giving only one is a
+    /// config error. `None` ⇒ plain HTTP. Returns paths (not `glossa::tls::TlsFiles`) so this stays
+    /// in the always-compiled clap struct — the `glossa::tls` type is only referenced in the
+    /// feature-gated serve path, which builds `TlsFiles` from these paths.
+    #[allow(clippy::type_complexity)]
+    pub fn tls_paths(&self) -> anyhow::Result<Option<(PathBuf, PathBuf, Option<PathBuf>)>> {
         match (&self.tls_cert, &self.tls_key) {
-            (Some(cert), Some(key)) => Ok(Some(glossa::tls::TlsFiles {
-                cert: cert.clone(),
-                key: key.clone(),
-                client_ca: self.tls_client_ca.clone(),
-            })),
+            (Some(cert), Some(key)) => {
+                Ok(Some((cert.clone(), key.clone(), self.tls_client_ca.clone())))
+            }
             (None, None) => Ok(None),
             _ => anyhow::bail!("--tls-cert and --tls-key must be given together"),
         }

@@ -25,7 +25,13 @@ fn main() -> anyhow::Result<()> {
     let has_auth = args.effective_auth()?.is_some();
     // TLS: Some only when both cert+key are given (bail on only one). A TLS bind is
     // auth-at-transport, so it satisfies the non-loopback interlock the same way an api-key does.
-    let tls = args.tls_files()?;
+    let tls = args
+        .tls_paths()?
+        .map(|(cert, key, client_ca)| glossa::tls::TlsFiles {
+            cert,
+            key,
+            client_ca,
+        });
     anyhow::ensure!(
         guard::interlock_ok(&args.bind, has_auth, tls.is_some(), args.insecure),
         "refusing non-loopback bind {} without authentication or TLS (use --insecure to override)",
@@ -77,11 +83,37 @@ fn main() -> anyhow::Result<()> {
             });
         }
 
+        // CORS: permissive (Any origin, no credentials) when no origins are configured, else an
+        // explicit allow-list.
+        let cors = if args.cors_allow_origin.is_empty() {
+            tower_http::cors::CorsLayer::permissive()
+        } else {
+            let origins: Vec<axum::http::HeaderValue> = args
+                .cors_allow_origin
+                .iter()
+                .filter_map(|o| o.parse().ok())
+                .collect();
+            tower_http::cors::CorsLayer::new()
+                .allow_origin(origins)
+                .allow_methods(tower_http::cors::Any)
+                .allow_headers(tower_http::cors::Any)
+        };
+        let timeout = tower_http::timeout::TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            std::time::Duration::from_secs(args.request_timeout_secs),
+        );
+
         let app = handlers::router(st.clone())
             .layer(axum::middleware::from_fn_with_state(
                 st.clone(),
                 guard::auth_layer,
             ))
+            .layer(axum::middleware::from_fn_with_state(
+                st.clone(),
+                guard::host_layer,
+            ))
+            .layer(cors)
+            .layer(timeout)
             .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes));
 
         match tls {

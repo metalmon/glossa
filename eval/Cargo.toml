@@ -93,6 +93,7 @@ reqwest = { version = "0.13", features = ["json"] }
 # Shared multi-thread runtime so the (still-sync) agent loop can `block_on` reqwest's async calls.
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+tower-http = { version = "0.7", features = ["cors", "timeout"] }
 axum = "0.8"
 uuid = { version = "1", features = ["v7"] }
 rand = "0.8"

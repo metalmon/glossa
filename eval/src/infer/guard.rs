@@ -9,6 +9,22 @@ pub fn interlock_ok(bind: &str, has_auth: bool, tls_active: bool, insecure: bool
     glossa::serve_guard::interlock_refuses(bind, has_auth, tls_active, insecure).is_none()
 }
 
+/// Host-header allowlist decision: an empty allowlist allows all (default); otherwise the request's
+/// Host header (port ignored) must match one entry. A missing Host against a non-empty allowlist is
+/// refused. Guards against DNS-rebinding / Host-confusion when the server is publicly reachable.
+pub fn host_allowed(host: Option<&str>, allowed: &[String]) -> bool {
+    if allowed.is_empty() {
+        return true;
+    }
+    match host {
+        Some(h) => {
+            let bare = h.split(':').next().unwrap_or(h);
+            allowed.iter().any(|a| a == bare)
+        }
+        None => false,
+    }
+}
+
 /// Per-request auth decision: `/health` and `/ready` are exempt; with a key configured, require the
 /// Bearer token (constant-time, reusing `glossa::mcp_auth::bearer_ok`); with no key, open (the
 /// interlock already guards public binds).
@@ -28,7 +44,7 @@ pub fn auth_ok(path: &str, auth_header: Option<&str>, key: Option<&str>) -> bool
     feature = "nli-cuda",
     feature = "nli-rocm"
 ))]
-pub use layer::auth_layer;
+pub use layer::{auth_layer, host_layer};
 
 #[cfg(any(
     feature = "nli-directml",
@@ -44,7 +60,7 @@ mod layer {
     use axum::middleware::Next;
     use axum::response::Response;
 
-    use super::auth_ok;
+    use super::{auth_ok, host_allowed};
     use crate::infer::state::ServerState;
 
     /// Reject with 401 unless `auth_ok`. Mounted via `from_fn_with_state`.
@@ -63,6 +79,25 @@ mod layer {
             Ok(next.run(req).await)
         } else {
             Err(StatusCode::UNAUTHORIZED)
+        }
+    }
+
+    /// Reject with 403 unless the request's Host header passes the allowlist (`host_allowed`).
+    /// Mounted via `from_fn_with_state`; a no-op when the allowlist is empty.
+    pub async fn host_layer(
+        State(st): State<Arc<ServerState>>,
+        req: Request,
+        next: Next,
+    ) -> Result<Response, StatusCode> {
+        let host = req
+            .headers()
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        if host_allowed(host.as_deref(), &st.allowed_host) {
+            Ok(next.run(req).await)
+        } else {
+            Err(StatusCode::FORBIDDEN)
         }
     }
 }
@@ -86,6 +121,24 @@ mod tests {
         assert!(!interlock_ok("0.0.0.0:8071", false, false, false)); // neither -> refuse
         assert!(interlock_ok("0.0.0.0:8071", true, false, false)); // auth only
         assert!(interlock_ok("127.0.0.1:8071", false, false, false)); // loopback
+    }
+
+    #[test]
+    fn host_allowed_matches_allowlist_or_all_when_empty() {
+        assert!(host_allowed(Some("scorer.example.com"), &[])); // empty => all
+        assert!(host_allowed(
+            Some("scorer.example.com"),
+            &["scorer.example.com".into()]
+        ));
+        assert!(host_allowed(
+            Some("scorer.example.com:8071"),
+            &["scorer.example.com".into()]
+        )); // port ignored
+        assert!(!host_allowed(
+            Some("evil.example.com"),
+            &["scorer.example.com".into()]
+        ));
+        assert!(!host_allowed(None, &["scorer.example.com".into()])); // missing Host, non-empty list
     }
 
     #[test]
