@@ -91,10 +91,9 @@ mod engine {
         entail_index: usize,
         nli_workers: usize,
         rerank_workers: usize,
-        nli_eps: Vec<String>,
-        rerank_eps: Vec<String>,
-        ep_device: Option<i32>,
-        ep_mem_limit_mb: Option<usize>,
+        providers: Vec<String>,
+        gpu_id: Option<i32>,
+        gpu_mem_mb: Option<usize>,
     }
 
     /// Resolve model dirs (downloading a variant if only a repo is given) and return a
@@ -135,18 +134,9 @@ mod engine {
             entail_index: args.entail_index,
             nli_workers: args.nli_workers.max(1),
             rerank_workers: args.rerank_workers.max(1),
-            nli_eps: if args.nli_ep.is_empty() {
-                args.ep.clone()
-            } else {
-                args.nli_ep.clone()
-            },
-            rerank_eps: if args.rerank_ep.is_empty() {
-                args.ep.clone()
-            } else {
-                args.rerank_ep.clone()
-            },
-            ep_device: args.ep_device,
-            ep_mem_limit_mb: args.ep_mem_limit_mb,
+            providers: glossa::config_util::expand_device(args.device.as_deref()),
+            gpu_id: args.gpu_id,
+            gpu_mem_mb: args.gpu_mem_mb,
         })
     }
 
@@ -161,9 +151,9 @@ mod engine {
                 let ep = probe_gpu_ep(
                     d,
                     self.entail_index,
-                    &self.nli_eps,
-                    self.ep_device,
-                    self.ep_mem_limit_mb,
+                    &self.providers,
+                    self.gpu_id,
+                    self.gpu_mem_mb,
                 )
                 .ok()
                 .flatten();
@@ -172,9 +162,9 @@ mod engine {
                     sessions.push(InProcessNli::load(
                         d,
                         self.entail_index,
-                        &self.nli_eps,
-                        self.ep_device,
-                        self.ep_mem_limit_mb,
+                        &self.providers,
+                        self.gpu_id,
+                        self.gpu_mem_mb,
                     )?);
                 }
                 *self.nli.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -182,16 +172,16 @@ mod engine {
                 *self.nli_ep.lock().unwrap_or_else(|e| e.into_inner()) = ep;
             }
             if let Some(d) = &self.rerank_dir {
-                let ep = probe_rerank_ep(d, &self.rerank_eps, self.ep_device, self.ep_mem_limit_mb)
+                let ep = probe_rerank_ep(d, &self.providers, self.gpu_id, self.gpu_mem_mb)
                     .ok()
                     .flatten();
                 let mut sessions = Vec::new();
                 for _ in 0..self.rerank_workers {
                     sessions.push(InProcessReranker::load(
                         d,
-                        &self.rerank_eps,
-                        self.ep_device,
-                        self.ep_mem_limit_mb,
+                        &self.providers,
+                        self.gpu_id,
+                        self.gpu_mem_mb,
                     )?);
                 }
                 *self.rerank.lock().unwrap_or_else(|e| e.into_inner()) =

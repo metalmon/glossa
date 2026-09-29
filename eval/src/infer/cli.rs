@@ -41,21 +41,16 @@ pub struct ServeArgs {
     /// Reranker session-pool size (default 2). Same Phase-1 serialization note as `--nli-workers`.
     #[arg(long = "rerank-workers", default_value_t = 2)]
     pub rerank_workers: usize,
-    /// Shared execution-provider preference (comma-join or repeat), e.g. `--ep cuda,cpu`.
-    #[arg(long = "ep", value_delimiter = ',')]
-    pub ep: Vec<String>,
-    /// NLI-only EP override (falls back to `--ep`).
-    #[arg(long = "nli-ep", value_delimiter = ',')]
-    pub nli_ep: Vec<String>,
-    /// Reranker-only EP override (falls back to `--ep`).
-    #[arg(long = "rerank-ep", value_delimiter = ',')]
-    pub rerank_ep: Vec<String>,
-    /// GPU device id the EP binds to.
-    #[arg(long = "ep-device")]
-    pub ep_device: Option<i32>,
-    /// GPU arena memory cap (MB) for the EP.
-    #[arg(long = "ep-mem-limit-mb")]
-    pub ep_mem_limit_mb: Option<usize>,
+    /// Device: `cpu` | `cuda` | `directml` | `rocm` (default: a GPU provider if compiled in, else
+    /// `cpu`). CPU fallback is automatic.
+    #[arg(long = "device")]
+    pub device: Option<String>,
+    /// GPU device id the provider binds to.
+    #[arg(long = "gpu-id")]
+    pub gpu_id: Option<i32>,
+    /// GPU arena memory cap (MB) for the provider.
+    #[arg(long = "gpu-mem-mb")]
+    pub gpu_mem_mb: Option<usize>,
     /// Bearer api-key required on every request (except /health, /ready).
     #[arg(long = "api-key", env = "GLOSSA_INFER_API_KEY")]
     pub api_key: Option<String>,

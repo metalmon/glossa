@@ -473,21 +473,20 @@ enum NliCmd {
         /// calibrated thresholds (`kbx eval calibrate`) to actually fire; `set` only wires the model.
         #[arg(long)]
         mode: Option<String>,
-        /// Ordered execution-provider preference list for a later task's GPU EP registration
-        /// (this task only writes the config). Repeat the flag or comma-join a single value, e.g.
-        /// `--ep cuda,cpu` or `--ep cuda --ep cpu` (each occurrence is comma-split too). Written to
-        /// `[verify.nli].execution_providers` only if given.
-        #[arg(long = "ep")]
-        ep: Vec<String>,
-        /// GPU device id the CUDA/DirectML/ROCm EP binds to. Written to `[verify.nli].ep_device`
+        /// Compute device: `cpu` | `cuda` | `directml` | `rocm`. A single value with automatic
+        /// CPU fallback (e.g. `--device cuda` runs on GPU, falling back to CPU). Written to
+        /// `[verify.nli].device` only if given.
+        #[arg(long = "device")]
+        device: Option<String>,
+        /// GPU device id the CUDA/DirectML/ROCm EP binds to. Written to `[verify.nli].gpu_id`
         /// only if given; unset leaves the EP on its default device (today's behavior).
-        #[arg(long = "ep-device")]
-        ep_device: Option<i32>,
+        #[arg(long = "gpu-id")]
+        gpu_id: Option<i32>,
         /// GPU arena memory cap in MB for the NLI EP, so NLI can share a GPU with an LLM. Written to
-        /// `[verify.nli].ep_mem_limit_mb` only if given. Effective on CUDA (memory limit + arena);
+        /// `[verify.nli].gpu_mem_mb` only if given. Effective on CUDA (memory limit + arena);
         /// ROCm honors only arena growth; DirectML/CoreML expose no memory option in this ort build.
-        #[arg(long = "ep-mem-limit-mb")]
-        ep_mem_limit_mb: Option<usize>,
+        #[arg(long = "gpu-mem-mb")]
+        gpu_mem_mb: Option<usize>,
     },
 }
 
@@ -506,18 +505,17 @@ enum RerankCmd {
         /// remote scorer with `--endpoint`.
         #[arg(long = "model-dir")]
         model_dir: Option<PathBuf>,
-        /// Ordered execution-provider preference list. Repeat the flag or comma-join a single
-        /// value, e.g. `--ep cuda,cpu` or `--ep cuda --ep cpu` (each occurrence is comma-split
-        /// too).
-        #[arg(long = "ep")]
-        ep: Vec<String>,
+        /// Compute device: `cpu` | `cuda` | `directml` | `rocm`. A single value with automatic
+        /// CPU fallback (e.g. `--device cuda` runs on GPU, falling back to CPU).
+        #[arg(long = "device")]
+        device: Option<String>,
         /// GPU device id the CUDA/DirectML/ROCm EP binds to.
-        #[arg(long = "ep-device")]
-        ep_device: Option<i32>,
+        #[arg(long = "gpu-id")]
+        gpu_id: Option<i32>,
         /// GPU arena memory cap in MB for the reranker EP, so it can share a GPU with an LLM or
         /// the NLI verifier.
-        #[arg(long = "ep-mem-limit-mb")]
-        ep_mem_limit_mb: Option<usize>,
+        #[arg(long = "gpu-mem-mb")]
+        gpu_mem_mb: Option<usize>,
         /// Probe a REMOTE reranker (inference-server / TEI) at this base URL instead of a local
         /// model dir. Reports reachability + the inversion guard.
         #[arg(long = "endpoint")]
@@ -554,7 +552,7 @@ enum RerankCmd {
         #[arg(long)]
         int8: bool,
     },
-    /// Write `[rerank]` (model_dir + scorer, optional pool_size/execution_providers/ep_*) into the
+    /// Write `[rerank]` (model_dir + scorer, optional pool_size/device/gpu_*) into the
     /// corpus `ontology.toml`, preserving all other tables/comments. Pairs with `download` + `check`.
     Set {
         /// Corpus root (kb-style PATH resolution, like `nli set`).
@@ -568,17 +566,17 @@ enum RerankCmd {
         /// Candidate pool size to rerank; written to `[rerank].pool_size` only if given.
         #[arg(long = "pool-size")]
         pool_size: Option<usize>,
-        /// Ordered execution-provider preference list. Repeat or comma-join (`--ep cuda,cpu`).
-        /// Written to `[rerank].execution_providers` only if given.
-        #[arg(long = "ep")]
-        ep: Vec<String>,
-        /// GPU device id the EP binds to. Written to `[rerank].ep_device` only if given.
-        #[arg(long = "ep-device")]
-        ep_device: Option<i32>,
-        /// GPU arena memory cap in MB for the reranker EP. Written to `[rerank].ep_mem_limit_mb`
+        /// Compute device: `cpu` | `cuda` | `directml` | `rocm`. A single value with automatic
+        /// CPU fallback. Written to `[rerank].device` only if given.
+        #[arg(long = "device")]
+        device: Option<String>,
+        /// GPU device id the EP binds to. Written to `[rerank].gpu_id` only if given.
+        #[arg(long = "gpu-id")]
+        gpu_id: Option<i32>,
+        /// GPU arena memory cap in MB for the reranker EP. Written to `[rerank].gpu_mem_mb`
         /// only if given.
-        #[arg(long = "ep-mem-limit-mb")]
-        ep_mem_limit_mb: Option<usize>,
+        #[arg(long = "gpu-mem-mb")]
+        gpu_mem_mb: Option<usize>,
     },
 }
 
@@ -934,38 +932,27 @@ fn main() -> Result<()> {
                     scorer,
                     entail_index,
                     mode,
-                    ep,
-                    ep_device,
-                    ep_mem_limit_mb,
+                    device,
+                    gpu_id,
+                    gpu_mem_mb,
                 },
-        } => {
-            // Each `--ep` occurrence may itself be comma-joined (`--ep cuda,cpu`); flatten both
-            // the repeated-flag and comma-joined forms into one ordered list.
-            let ep: Vec<String> = ep
-                .iter()
-                .flat_map(|s| s.split(','))
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect();
-            kb_eval::nli_check::nli_set(
-                path,
-                model_dir,
-                scorer,
-                entail_index,
-                mode,
-                ep,
-                ep_device,
-                ep_mem_limit_mb,
-            )
-        }
+        } => kb_eval::nli_check::nli_set(
+            path,
+            model_dir,
+            scorer,
+            entail_index,
+            mode,
+            device,
+            gpu_id,
+            gpu_mem_mb,
+        ),
         Cmd::Rerank {
             cmd:
                 RerankCmd::Check {
                     model_dir,
-                    ep,
-                    ep_device,
-                    ep_mem_limit_mb,
+                    device,
+                    gpu_id,
+                    gpu_mem_mb,
                     endpoint,
                     timeout_ms,
                     api_key,
@@ -989,16 +976,7 @@ fn main() -> Result<()> {
                     );
                 }
             } else if let Some(model_dir) = model_dir {
-                // Each `--ep` occurrence may itself be comma-joined (`--ep cuda,cpu`); flatten both
-                // the repeated-flag and comma-joined forms into one ordered list (mirrors `nli set`).
-                let ep: Vec<String> = ep
-                    .iter()
-                    .flat_map(|s| s.split(','))
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .collect();
-                kb_eval::rerank_check::rerank_check(model_dir, ep, ep_device, ep_mem_limit_mb)
+                kb_eval::rerank_check::rerank_check(model_dir, device, gpu_id, gpu_mem_mb)
             } else {
                 anyhow::bail!("pass --model-dir <dir> (local) or --endpoint <url> (remote)")
             }
@@ -1021,29 +999,19 @@ fn main() -> Result<()> {
                     model_dir,
                     scorer,
                     pool_size,
-                    ep,
-                    ep_device,
-                    ep_mem_limit_mb,
+                    device,
+                    gpu_id,
+                    gpu_mem_mb,
                 },
-        } => {
-            // Flatten repeated + comma-joined `--ep` into one ordered list (mirrors `nli set`).
-            let ep: Vec<String> = ep
-                .iter()
-                .flat_map(|s| s.split(','))
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect();
-            kb_eval::rerank_check::rerank_set(
-                path,
-                model_dir,
-                scorer,
-                pool_size,
-                ep,
-                ep_device,
-                ep_mem_limit_mb,
-            )
-        }
+        } => kb_eval::rerank_check::rerank_set(
+            path,
+            model_dir,
+            scorer,
+            pool_size,
+            device,
+            gpu_id,
+            gpu_mem_mb,
+        ),
     }
 }
 

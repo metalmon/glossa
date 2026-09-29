@@ -6,7 +6,7 @@
 //!
 //! Unlike `nli check`, this diagnostic does not resolve a corpus's `[verify.nli]`/`[rerank]`
 //! config — the reranker has no corpus-side "is it wired for THIS corpus" question the way the
-//! NLI grounding verifier does, so `--model-dir`/`--ep`/`--ep-device`/`--ep-mem-limit-mb` are
+//! NLI grounding verifier does, so `--model-dir`/`--device`/`--gpu-id`/`--gpu-mem-mb` are
 //! taken directly as flags (mirroring `kbx nli set`'s flag names/shapes).
 
 use std::path::{Path, PathBuf};
@@ -36,7 +36,7 @@ fn engine_label() -> &'static str {
     }
 }
 
-/// `kbx rerank check --model-dir <dir> [--ep ...] [--ep-device N] [--ep-mem-limit-mb N]`: probe
+/// `kbx rerank check --model-dir <dir> [--device D] [--gpu-id N] [--gpu-mem-mb N]`: probe
 /// the configured execution provider the same STRICT way `kbx nli check` does
 /// (`glossa_nli::probe_rerank_ep`, which builds a session with `.error_on_failure()` so a GPU EP
 /// that can't register is reported rather than silently falling back to CPU), then load
@@ -54,9 +54,9 @@ fn engine_label() -> &'static str {
 /// `Err`, matching `nli_check`'s IO-vs-diagnosis split).
 pub fn rerank_check(
     model_dir: PathBuf,
-    ep: Vec<String>,
-    ep_device: Option<i32>,
-    ep_mem_limit_mb: Option<usize>,
+    device: Option<String>,
+    gpu_id: Option<i32>,
+    gpu_mem_mb: Option<usize>,
 ) -> Result<()> {
     println!("engine         = {}", engine_label());
     println!("model_dir      = {}", model_dir.display());
@@ -68,11 +68,14 @@ pub fn rerank_check(
         feature = "nli-rocm",
     ))]
     {
+        // `--device` is a single value with auto-CPU fallback; expand to the provider list the
+        // ORT probe/loader consume (e.g. `cuda` -> `["cuda", "cpu"]`, `None` -> `["cpu"]`).
+        let ep = glossa::config_util::expand_device(device.as_deref());
         // GPU execution-provider probe: `InProcessReranker::load` is fail-open (no
         // `.error_on_failure()`), so a GPU build that can't load its runtime silently runs on CPU
         // with no signal. This STRICT probe reports whether the configured GPU EP ACTUALLY
         // initialized — mirrors `nli_check`'s `probe_gpu_ep` block exactly.
-        match glossa_nli::probe_rerank_ep(&model_dir, &ep, ep_device, ep_mem_limit_mb) {
+        match glossa_nli::probe_rerank_ep(&model_dir, &ep, gpu_id, gpu_mem_mb) {
             Ok(Some(name)) => println!("ep_active      = {name} (initialized)"),
             Ok(None) => println!("ep_active      = cpu (no GPU EP configured)"),
             Err(e) => {
@@ -96,7 +99,7 @@ pub fn rerank_check(
         let irrelevant = "Bananas are a good source of potassium.";
 
         let reranker =
-            glossa_nli::InProcessReranker::load(&model_dir, &ep, ep_device, ep_mem_limit_mb)?;
+            glossa_nli::InProcessReranker::load(&model_dir, &ep, gpu_id, gpu_mem_mb)?;
         let scores = reranker.rerank(query, &[relevant, irrelevant])?;
         match scores.as_slice() {
             [rel_score, irr_score, ..] => {
@@ -122,9 +125,9 @@ pub fn rerank_check(
     #[cfg(any(feature = "nli-burn", feature = "nli-burn-cpu"))]
     {
         // burn/wgpu engine: the backend selects its own device, so there is no EP to probe —
-        // `engine_label()` above already reported which backend is compiled in. `ep`/`ep_device`/
-        // `ep_mem_limit_mb` are ORT-only knobs and are ignored here.
-        let _ = (&ep, ep_device, ep_mem_limit_mb);
+        // `engine_label()` above already reported which backend is compiled in. `device`/`gpu_id`/
+        // `gpu_mem_mb` are ORT-only knobs and are ignored here.
+        let _ = (&device, gpu_id, gpu_mem_mb);
 
         // Fixed, language-neutral, generic sanity pair — no corpus/gold values (see
         // [[no-corpus-values-in-sop]]): a capital-city fact (relevant) vs. an unrelated fruit fact
@@ -165,7 +168,7 @@ pub fn rerank_check(
         feature = "nli-burn-cpu",
     )))]
     {
-        let _ = (ep, ep_device, ep_mem_limit_mb);
+        let _ = (device, gpu_id, gpu_mem_mb);
         println!(
             "=> not ready: reranker not available in this kbx build (the reranker itself is \
              CPU-capable in glossa, but this binary wasn't built with a feature that pulls it \
@@ -177,8 +180,8 @@ pub fn rerank_check(
     Ok(())
 }
 
-/// `kbx rerank set`: write `[rerank]` (model_dir + scorer, + pool_size / execution_providers /
-/// ep_device / ep_mem_limit_mb when given, + `enabled = true`) into the corpus `ontology.toml` via
+/// `kbx rerank set`: write `[rerank]` (model_dir + scorer, + pool_size / device /
+/// gpu_id / gpu_mem_mb when given, + `enabled = true`) into the corpus `ontology.toml` via
 /// [`write_rerank_config`] and print what was written. Completes the `download` -> `set` -> `check`
 /// workflow so a user never hand-edits TOML. Mirrors [`crate::nli_check::nli_set`].
 #[allow(clippy::too_many_arguments)]
@@ -187,25 +190,20 @@ pub fn rerank_set(
     model_dir: PathBuf,
     scorer: String,
     pool_size: Option<usize>,
-    execution_providers: Vec<String>,
-    ep_device: Option<i32>,
-    ep_mem_limit_mb: Option<usize>,
+    device: Option<String>,
+    gpu_id: Option<i32>,
+    gpu_mem_mb: Option<usize>,
 ) -> Result<()> {
     let kbx_paths = crate::workspace::resolve(path);
     let glossa_dir = crate::workspace::glossa_dir(&kbx_paths.root);
-    let eps = if execution_providers.is_empty() {
-        None
-    } else {
-        Some(execution_providers.as_slice())
-    };
     write_rerank_config(
         &glossa_dir,
         &model_dir,
         &scorer,
         pool_size,
-        eps,
-        ep_device,
-        ep_mem_limit_mb,
+        device.as_deref(),
+        gpu_id,
+        gpu_mem_mb,
     )?;
 
     let ontology_path = glossa_dir.join("ontology.toml");
@@ -217,14 +215,14 @@ pub fn rerank_set(
     if let Some(p) = pool_size {
         println!("wrote [rerank] pool_size = {p}");
     }
-    if let Some(eps) = eps {
-        println!("wrote [rerank] execution_providers = {eps:?}");
+    if let Some(d) = &device {
+        println!("wrote [rerank] device = {d:?}");
     }
-    if let Some(id) = ep_device {
-        println!("wrote [rerank] ep_device = {id}");
+    if let Some(id) = gpu_id {
+        println!("wrote [rerank] gpu_id = {id}");
     }
-    if let Some(mb) = ep_mem_limit_mb {
-        println!("wrote [rerank] ep_mem_limit_mb = {mb}");
+    if let Some(mb) = gpu_mem_mb {
+        println!("wrote [rerank] gpu_mem_mb = {mb}");
     }
     println!(
         "run `kbx rerank check --model-dir {}` to confirm readiness.",
@@ -233,8 +231,8 @@ pub fn rerank_set(
     Ok(())
 }
 
-/// Write `[rerank].{enabled = true, scorer, model_dir}` (+ `pool_size` / `execution_providers` /
-/// `ep_device` / `ep_mem_limit_mb` when given) into `<glossa_dir>/ontology.toml`, preserving every
+/// Write `[rerank].{enabled = true, scorer, model_dir}` (+ `pool_size` / `device` /
+/// `gpu_id` / `gpu_mem_mb` when given) into `<glossa_dir>/ontology.toml`, preserving every
 /// other table/comment. Mirrors [`crate::nli_check::write_nli_config`]'s `toml_edit`
 /// preserve-other-keys pattern: parse existing (or empty) into a `DocumentMut`, mutate only the
 /// keys this function owns, write the whole document back.
@@ -244,11 +242,11 @@ pub fn write_rerank_config(
     model_dir: &Path,
     scorer: &str,
     pool_size: Option<usize>,
-    execution_providers: Option<&[String]>,
-    ep_device: Option<i32>,
-    ep_mem_limit_mb: Option<usize>,
+    device: Option<&str>,
+    gpu_id: Option<i32>,
+    gpu_mem_mb: Option<usize>,
 ) -> Result<()> {
-    use toml_edit::{value, Array, DocumentMut, Item, Table};
+    use toml_edit::{value, DocumentMut, Item, Table};
 
     let path = glossa_dir.join("ontology.toml");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
@@ -269,15 +267,14 @@ pub fn write_rerank_config(
     if let Some(p) = pool_size {
         rr["pool_size"] = value(p as i64);
     }
-    if let Some(eps) = execution_providers {
-        let arr: Array = eps.iter().map(String::as_str).collect();
-        rr["execution_providers"] = value(arr);
+    if let Some(d) = device {
+        rr["device"] = value(d);
     }
-    if let Some(id) = ep_device {
-        rr["ep_device"] = value(id as i64);
+    if let Some(id) = gpu_id {
+        rr["gpu_id"] = value(id as i64);
     }
-    if let Some(mb) = ep_mem_limit_mb {
-        rr["ep_mem_limit_mb"] = value(mb as i64);
+    if let Some(mb) = gpu_mem_mb {
+        rr["gpu_mem_mb"] = value(mb as i64);
     }
 
     std::fs::create_dir_all(glossa_dir)?;
@@ -353,7 +350,7 @@ mod tests {
             std::path::Path::new("/m"),
             "in_process",
             Some(40),
-            Some(&["cuda".to_string(), "cpu".to_string()]),
+            Some("cuda"),
             None,
             Some(1024),
         )
@@ -362,7 +359,8 @@ mod tests {
         assert!(s.contains("# keep me") && s.contains("[verify]") && s.contains("[retrieval]"));
         assert!(s.contains("[rerank]"));
         assert!(s.contains("scorer = \"in_process\"") && s.contains("model_dir = \"/m\""));
-        assert!(s.contains("pool_size = 40") && s.contains("ep_mem_limit_mb = 1024"));
+        assert!(s.contains("device = \"cuda\""));
+        assert!(s.contains("pool_size = 40") && s.contains("gpu_mem_mb = 1024"));
         assert!(s.contains("enabled = true"));
         let doc: toml_edit::DocumentMut = s.parse().unwrap();
         assert_eq!(doc["rerank"]["pool_size"].as_integer(), Some(40));

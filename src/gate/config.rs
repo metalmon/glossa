@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config_util::{env_bool, env_f32, env_i32, env_string, env_usize, normalize_eps};
+use crate::config_util::{env_bool, env_f32, env_i32, env_string, env_usize};
 use crate::gate::score::Bucket;
 use crate::graph::ontology::Ontology;
 
@@ -55,7 +55,7 @@ pub struct VerifyConfig {
     pub execution_providers: Vec<String>,
     /// Which GPU (device id) the CUDA/DirectML/ROCm EP binds to. `None` (unset) ⇒ each EP uses its
     /// own default (device 0), i.e. exactly today's behavior. Sourced from env
-    /// `GLOSSA_VERIFY_NLI_EP_DEVICE` (i32; non-integer ignored with a warning) else ontology
+    /// `GLOSSA_VERIFY_NLI_GPU_ID` (i32; non-integer ignored with a warning) else ontology
     /// `[verify.nli].ep_device`. CoreML ignores it (no device-id concept).
     pub execution_provider_device: Option<i32>,
     /// GPU arena memory cap in megabytes for the NLI EP. `None` (unset) ⇒ no memory options set, i.e.
@@ -63,7 +63,7 @@ pub struct VerifyConfig {
     /// bytes) + same-as-requested arena growth + disables the session memory-pattern optimizer, so
     /// NLI can share a GPU with an LLM. ROCm gets only the arena-growth change; DirectML/CoreML
     /// expose no memory option in this ort version and ignore it. Sourced from env
-    /// `GLOSSA_VERIFY_NLI_EP_MEM_LIMIT_MB` else ontology `[verify.nli].ep_mem_limit_mb`.
+    /// `GLOSSA_VERIFY_NLI_GPU_MEM_MB` else ontology `[verify.nli].ep_mem_limit_mb`.
     pub execution_provider_mem_limit_mb: Option<usize>,
     /// Remote scorer (`scorer = "http"`) endpoint base URL; `None` ⇒ `resolve_scorer` cannot build
     /// an `HttpNli` and fails open to `None`. Env `GLOSSA_VERIFY_NLI_HTTP_ENDPOINT`.
@@ -171,24 +171,23 @@ impl VerifyConfig {
             // Ordered EP preference list: env (comma-separated) wins wholesale over ontology, else
             // ontology's list, else empty — normalize_eps then defaults empty/all-unknown to
             // ["cpu"], so an unset deployment resolves to today's CPU-only behavior unchanged.
-            execution_providers: normalize_eps(
-                match env_string("GLOSSA_NLI_EP") {
-                    Some(v) => v.split(',').map(str::to_string).collect::<Vec<_>>(),
-                    None => ont
-                        .as_ref()
-                        .map(|o| o.verify_nli_execution_providers().to_vec())
-                        .unwrap_or_default(),
-                }
-                .into_iter(),
+            execution_providers: crate::config_util::expand_device(
+                env_string("GLOSSA_VERIFY_NLI_DEVICE")
+                    .or_else(|| {
+                        ont.as_ref()
+                            .and_then(|o| o.verify_nli_device())
+                            .map(str::to_string)
+                    })
+                    .as_deref(),
             ),
             // GPU device id: env wins, else ontology `[verify.nli].ep_device`, else None (default
             // device — today's behavior). Non-integer env value is dropped by `env_i32`.
-            execution_provider_device: env_i32("GLOSSA_VERIFY_NLI_EP_DEVICE")
-                .or_else(|| ont.as_ref().and_then(|o| o.verify_nli_ep_device())),
+            execution_provider_device: env_i32("GLOSSA_VERIFY_NLI_GPU_ID")
+                .or_else(|| ont.as_ref().and_then(|o| o.verify_nli_gpu_id())),
             // GPU memory cap (MB): env wins, else ontology `[verify.nli].ep_mem_limit_mb`, else None
             // (no memory options — today's behavior). Non-integer env value is dropped by env_usize.
-            execution_provider_mem_limit_mb: env_usize("GLOSSA_VERIFY_NLI_EP_MEM_LIMIT_MB")
-                .or_else(|| ont.as_ref().and_then(|o| o.verify_nli_ep_mem_limit_mb())),
+            execution_provider_mem_limit_mb: env_usize("GLOSSA_VERIFY_NLI_GPU_MEM_MB")
+                .or_else(|| ont.as_ref().and_then(|o| o.verify_nli_gpu_mem_mb())),
             endpoint: env_string("GLOSSA_VERIFY_NLI_HTTP_ENDPOINT").or_else(|| {
                 ont.as_ref()
                     .and_then(|o| o.verify_nli_endpoint())
@@ -446,6 +445,39 @@ mod tests {
     }
 
     #[test]
+    fn device_keys_resolve_from_ontology() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for k in [
+            "GLOSSA_VERIFY_NLI_DEVICE",
+            "GLOSSA_VERIFY_NLI_DEVICE",
+            "GLOSSA_VERIFY_NLI_GPU_ID",
+            "GLOSSA_VERIFY_NLI_GPU_ID",
+            "GLOSSA_VERIFY_NLI_GPU_MEM_MB",
+            "GLOSSA_VERIFY_NLI_GPU_MEM_MB",
+        ] {
+            std::env::remove_var(k);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[verify.nli]\nscorer=\"in_process\"\nmodel_dir=\"/x\"\ndevice=\"cuda\"\ngpu_id=1\ngpu_mem_mb=512\n",
+        )
+        .unwrap();
+        let c = VerifyConfig::resolve(&g);
+        // single `device` + auto CPU fallback -> the ordered provider list the engine wants
+        assert_eq!(
+            c.execution_providers,
+            vec!["cuda".to_string(), "cpu".to_string()]
+        );
+        assert_eq!(c.execution_provider_device, Some(1));
+        assert_eq!(c.execution_provider_mem_limit_mb, Some(512));
+    }
+
+    #[test]
     fn nli_scorer_config_defaults_when_absent() {
         let _env = crate::TEST_ENV_LOCK
             .lock()
@@ -465,14 +497,14 @@ mod tests {
         let _env = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("GLOSSA_NLI_EP");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_DEVICE");
         let dir = tempfile::tempdir().unwrap();
         let g = dir.path().join(".glossa");
         std::fs::create_dir_all(&g).unwrap();
         std::fs::write(
             g.join("ontology.toml"),
             "[verify]\nenabled=true\n\
-             [verify.nli]\nexecution_providers=[\"cuda\",\"cpu\"]\n",
+             [verify.nli]\ndevice=\"cuda\"\n",
         )
         .unwrap();
         let c = VerifyConfig::resolve(&g);
@@ -487,13 +519,13 @@ mod tests {
         let _env = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("GLOSSA_VERIFY_NLI_EP_DEVICE");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_GPU_ID");
         let dir = tempfile::tempdir().unwrap();
         let g = dir.path().join(".glossa");
         std::fs::create_dir_all(&g).unwrap();
         std::fs::write(
             g.join("ontology.toml"),
-            "[verify]\nenabled=true\n[verify.nli]\nep_device=1\n",
+            "[verify]\nenabled=true\n[verify.nli]\ngpu_id=1\n",
         )
         .unwrap();
         let c = VerifyConfig::resolve(&g);
@@ -505,7 +537,7 @@ mod tests {
         let _env = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("GLOSSA_VERIFY_NLI_EP_DEVICE");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_GPU_ID");
         let dir = tempfile::tempdir().unwrap(); // no .glossa/ontology.toml
         let c = VerifyConfig::resolve(dir.path());
         assert_eq!(c.execution_provider_device, None);
@@ -516,13 +548,13 @@ mod tests {
         let _env = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("GLOSSA_VERIFY_NLI_EP_MEM_LIMIT_MB");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_GPU_MEM_MB");
         let dir = tempfile::tempdir().unwrap();
         let g = dir.path().join(".glossa");
         std::fs::create_dir_all(&g).unwrap();
         std::fs::write(
             g.join("ontology.toml"),
-            "[verify]\nenabled=true\n[verify.nli]\nep_mem_limit_mb=512\n",
+            "[verify]\nenabled=true\n[verify.nli]\ngpu_mem_mb=512\n",
         )
         .unwrap();
         let c = VerifyConfig::resolve(&g);
@@ -534,7 +566,7 @@ mod tests {
         let _env = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("GLOSSA_VERIFY_NLI_EP_MEM_LIMIT_MB");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_GPU_MEM_MB");
         let dir = tempfile::tempdir().unwrap(); // no .glossa/ontology.toml
         let c = VerifyConfig::resolve(dir.path());
         assert_eq!(c.execution_provider_mem_limit_mb, None);
@@ -545,7 +577,7 @@ mod tests {
         let _env = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("GLOSSA_NLI_EP");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_DEVICE");
         let dir = tempfile::tempdir().unwrap(); // no .glossa/ontology.toml
         let c = VerifyConfig::resolve(dir.path());
         assert_eq!(c.execution_providers, vec!["cpu".to_string()]);
@@ -561,12 +593,12 @@ mod tests {
         std::fs::create_dir_all(&g).unwrap();
         std::fs::write(
             g.join("ontology.toml"),
-            "[verify]\nenabled=true\n[verify.nli]\nexecution_providers=[\"cuda\"]\n",
+            "[verify]\nenabled=true\n[verify.nli]\ndevice=\"cuda\"\n",
         )
         .unwrap();
-        std::env::set_var("GLOSSA_NLI_EP", "directml,cpu");
+        std::env::set_var("GLOSSA_VERIFY_NLI_DEVICE", "directml");
         let c = VerifyConfig::resolve(&g);
-        std::env::remove_var("GLOSSA_NLI_EP");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_DEVICE");
         assert_eq!(
             c.execution_providers,
             vec!["directml".to_string(), "cpu".to_string()]
@@ -578,13 +610,13 @@ mod tests {
         let _env = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("GLOSSA_NLI_EP");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_DEVICE");
         let dir = tempfile::tempdir().unwrap();
         let g = dir.path().join(".glossa");
         std::fs::create_dir_all(&g).unwrap();
         std::fs::write(
             g.join("ontology.toml"),
-            "[verify]\nenabled=true\n[verify.nli]\nexecution_providers=[\"bogus\",\"cpu\"]\n",
+            "[verify]\nenabled=true\n[verify.nli]\ndevice=\"bogus\"\n",
         )
         .unwrap();
         let c = VerifyConfig::resolve(&g);
@@ -596,13 +628,13 @@ mod tests {
         let _env = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("GLOSSA_NLI_EP");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_DEVICE");
         let dir = tempfile::tempdir().unwrap();
         let g = dir.path().join(".glossa");
         std::fs::create_dir_all(&g).unwrap();
         std::fs::write(
             g.join("ontology.toml"),
-            "[verify]\nenabled=true\n[verify.nli]\nexecution_providers=[\"bogus\"]\n",
+            "[verify]\nenabled=true\n[verify.nli]\ndevice=\"bogus\"\n",
         )
         .unwrap();
         let c = VerifyConfig::resolve(&g);
@@ -614,16 +646,20 @@ mod tests {
         let _env = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("GLOSSA_NLI_EP");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_DEVICE");
         let dir = tempfile::tempdir().unwrap();
         let g = dir.path().join(".glossa");
         std::fs::create_dir_all(&g).unwrap();
         std::fs::write(
             g.join("ontology.toml"),
-            "[verify]\nenabled=true\n[verify.nli]\nexecution_providers=[\"CUDA\"]\n",
+            "[verify]\nenabled=true\n[verify.nli]\ndevice=\"CUDA\"\n",
         )
         .unwrap();
         let c = VerifyConfig::resolve(&g);
-        assert_eq!(c.execution_providers, vec!["cuda".to_string()]);
+        // single `device="CUDA"` -> lowercased + auto CPU fallback
+        assert_eq!(
+            c.execution_providers,
+            vec!["cuda".to_string(), "cpu".to_string()]
+        );
     }
 }

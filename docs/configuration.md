@@ -167,7 +167,9 @@ enabled here and has a calibrated threshold.
 | `scorer` | `"in_process"` \| `"http"` | NLI scorer implementation (`http` is not built yet). Unset ⇒ no scorer ⇒ AC-only. |
 | `model_dir` | path | Exported NLI model directory (in-process scorer only). |
 | `entail_index` | integer | Softmax index of the entailment class in the model's output (model-export-specific). |
-| `execution_providers` | ordered list · default `["cpu"]` | ONNX Runtime execution-provider preference for the `nli-ort` engine, tried in order; first available wins. Recognized GPU names: `"cuda"`, `"directml"`, `"coreml"`, `"rocm"`; `"cpu"` and unknown names fall through to ORT's implicit CPU EP. A GPU EP works only in a build that compiled it in. |
+| `device` | `"cpu"` \| `"cuda"` \| `"directml"` \| `"coreml"` \| `"rocm"` · default `"cpu"` | Compute device for the `nli-ort` engine. A single value with automatic CPU fallback (e.g. `"cuda"` runs on GPU, falling back to CPU if it can't initialize). Unknown names fall through to ORT's implicit CPU EP. A GPU device works only in a build that compiled that provider in. |
+| `gpu_id` | integer · default unset | GPU device id the CUDA/DirectML/ROCm provider binds to; unset ⇒ the provider's default device. |
+| `gpu_mem_mb` | integer · default unset | GPU arena memory cap (MB) for the provider, so NLI can share a GPU with an LLM. Effective on CUDA; ROCm honors only arena growth; DirectML/CoreML expose no memory option. |
 
 ## Eval-harness config (`lab.toml`)
 

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::config_util::{env_bool, env_i32, env_string, env_usize, normalize_eps};
+use crate::config_util::{env_bool, env_i32, env_string, env_usize};
 use crate::graph::ontology::Ontology;
 
 // Reranking only reorders the fetched pool, it never fetches deeper on its own. For rerank to
@@ -50,20 +50,19 @@ impl RerankConfig {
             pool_size: env_usize("GLOSSA_RERANK_POOL_SIZE")
                 .or_else(|| ont.as_ref().and_then(|o| o.rerank_pool_size()))
                 .unwrap_or(DEFAULT_POOL_SIZE),
-            execution_providers: normalize_eps(
-                match env_string("GLOSSA_RERANK_EP") {
-                    Some(v) => v.split(',').map(str::to_string).collect::<Vec<_>>(),
-                    None => ont
-                        .as_ref()
-                        .map(|o| o.rerank_execution_providers().to_vec())
-                        .unwrap_or_default(),
-                }
-                .into_iter(),
+            execution_providers: crate::config_util::expand_device(
+                env_string("GLOSSA_RERANK_DEVICE")
+                    .or_else(|| {
+                        ont.as_ref()
+                            .and_then(|o| o.rerank_device())
+                            .map(str::to_string)
+                    })
+                    .as_deref(),
             ),
-            ep_device: env_i32("GLOSSA_RERANK_EP_DEVICE")
-                .or_else(|| ont.as_ref().and_then(|o| o.rerank_ep_device())),
-            ep_mem_limit_mb: env_usize("GLOSSA_RERANK_EP_MEM_LIMIT_MB")
-                .or_else(|| ont.as_ref().and_then(|o| o.rerank_ep_mem_limit_mb())),
+            ep_device: env_i32("GLOSSA_RERANK_GPU_ID")
+                .or_else(|| ont.as_ref().and_then(|o| o.rerank_gpu_id())),
+            ep_mem_limit_mb: env_usize("GLOSSA_RERANK_GPU_MEM_MB")
+                .or_else(|| ont.as_ref().and_then(|o| o.rerank_gpu_mem_mb())),
             endpoint: env_string("GLOSSA_RERANK_HTTP_ENDPOINT").or_else(|| {
                 ont.as_ref()
                     .and_then(|o| o.rerank_endpoint())
@@ -117,7 +116,7 @@ mod tests {
         std::fs::write(
             g.join("ontology.toml"),
             "[rerank]\nenabled=true\nscorer=\"in_process\"\nmodel_dir=\"/m\"\npool_size=40\n\
-             execution_providers=[\"cuda\",\"cpu\"]\n",
+             device=\"cuda\"\n",
         )
         .unwrap();
         let c = RerankConfig::resolve(&g);

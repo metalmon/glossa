@@ -338,7 +338,7 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
         None => println!("model_dir      = (unset)"),
     }
     if let Some(id) = cfg.execution_provider_device {
-        println!("ep_device      = {id}");
+        println!("gpu_id      = {id}");
     }
     if let Some(mb) = cfg.execution_provider_mem_limit_mb {
         println!("ep_mem_limit   = {mb} MB");
@@ -417,14 +417,13 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// `kbx nli set <path> --model-dir <dir> [--scorer ...] [--entail-index N] [--mode ...] [--ep
-/// ...] [--ep-device N] [--ep-mem-limit-mb N]`: resolve the glossa dir the same way [`nli_check`]
+/// `kbx nli set <path> --model-dir <dir> [--scorer ...] [--entail-index N] [--mode ...]
+/// [--device D] [--gpu-id N] [--gpu-mem-mb N]`: resolve the glossa dir the same way [`nli_check`]
 /// does, then write
 /// `[verify.nli]` into the corpus `ontology.toml` via [`write_nli_config`] and print what was
 /// written + a `kbx nli check` hint. Completes the `download` -> `set` -> `check` workflow so a user
-/// never hand-edits TOML. `execution_providers` is written only when non-empty — an empty list
-/// leaves the ontology key untouched (mirrors `entail_index`/`mode`/`ep_device`'s `Option` "only if
-/// given" convention).
+/// never hand-edits TOML. `device` is written only when given (mirrors
+/// `entail_index`/`mode`/`gpu_id`'s `Option` "only if given" convention).
 #[allow(clippy::too_many_arguments)]
 pub fn nli_set(
     path: Option<PathBuf>,
@@ -432,26 +431,21 @@ pub fn nli_set(
     scorer: String,
     entail_index: Option<usize>,
     mode: Option<String>,
-    execution_providers: Vec<String>,
-    ep_device: Option<i32>,
-    ep_mem_limit_mb: Option<usize>,
+    device: Option<String>,
+    gpu_id: Option<i32>,
+    gpu_mem_mb: Option<usize>,
 ) -> Result<()> {
     let kbx_paths = crate::workspace::resolve(path);
     let glossa_dir = crate::workspace::glossa_dir(&kbx_paths.root);
-    let eps = if execution_providers.is_empty() {
-        None
-    } else {
-        Some(execution_providers.as_slice())
-    };
     write_nli_config(
         &glossa_dir,
         &model_dir,
         &scorer,
         entail_index,
         mode.as_deref(),
-        eps,
-        ep_device,
-        ep_mem_limit_mb,
+        device.as_deref(),
+        gpu_id,
+        gpu_mem_mb,
     )?;
 
     let ontology_path = glossa_dir.join("ontology.toml");
@@ -466,27 +460,27 @@ pub fn nli_set(
     if let Some(m) = &mode {
         println!("wrote [verify] mode = {m:?}");
     }
-    if let Some(eps) = eps {
-        println!("wrote [verify.nli] execution_providers = {eps:?}");
+    if let Some(d) = &device {
+        println!("wrote [verify.nli] device = {d:?}");
     }
-    if let Some(id) = ep_device {
-        println!("wrote [verify.nli] ep_device = {id}");
+    if let Some(id) = gpu_id {
+        println!("wrote [verify.nli] gpu_id = {id}");
     }
-    if let Some(mb) = ep_mem_limit_mb {
-        println!("wrote [verify.nli] ep_mem_limit_mb = {mb}");
+    if let Some(mb) = gpu_mem_mb {
+        println!("wrote [verify.nli] gpu_mem_mb = {mb}");
     }
     println!("run `kbx nli check` to confirm readiness.");
     Ok(())
 }
 
 /// Write `[verify.nli].{scorer,model_dir}` (+ `entail_index` when given, + `[verify].mode` when
-/// given, + `execution_providers` when given, + `ep_device` when given, + `ep_mem_limit_mb` when
+/// given, + `device` when given, + `gpu_id` when given, + `gpu_mem_mb` when
 /// given) into `<glossa_dir>/ontology.toml`, preserving every
 /// other table/comment. Mirrors `calibrate::write_threshold`'s established preserve-other-keys
 /// pattern: parse the existing file (or start from an empty document when absent) into a
 /// `toml_edit::DocumentMut`, mutate only the keys this function owns, then write the whole
 /// document back. Does NOT touch `[verify.nli.threshold]` (calibration's own keys) or any other
-/// table. `execution_providers` is written as a TOML array; `None` leaves the key untouched.
+/// table. `device` is written as a single TOML string; `None` leaves the key untouched.
 #[allow(clippy::too_many_arguments)]
 pub fn write_nli_config(
     glossa_dir: &Path,
@@ -494,11 +488,11 @@ pub fn write_nli_config(
     scorer: &str,
     entail_index: Option<usize>,
     mode: Option<&str>,
-    execution_providers: Option<&[String]>,
-    ep_device: Option<i32>,
-    ep_mem_limit_mb: Option<usize>,
+    device: Option<&str>,
+    gpu_id: Option<i32>,
+    gpu_mem_mb: Option<usize>,
 ) -> Result<()> {
-    use toml_edit::{value, Array, DocumentMut, Item, Table};
+    use toml_edit::{value, DocumentMut, Item, Table};
 
     let path = glossa_dir.join("ontology.toml");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
@@ -530,15 +524,14 @@ pub fn write_nli_config(
     if let Some(ei) = entail_index {
         nli["entail_index"] = value(ei as i64);
     }
-    if let Some(eps) = execution_providers {
-        let arr: Array = eps.iter().map(String::as_str).collect();
-        nli["execution_providers"] = value(arr);
+    if let Some(d) = device {
+        nli["device"] = value(d);
     }
-    if let Some(id) = ep_device {
-        nli["ep_device"] = value(id as i64);
+    if let Some(id) = gpu_id {
+        nli["gpu_id"] = value(id as i64);
     }
-    if let Some(mb) = ep_mem_limit_mb {
-        nli["ep_mem_limit_mb"] = value(mb as i64);
+    if let Some(mb) = gpu_mem_mb {
+        nli["gpu_mem_mb"] = value(mb as i64);
     }
 
     std::fs::create_dir_all(glossa_dir)?;
@@ -774,9 +767,9 @@ mod tests {
         let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
         assert!(o.contains("scorer = \"in_process\""));
         assert!(!o.contains("entail_index"));
-        assert!(!o.contains("ep_device"));
+        assert!(!o.contains("gpu_id"));
         assert!(!o.contains("mode ="));
-        assert!(!o.contains("execution_providers"));
+        assert!(!o.contains("device ="));
     }
 
     /// `write_nli_config` must preserve unrelated existing content in `ontology.toml`, not clobber
@@ -816,11 +809,12 @@ mod tests {
         assert!(o.contains("rubert-nli"));
     }
 
-    /// `write_nli_config`'s `execution_providers` param writes a TOML array under `[verify.nli]`
-    /// and round-trips through `VerifyConfig::resolve` (the runtime gate's own read path) — extends
-    /// `write_nli_config_roundtrips_into_ontology` for the new Plan 3 Task 1 key.
+    /// `write_nli_config`'s `device` param writes a single `device` string under `[verify.nli]`
+    /// and round-trips through `VerifyConfig::resolve` (the runtime gate's own read path), which
+    /// expands `"cuda"` to `["cuda", "cpu"]` (auto-CPU fallback) — extends
+    /// `write_nli_config_roundtrips_into_ontology` for the device key.
     #[test]
-    fn write_nli_config_execution_providers_roundtrips_into_ontology() {
+    fn write_nli_config_device_roundtrips_into_ontology() {
         let dir = tempfile::tempdir().unwrap();
         let glossa = dir.path().join(".glossa");
         write_nli_config(
@@ -829,14 +823,13 @@ mod tests {
             "in_process",
             None,
             None,
-            Some(&["cuda".to_string(), "cpu".to_string()]),
+            Some("cuda"),
             None,
             None,
         )
         .unwrap();
         let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
-        assert!(o.contains("execution_providers"));
-        assert!(o.contains("cuda"));
+        assert!(o.contains("device = \"cuda\""));
 
         let cfg = VerifyConfig::resolve(&glossa);
         assert_eq!(
@@ -845,7 +838,7 @@ mod tests {
         );
     }
 
-    /// `write_nli_config`'s `ep_device` param writes `[verify.nli].ep_device` and round-trips
+    /// `write_nli_config`'s `gpu_id` param writes `[verify.nli].gpu_id` and round-trips
     /// through `VerifyConfig::resolve` (the runtime gate's read path); `None` writes no key.
     #[test]
     fn write_nli_config_ep_device_roundtrips_into_ontology() {
@@ -863,13 +856,13 @@ mod tests {
         )
         .unwrap();
         let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
-        assert!(o.contains("ep_device = 1"));
+        assert!(o.contains("gpu_id = 1"));
 
         let cfg = VerifyConfig::resolve(&glossa);
         assert_eq!(cfg.execution_provider_device, Some(1));
     }
 
-    /// `write_nli_config`'s `ep_mem_limit_mb` param writes `[verify.nli].ep_mem_limit_mb` and
+    /// `write_nli_config`'s `gpu_mem_mb` param writes `[verify.nli].gpu_mem_mb` and
     /// round-trips through `VerifyConfig::resolve`; `None` writes no key.
     #[test]
     fn write_nli_config_ep_mem_limit_mb_roundtrips_into_ontology() {
@@ -887,7 +880,7 @@ mod tests {
         )
         .unwrap();
         let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
-        assert!(o.contains("ep_mem_limit_mb = 512"));
+        assert!(o.contains("gpu_mem_mb = 512"));
 
         let cfg = VerifyConfig::resolve(&glossa);
         assert_eq!(cfg.execution_provider_mem_limit_mb, Some(512));

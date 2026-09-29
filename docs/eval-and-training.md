@@ -288,7 +288,7 @@ overrides; precedence env > ontology > default):
 ```bash
 kbx nli download --to <dir>                      # fetch fp32 from the default repo
 kbx nli download --fp16 --to <dir>               # or --int8; saved locally as model.onnx
-kbx nli set --model-dir <dir> --scorer in_process [--mode nli] [--ep cuda,cpu]
+kbx nli set --model-dir <dir> --scorer in_process [--mode nli] [--device cuda]
 kbx nli check [PATH]                              # will the verifier run, or why it fails open to AC?
 ```
 
@@ -296,21 +296,21 @@ kbx nli check [PATH]                              # will the verifier run, or wh
 fp32, `--fp16` / `--int8` (mutually exclusive) fetch the half- or int8-weight variant. The chosen
 variant is always written locally as the canonical `model.onnx` (fp32 also brings `model.onnx.data`);
 `--repo` / `--file` override for a third-party model. `nli set` writes `[verify.nli]` (`model_dir`,
-`scorer`, optional `entail_index`, `execution_providers`, and — only if given — `[verify] mode`) into
-`ontology.toml`, preserving the rest of the file. `--ep` is an ordered GPU execution-provider
-preference list (repeat the flag or comma-join). `nli check` reports the compiled engine and whether
-every precondition is met.
+`scorer`, optional `entail_index`, `device`, and — only if given — `[verify] mode`) into
+`ontology.toml`, preserving the rest of the file. `--device` is a single compute device
+(`cpu`|`cuda`|`directml`|`rocm`) with automatic CPU fallback. `nli check` reports the compiled engine
+and whether every precondition is met.
 
 **Wiring the reranker** — the `kbx rerank` group mirrors `kbx nli` for the cross-encoder reranker:
 
 ```bash
 kbx rerank download [--fp16|--int8] --to <dir>   # fetch a variant (default repo; fp32 if no flag)
-kbx rerank set --model-dir <dir> --scorer in_process [--pool-size N] [--ep cuda,cpu]
-kbx rerank check --model-dir <dir> [--ep cuda,cpu]
+kbx rerank set --model-dir <dir> --scorer in_process [--pool-size N] [--device cuda]
+kbx rerank check --model-dir <dir> [--device cuda]
 ```
 
-`rerank set` writes `[rerank]` (`model_dir`, `scorer`, optional `pool_size` / `execution_providers` /
-`ep_device` / `ep_mem_limit_mb`) into `ontology.toml`, preserving every other table. Unlike `nli
+`rerank set` writes `[rerank]` (`model_dir`, `scorer`, optional `pool_size` / `device` /
+`gpu_id` / `gpu_mem_mb`) into `ontology.toml`, preserving every other table. Unlike `nli
 check`, `rerank check` probes the `--model-dir` weights directly — a green check means the model loads
 and ranks a relevant passage above an irrelevant one, not that retrieval is wired to use it.
 

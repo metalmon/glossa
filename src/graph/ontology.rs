@@ -136,17 +136,17 @@ struct RawVerifyNli {
     #[serde(default)]
     entail_index: Option<usize>,
     /// Ordered execution-provider preference list (e.g. `["cuda", "cpu"]`) for a later task's EP
-    /// registration; `None`/absent when unset (see [`Ontology::verify_nli_execution_providers`]).
+    /// registration; `None`/absent when unset (see [`Ontology::verify_nli_device`]).
     #[serde(default)]
-    execution_providers: Option<Vec<String>>,
+    device: Option<String>,
     /// Which GPU (device id) the CUDA/DirectML/ROCm EP binds to; `None`/absent ⇒ default device
-    /// (see [`Ontology::verify_nli_ep_device`]).
+    /// (see [`Ontology::verify_nli_gpu_id`]).
     #[serde(default)]
-    ep_device: Option<i32>,
+    gpu_id: Option<i32>,
     /// GPU arena memory cap in megabytes for the NLI EP; `None`/absent ⇒ no memory options
-    /// (see [`Ontology::verify_nli_ep_mem_limit_mb`]).
+    /// (see [`Ontology::verify_nli_gpu_mem_mb`]).
     #[serde(default)]
-    ep_mem_limit_mb: Option<usize>,
+    gpu_mem_mb: Option<usize>,
     /// Remote scorer endpoint base URL (`scorer = "http"`); `None`/absent when unset.
     #[serde(default)]
     endpoint: Option<String>,
@@ -174,11 +174,11 @@ struct RawRerank {
     #[serde(default)]
     pool_size: Option<usize>,
     #[serde(default)]
-    execution_providers: Option<Vec<String>>,
+    device: Option<String>,
     #[serde(default)]
-    ep_device: Option<i32>,
+    gpu_id: Option<i32>,
     #[serde(default)]
-    ep_mem_limit_mb: Option<usize>,
+    gpu_mem_mb: Option<usize>,
     /// Remote reranker endpoint base URL (`scorer = "http"`); `None`/absent when unset.
     #[serde(default)]
     endpoint: Option<String>,
@@ -470,14 +470,14 @@ pub struct Ontology {
     verify_nli_model_dir: Option<String>,
     verify_nli_entail_index: Option<usize>,
     /// Per-corpus `[verify.nli].execution_providers` ordered EP preference list, empty when unset.
-    /// See [`Ontology::verify_nli_execution_providers`].
-    verify_nli_execution_providers: Vec<String>,
+    /// See [`Ontology::verify_nli_device`].
+    verify_nli_device: Option<String>,
     /// Per-corpus `[verify.nli].ep_device` GPU device id, or `None` when unset.
-    /// See [`Ontology::verify_nli_ep_device`].
-    verify_nli_ep_device: Option<i32>,
+    /// See [`Ontology::verify_nli_gpu_id`].
+    verify_nli_gpu_id: Option<i32>,
     /// Per-corpus `[verify.nli].ep_mem_limit_mb` GPU memory cap (MB), or `None` when unset.
-    /// See [`Ontology::verify_nli_ep_mem_limit_mb`].
-    verify_nli_ep_mem_limit_mb: Option<usize>,
+    /// See [`Ontology::verify_nli_gpu_mem_mb`].
+    verify_nli_gpu_mem_mb: Option<usize>,
     /// Per-corpus `[verify.nli]` remote scorer keys (`scorer = "http"`): endpoint / timeout / api-key.
     verify_nli_endpoint: Option<String>,
     verify_nli_timeout_ms: Option<usize>,
@@ -494,9 +494,9 @@ pub struct Ontology {
     rerank_scorer: Option<String>,
     rerank_model_dir: Option<String>,
     rerank_pool_size: Option<usize>,
-    rerank_execution_providers: Vec<String>,
-    rerank_ep_device: Option<i32>,
-    rerank_ep_mem_limit_mb: Option<usize>,
+    rerank_device: Option<String>,
+    rerank_gpu_id: Option<i32>,
+    rerank_gpu_mem_mb: Option<usize>,
     /// Per-corpus `[rerank]` remote scorer keys (`scorer = "http"`): endpoint / timeout / api-key.
     rerank_endpoint: Option<String>,
     rerank_timeout_ms: Option<usize>,
@@ -674,14 +674,9 @@ impl Ontology {
             verify_nli_scorer: raw.verify.nli.as_ref().and_then(|n| n.scorer.clone()),
             verify_nli_model_dir: raw.verify.nli.as_ref().and_then(|n| n.model_dir.clone()),
             verify_nli_entail_index: raw.verify.nli.as_ref().and_then(|n| n.entail_index),
-            verify_nli_execution_providers: raw
-                .verify
-                .nli
-                .as_ref()
-                .and_then(|n| n.execution_providers.clone())
-                .unwrap_or_default(),
-            verify_nli_ep_device: raw.verify.nli.as_ref().and_then(|n| n.ep_device),
-            verify_nli_ep_mem_limit_mb: raw.verify.nli.as_ref().and_then(|n| n.ep_mem_limit_mb),
+            verify_nli_device: raw.verify.nli.as_ref().and_then(|n| n.device.clone()),
+            verify_nli_gpu_id: raw.verify.nli.as_ref().and_then(|n| n.gpu_id),
+            verify_nli_gpu_mem_mb: raw.verify.nli.as_ref().and_then(|n| n.gpu_mem_mb),
             verify_nli_endpoint: raw.verify.nli.as_ref().and_then(|n| n.endpoint.clone()),
             verify_nli_timeout_ms: raw.verify.nli.as_ref().and_then(|n| n.timeout_ms),
             verify_nli_api_key: raw.verify.nli.as_ref().and_then(|n| n.api_key.clone()),
@@ -701,9 +696,9 @@ impl Ontology {
             rerank_scorer: raw.rerank.scorer.clone(),
             rerank_model_dir: raw.rerank.model_dir.clone(),
             rerank_pool_size: raw.rerank.pool_size,
-            rerank_execution_providers: raw.rerank.execution_providers.clone().unwrap_or_default(),
-            rerank_ep_device: raw.rerank.ep_device,
-            rerank_ep_mem_limit_mb: raw.rerank.ep_mem_limit_mb,
+            rerank_device: raw.rerank.device.clone(),
+            rerank_gpu_id: raw.rerank.gpu_id,
+            rerank_gpu_mem_mb: raw.rerank.gpu_mem_mb,
             rerank_endpoint: raw.rerank.endpoint.clone(),
             rerank_timeout_ms: raw.rerank.timeout_ms,
             rerank_api_key: raw.rerank.api_key.clone(),
@@ -1014,22 +1009,22 @@ impl Ontology {
     /// Per-corpus `[verify.nli].execution_providers` ordered EP preference list (e.g.
     /// `["cuda", "cpu"]`), or an empty slice when the ontology declares none — in which case
     /// `gate::config::VerifyConfig::resolve` applies its engine default (`["cpu"]`).
-    pub fn verify_nli_execution_providers(&self) -> &[String] {
-        &self.verify_nli_execution_providers
+    pub fn verify_nli_device(&self) -> Option<&str> {
+        self.verify_nli_device.as_deref()
     }
 
     /// Per-corpus `[verify.nli].ep_device` GPU device id (which GPU the CUDA/DirectML/ROCm EP binds
     /// to), or `None` when unset — in which case `gate::config::VerifyConfig` leaves it `None` and
     /// the EP uses its default device (today's behavior).
-    pub fn verify_nli_ep_device(&self) -> Option<i32> {
-        self.verify_nli_ep_device
+    pub fn verify_nli_gpu_id(&self) -> Option<i32> {
+        self.verify_nli_gpu_id
     }
 
     /// Per-corpus `[verify.nli].ep_mem_limit_mb` GPU arena memory cap in megabytes, or `None` when
     /// unset — in which case `gate::config::VerifyConfig` leaves it `None` and the EP sets no memory
     /// options (today's behavior).
-    pub fn verify_nli_ep_mem_limit_mb(&self) -> Option<usize> {
-        self.verify_nli_ep_mem_limit_mb
+    pub fn verify_nli_gpu_mem_mb(&self) -> Option<usize> {
+        self.verify_nli_gpu_mem_mb
     }
 
     /// Per-corpus `[verify.nli].endpoint` remote scorer base URL (`scorer="http"`), or `None`.
@@ -1068,18 +1063,18 @@ impl Ontology {
     }
 
     /// Per-corpus `[rerank].execution_providers`, or an empty slice when unset.
-    pub fn rerank_execution_providers(&self) -> &[String] {
-        &self.rerank_execution_providers
+    pub fn rerank_device(&self) -> Option<&str> {
+        self.rerank_device.as_deref()
     }
 
     /// Per-corpus `[rerank].ep_device` GPU device id, or `None` when unset.
-    pub fn rerank_ep_device(&self) -> Option<i32> {
-        self.rerank_ep_device
+    pub fn rerank_gpu_id(&self) -> Option<i32> {
+        self.rerank_gpu_id
     }
 
     /// Per-corpus `[rerank].ep_mem_limit_mb` GPU arena cap (MB), or `None` when unset.
-    pub fn rerank_ep_mem_limit_mb(&self) -> Option<usize> {
-        self.rerank_ep_mem_limit_mb
+    pub fn rerank_gpu_mem_mb(&self) -> Option<usize> {
+        self.rerank_gpu_mem_mb
     }
 
     /// Per-corpus `[rerank].endpoint` remote reranker base URL (`scorer="http"`), or `None`.
@@ -1742,19 +1737,16 @@ props = []
     fn rerank_config_round_trips_from_ontology() {
         let o = Ontology::parse(
             "[rerank]\nenabled=true\nscorer=\"in_process\"\nmodel_dir=\"/m\"\n\
-             pool_size=40\nexecution_providers=[\"cuda\",\"cpu\"]\nep_device=1\nep_mem_limit_mb=1024\n",
+             pool_size=40\ndevice=\"cuda\"\ngpu_id=1\ngpu_mem_mb=1024\n",
         )
         .unwrap();
         assert_eq!(o.rerank_enabled(), Some(true));
         assert_eq!(o.rerank_scorer(), Some("in_process"));
         assert_eq!(o.rerank_model_dir(), Some("/m"));
         assert_eq!(o.rerank_pool_size(), Some(40));
-        assert_eq!(
-            o.rerank_execution_providers(),
-            &["cuda".to_string(), "cpu".to_string()]
-        );
-        assert_eq!(o.rerank_ep_device(), Some(1));
-        assert_eq!(o.rerank_ep_mem_limit_mb(), Some(1024));
+        assert_eq!(o.rerank_device(), Some("cuda"));
+        assert_eq!(o.rerank_gpu_id(), Some(1));
+        assert_eq!(o.rerank_gpu_mem_mb(), Some(1024));
     }
 
     #[test]
@@ -1762,6 +1754,6 @@ props = []
         let o = Ontology::parse("[meta]\nname=\"x\"\n").unwrap();
         assert_eq!(o.rerank_enabled(), None);
         assert_eq!(o.rerank_scorer(), None);
-        assert!(o.rerank_execution_providers().is_empty());
+        assert_eq!(o.rerank_device(), None);
     }
 }
