@@ -572,7 +572,6 @@ mod tests {
         assert!(seed_weights(&[], ResolveKind::Ranked, 1.0).is_empty());
     }
 
-
     #[test]
     fn fuse_floats_the_consensus_node_above_single_source_ones() {
         // X tops BOTH lists; A and B each appear in only one. Fusion must rank X first (it is the
