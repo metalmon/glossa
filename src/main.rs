@@ -5,10 +5,6 @@ use glossa::search::search_chunks;
 use glossa::walk::collect_chunks;
 use std::path::PathBuf;
 
-/// Native Windows Service integration (SCM dispatcher + control handler). Windows-only.
-#[cfg(windows)]
-mod winsvc;
-
 /// Pure merge of `--root` flags / `GLOSSA_ROOTS` env / `--state-dir` into a `RootInputs`, factored
 /// out of `resolve_inputs` so it is unit-testable without clap or real env vars. Precedence: an
 /// explicit `--root` flag list wins OUTRIGHT over `GLOSSA_ROOTS` — a single `--root` present
@@ -2081,7 +2077,7 @@ fn main() -> anyhow::Result<()> {
             #[cfg(feature = "tls")]
             tls_client_ca,
             windows_service,
-            service_name: _service_name,
+            service_name,
         } => match action {
             Some(McpAction::DumpTzTools { config_dir }) => {
                 let n = glossa::tz_export::dump(&config_dir)?;
@@ -2170,15 +2166,15 @@ fn main() -> anyhow::Result<()> {
                 };
                 if windows_service {
                     // Launched by the SCM (binPath carries --windows-service): hand off to the
-                    // service dispatcher, which runs run_serve under SCM control (Stop → cancel).
-                    #[cfg(windows)]
-                    {
-                        return winsvc::run(params, _service_name);
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        anyhow::bail!("--windows-service is only supported on Windows");
-                    }
+                    // shared service dispatcher, which runs run_serve under SCM control
+                    // (Stop/Shutdown → cancel) on Windows, or a Ctrl-C bridge off Windows.
+                    let name = service_name.unwrap_or_else(|| "glossa".to_string());
+                    return glossa::service::run_as_service(
+                        name,
+                        Box::new(move |cancel, on_ready| {
+                            run_serve(params, cancel, false, Some(on_ready))
+                        }),
+                    );
                 }
                 // Foreground: OS signals (Ctrl-C / SIGTERM) drive graceful shutdown.
                 run_serve(

@@ -64,6 +64,173 @@ pub fn windows_bin_path(program: &Path, args: &[String]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Generic service run-dispatcher: run an arbitrary serve closure under a platform's service
+// supervisor (Windows SCM control handler; off Windows, a Ctrl-C bridge). Shared by `kb` and
+// `inference-server` — each passes its own serve closure.
+// ---------------------------------------------------------------------------
+
+/// The serve closure a service dispatcher drives: given a cancellation token (tripped on
+/// Stop/Shutdown) and an `on_ready` callback (call once the listener is bound + warm, to flip the
+/// service to "Running"), run the server until the token is cancelled.
+pub type ServiceRun = Box<
+    dyn FnOnce(tokio_util::sync::CancellationToken, Box<dyn FnOnce() + Send>) -> anyhow::Result<()>
+        + Send,
+>;
+
+/// What an SCM control message maps to (Windows). Pure, so it is unit-testable without the SCM.
+#[cfg(windows)]
+#[derive(Debug, PartialEq, Eq)]
+pub enum ControlOutcome {
+    /// Stop / Shutdown → cancel the token (graceful shutdown).
+    Cancel,
+    /// Interrogate → acknowledge, no state change.
+    NoOp,
+    /// Anything else → report "not implemented" to the SCM.
+    Unhandled,
+}
+
+/// Map an SCM control message to a [`ControlOutcome`] (pure).
+#[cfg(windows)]
+pub fn control_action(control: windows_service::service::ServiceControl) -> ControlOutcome {
+    use windows_service::service::ServiceControl;
+    match control {
+        ServiceControl::Stop | ServiceControl::Shutdown => ControlOutcome::Cancel,
+        ServiceControl::Interrogate => ControlOutcome::NoOp,
+        _ => ControlOutcome::Unhandled,
+    }
+}
+
+#[cfg(windows)]
+pub use scm::run_as_service;
+
+#[cfg(windows)]
+mod scm {
+    use super::{control_action, ControlOutcome, ServiceRun};
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+    use windows_service::service::{
+        ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
+    };
+    use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
+    use windows_service::{define_windows_service, service_dispatcher};
+
+    const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
+
+    // The closure + name are stashed before the SCM dispatcher starts, then taken inside the
+    // SCM-invoked `service_main`. `Mutex<Option<..>>` (const-init) keeps the statics `Sync`.
+    static RUN: Mutex<Option<ServiceRun>> = Mutex::new(None);
+    static NAME: Mutex<Option<String>> = Mutex::new(None);
+
+    /// Run `run` as a Windows service: stash it + `service_name`, then hand control to the SCM
+    /// dispatcher (blocks until the service stops). The control handler maps Stop/Shutdown → cancel;
+    /// `run` receives the token + an `on_ready` that flips the service to `Running`.
+    pub fn run_as_service(service_name: String, run: ServiceRun) -> anyhow::Result<()> {
+        *NAME.lock().unwrap_or_else(|e| e.into_inner()) = Some(service_name.clone());
+        *RUN.lock().unwrap_or_else(|e| e.into_inner()) = Some(run);
+        service_dispatcher::start(service_name, ffi_service_main)
+            .map_err(|e| anyhow::anyhow!("windows service dispatcher failed to start: {e}"))?;
+        Ok(())
+    }
+
+    define_windows_service!(ffi_service_main, service_main);
+
+    fn service_main(_args: Vec<OsString>) {
+        if let Err(e) = run_service() {
+            tracing::error!("windows service exited with error: {e}");
+        }
+    }
+
+    fn run_service() -> anyhow::Result<()> {
+        let cancel = CancellationToken::new();
+
+        // Control handler: Stop / Shutdown → cancel (same graceful path as Ctrl-C).
+        let handler_cancel = cancel.clone();
+        let event_handler = move |control| -> ServiceControlHandlerResult {
+            match control_action(control) {
+                ControlOutcome::Cancel => {
+                    handler_cancel.cancel();
+                    ServiceControlHandlerResult::NoError
+                }
+                ControlOutcome::NoOp => ServiceControlHandlerResult::NoError,
+                ControlOutcome::Unhandled => ServiceControlHandlerResult::NotImplemented,
+            }
+        };
+        let name = NAME
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_else(|| "glossa".to_string());
+        let status_handle = service_control_handler::register(&name, event_handler)?;
+
+        status_handle.set_service_status(ServiceStatus {
+            service_type: SERVICE_TYPE,
+            current_state: ServiceState::StartPending,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint: 0,
+            wait_hint: Duration::from_secs(120),
+            process_id: None,
+        })?;
+
+        // ServiceStatusHandle is Copy: one copy flips to Running via on_ready, the other reports
+        // Stopped after the serve returns.
+        let status_for_running = status_handle;
+        let on_ready: Box<dyn FnOnce() + Send> = Box::new(move || {
+            let _ = status_for_running.set_service_status(ServiceStatus {
+                service_type: SERVICE_TYPE,
+                current_state: ServiceState::Running,
+                controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+                exit_code: ServiceExitCode::Win32(0),
+                checkpoint: 0,
+                wait_hint: Duration::default(),
+                process_id: None,
+            });
+        });
+
+        let run = RUN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .expect("serve closure set before dispatcher start");
+        let result = run(cancel, on_ready);
+
+        status_handle.set_service_status(ServiceStatus {
+            service_type: SERVICE_TYPE,
+            current_state: ServiceState::Stopped,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::Win32(if result.is_ok() { 0 } else { 1 }),
+            checkpoint: 0,
+            wait_hint: Duration::default(),
+            process_id: None,
+        })?;
+        result
+    }
+}
+
+/// Off Windows there is no SCM: run the closure directly, bridging Ctrl-C to the cancellation token,
+/// with a no-op `on_ready` (systemd drives lifecycle via signals + `sd_notify`, not a control
+/// handler). Kept so callers stay cross-platform; `--windows-service` is Windows-only in practice.
+#[cfg(not(windows))]
+pub fn run_as_service(_service_name: String, run: ServiceRun) -> anyhow::Result<()> {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let bridge = cancel.clone();
+    std::thread::spawn(move || {
+        if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            rt.block_on(async {
+                let _ = tokio::signal::ctrl_c().await;
+            });
+            bridge.cancel();
+        }
+    });
+    run(cancel, Box::new(|| {}))
+}
+
+// ---------------------------------------------------------------------------
 // Windows: SCM via the `windows-service` crate's ServiceManager.
 // ---------------------------------------------------------------------------
 #[cfg(windows)]
@@ -287,6 +454,32 @@ pub fn stop(name: &str) -> anyhow::Result<()> {
 /// A one-line status string for the service `name`.
 pub fn status(name: &str) -> anyhow::Result<String> {
     os::status(name)
+}
+
+#[cfg(all(test, windows))]
+mod control_tests {
+    use super::*;
+    use windows_service::service::ServiceControl;
+
+    #[test]
+    fn stop_and_shutdown_cancel_interrogate_noop() {
+        assert!(matches!(
+            control_action(ServiceControl::Stop),
+            ControlOutcome::Cancel
+        ));
+        assert!(matches!(
+            control_action(ServiceControl::Shutdown),
+            ControlOutcome::Cancel
+        ));
+        assert!(matches!(
+            control_action(ServiceControl::Interrogate),
+            ControlOutcome::NoOp
+        ));
+        assert!(matches!(
+            control_action(ServiceControl::Pause),
+            ControlOutcome::Unhandled
+        ));
+    }
 }
 
 #[cfg(test)]
