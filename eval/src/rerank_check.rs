@@ -285,9 +285,40 @@ pub fn write_rerank_config(
     Ok(())
 }
 
+/// Probe a remote reranker endpoint (`kbx rerank check --endpoint`): score one generic
+/// relevant-vs-irrelevant pair (NO corpus values, see [[no-corpus-values-in-sop]]) and report
+/// reachability + the inversion guard. Fail-open — a transport error yields an UNREACHABLE line,
+/// never a panic.
+#[cfg(feature = "http-scorer")]
+pub fn probe_remote_rerank(endpoint: &str, timeout_ms: u64, api_key: Option<String>) -> String {
+    use glossa::retrieve::rerank::Reranker;
+    let r = glossa::http_scorer::client::new_ureq_reranker(endpoint.to_string(), timeout_ms, api_key);
+    match r.rerank(
+        "What is the capital of France?",
+        &[
+            "Paris is the capital of France.",
+            "Bananas are a good source of potassium.",
+        ],
+    ) {
+        Ok(s) if s.len() == 2 => format!(
+            "remote = tei @ {endpoint} reachable (relevant {} irrelevant)",
+            if rerank_check_ok(s[0], s[1]) { ">" } else { "<=" }
+        ),
+        Ok(s) => format!("remote = tei @ {endpoint} BAD RESPONSE ({} scores, expected 2)", s.len()),
+        Err(e) => format!("remote = tei @ {endpoint} UNREACHABLE: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "http-scorer")]
+    #[test]
+    fn remote_probe_line_reports_unreachable_on_transport_error() {
+        let line = probe_remote_rerank("http://127.0.0.1:1", 200, None);
+        assert!(line.contains("UNREACHABLE") || line.contains("BAD RESPONSE"));
+    }
 
     #[test]
     fn rerank_check_verdict_ok_when_relevant_wins() {

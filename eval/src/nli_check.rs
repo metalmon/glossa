@@ -186,6 +186,39 @@ fn engine_label() -> &'static str {
 /// does, gather [`NliFacts`], print a readable block, then the verdict from [`nli_verdict`].
 /// Printing the diagnosis IS the deliverable — a non-ready verdict is not a process error, so this
 /// always returns `Ok(())` (a resolution/IO failure while gathering facts still propagates).
+/// Probe a remote NLI endpoint (`scorer = "http"`): score one generic entailing-vs-contradicting
+/// hypothesis pair (NO corpus values) and report reachability. Fail-open — a transport error yields
+/// an UNREACHABLE line, never a panic.
+#[cfg(feature = "http-scorer")]
+pub fn probe_remote_nli(
+    endpoint: &str,
+    entail_index: usize,
+    timeout_ms: u64,
+    api_key: Option<String>,
+) -> String {
+    use glossa::gate::nli::NliScorer;
+    let n = glossa::http_scorer::client::new_ureq_nli(
+        endpoint.to_string(),
+        entail_index,
+        timeout_ms,
+        api_key,
+    );
+    match n.entail(
+        "A man is playing a guitar on a stage.",
+        &[
+            "A person is playing a musical instrument.",
+            "Nobody is making any music.",
+        ],
+    ) {
+        Ok(s) if s.len() == 2 => format!(
+            "remote = tei @ {endpoint} reachable (P(entail): entailing={:.2} contradicting={:.2})",
+            s[0], s[1]
+        ),
+        Ok(s) => format!("remote = tei @ {endpoint} BAD RESPONSE ({} scores, expected 2)", s.len()),
+        Err(e) => format!("remote = tei @ {endpoint} UNREACHABLE: {e}"),
+    }
+}
+
 pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
     let kbx_paths = crate::workspace::resolve(path);
     let glossa_dir = crate::workspace::glossa_dir(&kbx_paths.root);
@@ -197,6 +230,26 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
         glossa::gate::VerifyMode::Combined => "combined",
     }
     .to_string();
+
+    // Remote HTTP scorer: report endpoint reachability instead of a local model/EP probe (same
+    // "make a silent fallback visible" intent as the `ep_active` line for the in-process path).
+    if cfg.scorer.as_deref() == Some("http") {
+        println!("mode           = {mode}");
+        println!("scorer         = http");
+        match cfg.endpoint.as_deref() {
+            Some(ep) => {
+                #[cfg(feature = "http-scorer")]
+                println!(
+                    "{}",
+                    probe_remote_nli(ep, cfg.entail_index, cfg.timeout_ms, cfg.api_key.clone())
+                );
+                #[cfg(not(feature = "http-scorer"))]
+                println!("remote = tei @ {ep} (this kbx build lacks the http-scorer client; rebuild with --features http-scorer to probe)");
+            }
+            None => println!("=> NOT READY: scorer=http but no [verify.nli].endpoint is set"),
+        }
+        return Ok(());
+    }
 
     let model_dir_exists = cfg
         .model_dir

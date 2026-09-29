@@ -33,6 +33,9 @@ constraint = ["glossa/constraint", "dep:glossa-constraint"]
 # AC-only); with it, a real model can load. See `just build-kb-constraint` for the analogous
 # opt-in pattern.
 nli = ["glossa/nli"]
+# Light remote HTTP scorer clients for `kbx nli/rerank check --endpoint` (forwards to glossa's
+# `http-scorer`: ureq + serde, no ORT). Independent of the engine features.
+http-scorer = ["glossa/http-scorer"]
 # GPU passthrough for glossa-nli's execution-provider features (see glossa-nli/Cargo.toml). Cargo
 # cannot CLI-enable a transitive dependency's feature (`cargo build -p kb-eval --features
 # glossa/nli-cuda` is not valid), so kb-eval carries a DIRECT optional `glossa-nli` dep (below)

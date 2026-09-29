@@ -502,9 +502,10 @@ enum RerankCmd {
     /// the `[rerank]` config `rerank set` wrote, so a green check means the model loads and ranks,
     /// not that retrieval is wired to use it.
     Check {
-        /// Local model dir holding the cross-encoder ONNX weights + tokenizer.
+        /// Local model dir holding the cross-encoder ONNX weights + tokenizer. Omit when probing a
+        /// remote scorer with `--endpoint`.
         #[arg(long = "model-dir")]
-        model_dir: PathBuf,
+        model_dir: Option<PathBuf>,
         /// Ordered execution-provider preference list. Repeat the flag or comma-join a single
         /// value, e.g. `--ep cuda,cpu` or `--ep cuda --ep cpu` (each occurrence is comma-split
         /// too).
@@ -517,6 +518,16 @@ enum RerankCmd {
         /// the NLI verifier.
         #[arg(long = "ep-mem-limit-mb")]
         ep_mem_limit_mb: Option<usize>,
+        /// Probe a REMOTE reranker (inference-server / TEI) at this base URL instead of a local
+        /// model dir. Reports reachability + the inversion guard.
+        #[arg(long = "endpoint")]
+        endpoint: Option<String>,
+        /// Remote probe timeout (ms) for `--endpoint`.
+        #[arg(long = "timeout-ms", default_value_t = 5000)]
+        timeout_ms: u64,
+        /// Optional Bearer api-key for the remote endpoint.
+        #[arg(long = "api-key")]
+        api_key: Option<String>,
     },
     /// Download the reranker ONNX + tokenizer into a local dir (the dir `[rerank].model_dir` points
     /// at). Simple mode pulls a precision variant from the default reranker repo; `--repo`/`--file`
@@ -955,18 +966,42 @@ fn main() -> Result<()> {
                     ep,
                     ep_device,
                     ep_mem_limit_mb,
+                    endpoint,
+                    timeout_ms,
+                    api_key,
                 },
         } => {
-            // Each `--ep` occurrence may itself be comma-joined (`--ep cuda,cpu`); flatten both
-            // the repeated-flag and comma-joined forms into one ordered list (mirrors `nli set`).
-            let ep: Vec<String> = ep
-                .iter()
-                .flat_map(|s| s.split(','))
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect();
-            kb_eval::rerank_check::rerank_check(model_dir, ep, ep_device, ep_mem_limit_mb)
+            if let Some(endpoint) = endpoint {
+                // Remote probe: needs the light http-scorer client.
+                #[cfg(feature = "http-scorer")]
+                {
+                    println!(
+                        "{}",
+                        kb_eval::rerank_check::probe_remote_rerank(&endpoint, timeout_ms, api_key)
+                    );
+                    Ok(())
+                }
+                #[cfg(not(feature = "http-scorer"))]
+                {
+                    let _ = (timeout_ms, api_key);
+                    anyhow::bail!(
+                        "rebuild kbx with --features http-scorer to probe a remote endpoint ({endpoint})"
+                    );
+                }
+            } else if let Some(model_dir) = model_dir {
+                // Each `--ep` occurrence may itself be comma-joined (`--ep cuda,cpu`); flatten both
+                // the repeated-flag and comma-joined forms into one ordered list (mirrors `nli set`).
+                let ep: Vec<String> = ep
+                    .iter()
+                    .flat_map(|s| s.split(','))
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                kb_eval::rerank_check::rerank_check(model_dir, ep, ep_device, ep_mem_limit_mb)
+            } else {
+                anyhow::bail!("pass --model-dir <dir> (local) or --endpoint <url> (remote)")
+            }
         }
         Cmd::Rerank {
             cmd:
