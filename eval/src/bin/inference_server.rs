@@ -1,6 +1,75 @@
-//! `inference-server` — serve the NLI + reranker cross-encoders over HTTP (Phase 1). The real
-//! server needs an ORT engine feature (it loads `InProcessNli`/`InProcessReranker`); a build
-//! without one prints how to build it. Runs in the foreground; Phase 2 adds `service install`.
+//! `inference-server` — serve the NLI + reranker cross-encoders over HTTP. The real server needs an
+//! ORT engine feature (it loads `InProcessNli`/`InProcessReranker`); a build without one prints how
+//! to build it. `inference-server serve …` runs the server (foreground, or under the Windows SCM /
+//! Linux systemd via `--windows-service` / a systemd unit); `inference-server service …` installs
+//! and manages it as an OS service.
+
+#[cfg(any(
+    feature = "nli-directml",
+    feature = "nli-coreml",
+    feature = "nli-cuda",
+    feature = "nli-rocm"
+))]
+use kb_eval::infer::cli::ServeArgs;
+
+/// `inference-server <serve|service …>`.
+#[cfg(any(
+    feature = "nli-directml",
+    feature = "nli-coreml",
+    feature = "nli-cuda",
+    feature = "nli-rocm"
+))]
+#[derive(clap::Parser)]
+#[command(name = "inference-server", version = glossa::version())]
+// Parsed once at startup; the Serve/Service size gap doesn't matter, and boxing ServeArgs would
+// break clap's flatten-in-tuple-variant derive.
+#[allow(clippy::large_enum_variant)]
+enum Cli {
+    /// Serve the NLI + reranker over HTTP.
+    Serve(ServeArgs),
+    /// Install/manage the server as an OS service (Windows SCM / Linux systemd).
+    Service {
+        #[command(subcommand)]
+        action: InferServiceAction,
+    },
+}
+
+#[cfg(any(
+    feature = "nli-directml",
+    feature = "nli-coreml",
+    feature = "nli-cuda",
+    feature = "nli-rocm"
+))]
+#[derive(clap::Subcommand)]
+enum InferServiceAction {
+    /// Install (register) a service that runs `serve` with the given flags.
+    Install(InferInstallOpts),
+    /// Remove a service.
+    Uninstall(glossa::service_cli::NameArg),
+    /// Start a service.
+    Start(glossa::service_cli::NameArg),
+    /// Stop a service.
+    Stop(glossa::service_cli::NameArg),
+    /// Print a service's status.
+    Status(glossa::service_cli::NameArg),
+}
+
+#[cfg(any(
+    feature = "nli-directml",
+    feature = "nli-coreml",
+    feature = "nli-cuda",
+    feature = "nli-rocm"
+))]
+#[derive(clap::Args)]
+struct InferInstallOpts {
+    /// Unique service name (the SCM/systemd key).
+    #[arg(long = "service-name")]
+    service_name: String,
+    /// The `inference-server serve` flags to bake into the service — pass them after `--`, e.g.
+    /// `inference-server service install --service-name s -- --rerank-repo <repo> --bind <addr>`.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    serve_args: Vec<String>,
+}
 
 #[cfg(any(
     feature = "nli-directml",
@@ -10,16 +79,84 @@
 ))]
 fn main() -> anyhow::Result<()> {
     use clap::Parser;
-    use kb_eval::infer::{cli::ServeArgs, guard, handlers, state};
-
-    #[derive(Parser)]
-    #[command(name = "inference-server", version = glossa::version())]
-    struct Cli {
-        #[command(flatten)]
-        serve: ServeArgs,
+    match Cli::parse() {
+        Cli::Serve(args) => {
+            if args.windows_service {
+                // Launched by the SCM (binPath carries --windows-service): drive serve under the
+                // shared dispatcher (Stop/Shutdown → cancel; on_ready flips the service to Running).
+                let name = args
+                    .service_name
+                    .clone()
+                    .unwrap_or_else(|| "glossa-inference".to_string());
+                glossa::service::run_as_service(
+                    name,
+                    Box::new(move |cancel, on_ready| serve_blocking(args, cancel, on_ready)),
+                )
+            } else {
+                // Foreground / systemd: serve_blocking installs its own Ctrl-C + SIGTERM bridges and
+                // sends sd_notify readiness.
+                serve_blocking(
+                    args,
+                    tokio_util::sync::CancellationToken::new(),
+                    Box::new(|| {}),
+                )
+            }
+        }
+        Cli::Service { action } => run_service(action),
     }
+}
 
-    let args = Cli::parse().serve;
+/// Dispatch `inference-server service <action>`.
+#[cfg(any(
+    feature = "nli-directml",
+    feature = "nli-coreml",
+    feature = "nli-cuda",
+    feature = "nli-rocm"
+))]
+fn run_service(action: InferServiceAction) -> anyhow::Result<()> {
+    use kb_eval::infer::cli::infer_service_spec;
+    match action {
+        InferServiceAction::Install(o) => {
+            let program = std::env::current_exe()
+                .map_err(|e| anyhow::anyhow!("cannot resolve the inference-server path: {e}"))?;
+            glossa::service::install(&infer_service_spec(&o.service_name, program, &o.serve_args))?;
+            println!("installed service {}", o.service_name);
+        }
+        InferServiceAction::Uninstall(n) => {
+            glossa::service::uninstall(&n.service_name)?;
+            println!("uninstalled service {}", n.service_name);
+        }
+        InferServiceAction::Start(n) => {
+            glossa::service::start(&n.service_name)?;
+            println!("started service {}", n.service_name);
+        }
+        InferServiceAction::Stop(n) => {
+            glossa::service::stop(&n.service_name)?;
+            println!("stopped service {}", n.service_name);
+        }
+        InferServiceAction::Status(n) => {
+            println!("{}", glossa::service::status(&n.service_name)?);
+        }
+    }
+    Ok(())
+}
+
+/// Serve until `cancel` is tripped, calling `on_ready` once the socket is bound and the models are
+/// warm. `cancel` is driven by the caller: the Windows SCM control handler under a service, or the
+/// Ctrl-C / SIGTERM bridges this function installs for the foreground / systemd path.
+#[cfg(any(
+    feature = "nli-directml",
+    feature = "nli-coreml",
+    feature = "nli-cuda",
+    feature = "nli-rocm"
+))]
+fn serve_blocking(
+    args: ServeArgs,
+    cancel: tokio_util::sync::CancellationToken,
+    on_ready: Box<dyn FnOnce() + Send>,
+) -> anyhow::Result<()> {
+    use kb_eval::infer::{guard, handlers, state};
+
     // Derive has_auth from the RESOLVED key (a named-but-empty --api-key-file must not count as
     // auth, and resolving it here also fails fast on an empty key-file).
     let has_auth = args.effective_auth()?.is_some();
@@ -53,10 +190,35 @@ fn main() -> anyhow::Result<()> {
             eprintln!("note: no --max-concurrency cap; requests queue on the model session under load (no 429 shed).");
         }
 
+        // Shutdown signals → cancel. Ctrl-C (foreground) always; SIGTERM (systemd stop) on unix.
+        // Harmless under the Windows SCM, where the control handler already drives `cancel`.
+        {
+            let c = cancel.clone();
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                c.cancel();
+            });
+        }
+        #[cfg(unix)]
+        {
+            let c = cancel.clone();
+            tokio::spawn(async move {
+                if let Ok(mut term) = tokio::signal::unix::signal(
+                    tokio::signal::unix::SignalKind::terminate(),
+                ) {
+                    term.recv().await;
+                    c.cancel();
+                }
+            });
+        }
+
         // Warm on a blocking task so the server is already accepting (and answering 503) during load.
+        // Once warm, flip readiness: `on_ready` (SCM → Running), systemd `sd_notify` READY, and start
+        // the watchdog pinger if the supervisor configured one.
         {
             let w = st.clone();
             let bind_msg = bind.clone();
+            let wd_cancel = cancel.clone();
             tokio::task::spawn_blocking(move || match w.warm() {
                 Ok(()) => {
                     let nli_ep = w.nli_ep.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -64,22 +226,16 @@ fn main() -> anyhow::Result<()> {
                     println!("inference-server READY on {scheme}://{bind_msg}  (nli_ep={nli_ep:?} rerank_ep={rerank_ep:?})");
                     println!("  kbx nli set    --scorer http --endpoint {scheme}://{bind_msg}");
                     println!("  kbx rerank set --scorer http --endpoint {scheme}://{bind_msg}");
+                    on_ready();
+                    glossa::sdnotify::ready();
+                    if let Some(usec) = glossa::sdnotify::watchdog_usec() {
+                        glossa::sdnotify::spawn_watchdog(usec, wd_cancel);
+                    }
                 }
                 Err(e) => {
                     eprintln!("model load failed: {e}");
                     std::process::exit(1);
                 }
-            });
-        }
-
-        // One cancellation token drives graceful shutdown for both the HTTP and HTTPS serve loops
-        // (and the TLS cert-reload poller); ctrl_c cancels it.
-        let cancel = tokio_util::sync::CancellationToken::new();
-        {
-            let c = cancel.clone();
-            tokio::spawn(async move {
-                let _ = tokio::signal::ctrl_c().await;
-                c.cancel();
             });
         }
 
@@ -137,6 +293,8 @@ fn main() -> anyhow::Result<()> {
                     .await?;
             }
         }
+        // Serve loop returned (cancel tripped): tell systemd we are stopping.
+        glossa::sdnotify::stopping();
         anyhow::Ok(())
     })
 }

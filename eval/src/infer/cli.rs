@@ -148,6 +148,34 @@ pub fn resolve_key(
     }
 }
 
+/// Build the [`glossa::service::ServiceSpec`] for an `inference-server` service: `serve` + the given
+/// serve flags (repos/device/bind/…), plus the `--windows-service`/`--service-name` flags the
+/// SCM-launched process routes on (appended only if not already present). `program` is the
+/// inference-server executable path.
+pub fn infer_service_spec(
+    name: &str,
+    program: PathBuf,
+    serve_args: &[String],
+) -> glossa::service::ServiceSpec {
+    let mut args = vec!["serve".to_string()];
+    args.extend(serve_args.iter().cloned());
+    if !args.iter().any(|a| a == "--windows-service") {
+        args.push("--windows-service".to_string());
+    }
+    if !args.iter().any(|a| a == "--service-name") {
+        args.push("--service-name".to_string());
+        args.push(name.to_string());
+    }
+    glossa::service::ServiceSpec {
+        name: name.to_string(),
+        display_name: format!("Glossa inference-server ({name})"),
+        description: format!("Glossa NLI + reranker HTTP scorer ({name})"),
+        program,
+        args,
+        watchdog: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +203,25 @@ mod tests {
     fn resolve_key_inline_wins_and_none_when_absent() {
         assert_eq!(resolve_key(Some("k"), None).unwrap(), Some("k".to_string()));
         assert_eq!(resolve_key(None, None).unwrap(), None);
+    }
+
+    #[test]
+    fn infer_service_spec_bakes_serve_and_service_flags() {
+        let s = infer_service_spec(
+            "glossa-scorer",
+            "C:/bin/inference-server.exe".into(),
+            &[
+                "--rerank-repo".into(),
+                "metalmon80/bge-reranker-v2-m3-en-ru-onnx".into(),
+                "--bind".into(),
+                "127.0.0.1:8071".into(),
+            ],
+        );
+        assert!(s.args.starts_with(&["serve".to_string()]));
+        assert!(s.args.iter().any(|a| a == "--windows-service"));
+        assert!(s
+            .args
+            .windows(2)
+            .any(|w| w == ["--service-name", "glossa-scorer"]));
     }
 }
