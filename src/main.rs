@@ -191,6 +191,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Install/manage `kb` as an OS service (Windows SCM / Linux systemd), always streamable-http.
+    /// `install --service-name <n> <corpus> --bind <addr> [--profile …] [--allowed-host …]…
+    /// [--vision] [--dedup]`; `uninstall|start|stop|status <name>`.
+    Service {
+        #[command(subcommand)]
+        action: glossa::service_cli::ServiceAction,
+    },
     /// Search the knowledge base (BM25-ranked keywords over the index).
     Search {
         /// Search keywords (BM25-ranked, stemmed). With `--scan`, a raw ripgrep regex over file text.
@@ -2186,6 +2193,7 @@ fn main() -> anyhow::Result<()> {
                 Ok(())
             }
         },
+        Cmd::Service { action } => glossa::service_cli::run(action),
         Cmd::Graph { action } => match action {
             GraphAction::Stats { path } => {
                 let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
