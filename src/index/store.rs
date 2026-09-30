@@ -313,42 +313,25 @@ impl DocIndex {
     }
 
     /// One whitespace-separated piece of the query text, turned into the query tantivy's parser
-    /// would have built for the same leaf — minus the grammar. `None` when the analyzer emits no
-    /// token (punctuation-only piece).
-    ///
-    /// Term vs phrase mirrors `query_parser::generate_literals_for_str`: one token is a `TermQuery`,
-    /// several are a `PhraseQuery` over the analyzer's `(position, term)` pairs (`body` is indexed
-    /// `WithFreqsAndPositions`, so a piece like `v3_8_7.pdf` has always been a phrase). The offsets
-    /// are used rather than a bare `PhraseQuery::new` so the phrase stays correct by construction
-    /// even if the analyzer ever starts dropping tokens.
+    /// `(position, token)` pairs for ONE whitespace-separated piece of the query text. Empty when
+    /// the piece is punctuation only.
     ///
     /// The analyzer runs PER PIECE on purpose: `multilang` detects the language from the text it is
     /// handed (see `multilang::script_detector`), so analyzing a whole question at once would stem
     /// an English word inside a Russian sentence with Russian rules.
-    fn leaf_query(&self, piece: &str) -> anyhow::Result<Option<Box<dyn tantivy::query::Query>>> {
-        use tantivy::query::{PhraseQuery, Query, TermQuery};
+    fn leaf_tokens(&self, piece: &str) -> anyhow::Result<Vec<(usize, String)>> {
         let mut analyzer = self
             .index
             .tokenizers()
             .get("multilang")
             .context("index is missing the `multilang` tokenizer")?;
-        let mut terms: Vec<(usize, tantivy::Term)> = Vec::new();
+        let mut out: Vec<(usize, String)> = Vec::new();
         let mut stream = analyzer.token_stream(piece);
         while stream.advance() {
             let t = stream.token();
-            terms.push((
-                t.position,
-                tantivy::Term::from_field_text(self.fields.body, &t.text),
-            ));
+            out.push((t.position, t.text.clone()));
         }
-        Ok(match terms.len() {
-            0 => None,
-            1 => Some(Box::new(TermQuery::new(
-                terms.pop().expect("len checked").1,
-                IndexRecordOption::WithFreqs,
-            )) as Box<dyn Query>),
-            _ => Some(Box::new(PhraseQuery::new_with_offset(terms)) as Box<dyn Query>),
-        })
+        Ok(out)
     }
 
     /// The pre-2026-09-30 implementation, kept ONLY as a differential oracle for the parity tests:
@@ -392,7 +375,7 @@ impl DocIndex {
     /// BM25 search over `body` for a KEYWORD query — the caller's own words, not a query DSL.
     ///
     /// The text is split on whitespace and each piece analyzed separately; pieces are OR'd
-    /// (`Occur::Should`), one clause per occurrence so a repeated word keeps its weight. Nothing is
+    /// (`Occur::Should`), identical pieces collapsing into one clause as the parser does. Nothing is
     /// parsed, so `[`, `:`, `-`, `+`, `"`, `*` and the words AND/OR/NOT/IN are ordinary text rather
     /// than syntax. As a query DSL they made a question containing a bracketed placeholder, a URL or
     /// a word followed by a colon fail outright, and quietly re-aimed the ones that did parse (a
@@ -404,12 +387,41 @@ impl DocIndex {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        use tantivy::query::{PhraseQuery, TermQuery};
         let searcher = self.reader.searcher();
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        // Identical leaves collapse into one clause, which is what the parser does: its own
+        // `test_deduplication` shows `"be be"` yielding a single term per field. Emitting a clause
+        // per occurrence instead double-counts a repeated word — caught by the parity test against
+        // the old implementation (score 7.12 vs 4.33 on `alpha bravo alpha`).
+        let mut seen: Vec<Vec<String>> = Vec::new();
         for piece in query.split_whitespace() {
-            if let Some(q) = self.leaf_query(piece)? {
-                clauses.push((Occur::Should, q));
+            let toks = self.leaf_tokens(piece)?;
+            if toks.is_empty() {
+                continue;
             }
+            let key: Vec<String> = toks.iter().map(|(_, t)| t.clone()).collect();
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+            let term = |t: &str| tantivy::Term::from_field_text(self.fields.body, t);
+            // Term vs phrase mirrors `query_parser::generate_literals_for_str`: one token is a
+            // `TermQuery`, several are a `PhraseQuery` over the analyzer's `(position, term)` pairs
+            // (`body` is indexed `WithFreqsAndPositions`, so a piece like `v3_8_7.pdf` has always
+            // been a phrase). The offsets are used rather than a bare `PhraseQuery::new` so the
+            // phrase stays correct even if the analyzer ever starts dropping tokens.
+            let q: Box<dyn Query> = if toks.len() == 1 {
+                Box::new(TermQuery::new(
+                    term(&toks[0].1),
+                    IndexRecordOption::WithFreqs,
+                ))
+            } else {
+                Box::new(PhraseQuery::new_with_offset(
+                    toks.iter().map(|(p, t)| (*p, term(t))).collect(),
+                ))
+            };
+            clauses.push((Occur::Should, q));
         }
         if clauses.is_empty() {
             return Ok(Vec::new());
@@ -4850,7 +4862,7 @@ mod search_tests {
         for q in [
             "alpha",             // single word
             "bravo delta",       // several words
-            "alpha bravo alpha", // a repeated word must keep its doubled weight
+            "alpha bravo alpha", // a repeat collapses into one clause, as the parser does
             "2.2.7.1",           // one piece, several tokens -> PhraseQuery
             "Modbus настройка",  // mixed scripts: per-piece language detection
             "словоКоторогоНетВКорпусе",
