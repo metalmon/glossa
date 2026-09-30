@@ -959,16 +959,19 @@ mod ort_engine {
                 return;
             };
             let huge = 64 * DEFAULT_MAX_SEQ_LEN;
-            let err = InProcessReranker::load(
+            // `match`, not `expect_err`: the Ok type has no `Debug`, and deriving one on a handle
+            // that owns an ONNX session to satisfy a test would be the test shaping the code.
+            let err = match InProcessReranker::load(
                 Path::new(&dir),
                 &["cpu".to_string()],
                 None,
                 Some(1), // a 1 MB arena cannot hold a 64-row batch
                 Some(huge),
                 None,
-            )
-            .expect_err("a budget this size must not load")
-            .to_string();
+            ) {
+                Ok(_) => panic!("a budget of {huge} tokens must not load under a 1 MB arena"),
+                Err(e) => e.to_string(),
+            };
             assert!(err.contains("batch_tokens"), "{err}");
             assert!(err.contains(&huge.to_string()), "{err}");
         }
