@@ -110,7 +110,15 @@ pub fn search(
                 trace.log(
                     "rerank",
                     json!({"query": query}),
-                    json!({"pool": info.pool, "returned": hits.len()}),
+                    json!({"pool": info.pool, "returned": hits.len(), "applied": true}),
+                );
+            } else if let Some(reason) = &info.fallback {
+                // A configured reranker that died at runtime. Logging nothing here would leave the
+                // trace showing plain BM25 with no hint that reranking was supposed to happen.
+                trace.log(
+                    "rerank",
+                    json!({"query": query}),
+                    json!({"pool": info.pool, "returned": hits.len(), "applied": false, "fallback": reason}),
                 );
             }
             let body = if hits.is_empty() {

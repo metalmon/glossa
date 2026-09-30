@@ -1546,7 +1546,8 @@ impl GlossaServer {
             &h.idx(),
             &glossa_dir,
             &a.query,
-            a.limit.unwrap_or(50),
+            a.limit
+                .unwrap_or(crate::retrieve::config::DEFAULT_SEARCH_LIMIT),
             a.glob.as_deref(),
             a.file_type.as_deref(),
             &self.trace,

@@ -9,6 +9,12 @@ use crate::graph::ontology::Ontology;
 // out of the box rerank reorders the same 50 hits rather than pooling deeper.
 pub const DEFAULT_POOL_SIZE: usize = 50;
 
+/// How many hits the AGENT's `search` tool returns when the call names no `limit` — the depth a
+/// reader actually sees in production. Named rather than repeated so a harness measuring "what can
+/// production surface" reads that depth instead of picking its own. (`kb search -l` defaults
+/// higher: it prints to a human, who scrolls.)
+pub const DEFAULT_SEARCH_LIMIT: usize = 50;
+
 pub struct RerankConfig {
     pub enabled: bool,
     pub scorer: Option<String>,

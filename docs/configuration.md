@@ -206,6 +206,23 @@ The reranker `/rerank` endpoint is interoperable across servers: point `endpoint
 remapped back to input order regardless of backend. (NLI grounding — `[verify.nli]` — stays on the
 TEI `/predict` or `kbi` protocol; only the reranker is multi-backend.)
 
+#### `device = "directml"` and reshape-heavy exports
+
+DirectML's `Reshape` kernel rejects a target shape that is computed at run time and still carries
+the `-1` placeholder. Cross-encoders exported by recent PyTorch build every attention reshape that
+way — `Concat(Shape(ids, start=0, end=1), Shape(mask, start=1, end=2), [-1], [64])` — so such a
+model loads, reports `ep_active = directml (initialized)`, and then fails on the first forward with
+
+```
+Non-zero status code returned while running Reshape node ... DmlExecutionProvider ... 80070057
+```
+
+No session setting avoids it (every graph-optimization level and either memory-pattern mode fail
+identically); the CUDA and CPU providers run the same file without complaint. The fix is in the
+model: substitute each `-1` with the dimension it stands for — always a fixed feature dimension, so
+the scores are unchanged — and re-save. `kbx rerank check --device directml` is the one-command
+test, and it exits non-zero on the failure rather than reporting a ready engine.
+
 ## Eval-harness config (`lab.toml`)
 
 The `kbx` eval/train toolkit reads its own `lab.toml`. Two knobs worth calling out here:

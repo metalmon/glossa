@@ -21,16 +21,27 @@ pub fn chain_recall(gold: &HashSet<String>, retrieved: &HashSet<String>) -> (boo
 }
 
 /// One-line description of the retrieval path a run actually used. `reranked` is
-/// [`glossa::retrieve::rerank::RerankInfo::reranked`] — false covers both "no `[rerank]` configured"
-/// and "configured but the model failed to load", which `retrieve()` treats identically (fail-open
-/// to BM25). Reporting which path RAN matters more than which was requested: a spike whose reranker
-/// silently failed to load would otherwise read its control arm as its treatment arm.
-pub fn retrieval_line(via_search: bool, reranked: bool, pool: usize) -> String {
+/// [`glossa::retrieve::rerank::RerankInfo::reranked`], and `fallback` its companion reason —
+/// present only when a reranker WAS configured and then failed at runtime, which is a different
+/// situation from no reranker at all and used to be reported as the same thing. Reporting which
+/// path RAN matters more than which was requested: a spike whose reranker failed would otherwise
+/// read its control arm as its treatment arm.
+pub fn retrieval_line(
+    via_search: bool,
+    reranked: bool,
+    pool: usize,
+    fallback: Option<&str>,
+) -> String {
     if !via_search {
         return "retrieval: graph (glossary over the reasoning graph)".to_string();
     }
     if reranked {
         format!("retrieval: search (BM25 pool of {pool}, reranked by the configured cross-encoder)")
+    } else if let Some(reason) = fallback {
+        format!(
+            "retrieval: search (BM25 over the index; the CONFIGURED reranker FAILED at runtime \
+             and every query fell back to BM25 order — {reason})"
+        )
     } else {
         "retrieval: search (BM25 over the index; no rerank applied)".to_string()
     }
@@ -205,9 +216,11 @@ pub struct FcrArgs {
     /// Override the workspace's default `dataset.toml`.
     #[arg(long)]
     pub dataset: Option<PathBuf>,
-    /// Retrieve this many hits per question before checking gold coverage.
-    #[arg(long, default_value_t = 20)]
-    pub k: usize,
+    /// Retrieve this many hits per question before checking gold coverage. Unset ⇒ the depth
+    /// production serves at (the agent `search` tool's default limit), so the default run answers
+    /// "what can production surface" rather than a depth nothing uses.
+    #[arg(long)]
+    pub k: Option<usize>,
     /// Only score cases whose `tags` include this value.
     #[arg(long = "tag-filter")]
     pub tag_filter: Option<String>,
@@ -215,6 +228,41 @@ pub struct FcrArgs {
     /// reasoning graph). `graph` ignores `--k` (glossary returns its own bounded neighbourhood).
     #[arg(long, value_enum, default_value_t = Via::Search)]
     pub via: Via,
+}
+
+/// The depth an FCR run scores at, plus the lines that say where it came from and what it can
+/// show. Pure, so the reasoning is testable without an index or a corpus.
+///
+/// Two traps live here, and both were paid for before this function existed:
+/// * a hardcoded default depth quietly measures something production never does — a harness that
+///   retrieves 20 while the reader is handed 50 reports a level ~9 points below the real one;
+/// * at `k >= pool_size` reranking is INVISIBLE to FCR: `retrieve_with` fetches `pool_size.max(k)`
+///   and the cross-encoder only reorders that pool, while FCR asks whether gold is IN the returned
+///   set. Same set, different order, identical numbers — and a GPU run that costs 7x the time.
+pub fn resolve_k(
+    requested: Option<usize>,
+    pool_size: usize,
+    rerank_enabled: bool,
+) -> (usize, Vec<String>) {
+    let k = requested.unwrap_or(glossa::retrieve::config::DEFAULT_SEARCH_LIMIT);
+    let mut notes = Vec::new();
+    notes.push(match requested {
+        Some(_) => format!("depth: k = {k} (--k)"),
+        None => format!(
+            "depth: k = {k} (the agent `search` tool's default limit; pass --k to override)"
+        ),
+    });
+    if rerank_enabled {
+        notes.push(format!("rerank: [rerank] is on, pool_size = {pool_size}"));
+        if k >= pool_size {
+            notes.push(
+                "         at k >= pool_size reranking only REORDERS the returned set, which FCR \
+                 does not measure — run with --k below pool_size to see the reranker at all"
+                    .to_string(),
+            );
+        }
+    }
+    (k, notes)
 }
 
 /// Which retrieval path `kbx eval fcr` measures.
@@ -256,9 +304,16 @@ pub fn run_fcr(args: FcrArgs) -> anyhow::Result<()> {
     // The overlay that carries `[rerank]`. `state_base` — not `root` — because the two diverge
     // whenever a caller went through `resolve_with` with an explicit `--state-dir`.
     let glossa_dir = crate::workspace::glossa_dir(&paths.state_base);
+    // The retrieval depth is resolved from the SAME config the serving path reads, so a default run
+    // measures the corpus as it is actually served rather than at a depth chosen by this harness.
+    let rerank_cfg = glossa::retrieve::config::RerankConfig::resolve(&glossa_dir);
+    let (k, k_notes) = resolve_k(args.k, rerank_cfg.pool_size, rerank_cfg.enabled);
     // What the search arm actually did, for the header line. Every question takes the same path, so
     // the last observation describes the run.
     let mut rerank_seen = (false, 0usize);
+    // The reason a configured reranker fell back, if it did. Kept separately from `rerank_seen`
+    // because "no reranker" and "the reranker died" produce the same hits and must not read alike.
+    let mut rerank_fallback: Option<String> = None;
     // Queries whose retrieval call errored. They score as zero coverage, so a non-zero count means
     // the reported percentages understate retrieval for a non-retrieval reason.
     let mut retrieval_errors = 0usize;
@@ -303,13 +358,16 @@ pub fn run_fcr(args: FcrArgs) -> anyhow::Result<()> {
                 &idx,
                 &glossa_dir,
                 &q.question,
-                args.k,
+                k,
                 None,
                 None,
                 None,
             ) {
                 Ok((hits, info)) => {
                     rerank_seen = (info.reranked, info.pool);
+                    if let Some(reason) = info.fallback {
+                        rerank_fallback = Some(reason);
+                    }
                     hits.iter()
                         .map(|h| format!("{}#{}", h.path, h.ord))
                         .collect()
@@ -334,9 +392,21 @@ pub fn run_fcr(args: FcrArgs) -> anyhow::Result<()> {
 
     println!(
         "{}",
-        retrieval_line(args.via == Via::Search, rerank_seen.0, rerank_seen.1)
+        retrieval_line(
+            args.via == Via::Search,
+            rerank_seen.0,
+            rerank_seen.1,
+            rerank_fallback.as_deref()
+        )
     );
-    print!("{}", report.render(args.k));
+    // `--via graph` returns its own bounded neighbourhood, so a depth line would describe a knob
+    // that run did not use.
+    if args.via == Via::Search {
+        for note in &k_notes {
+            println!("{note}");
+        }
+    }
+    print!("{}", report.render(k));
     if retrieval_errors > 0 {
         println!(
             "WARNING: {retrieval_errors} question(s) failed retrieval and scored as zero coverage — \
@@ -469,19 +539,73 @@ mod tests {
     /// the treatment arm.
     #[test]
     fn retrieval_line_distinguishes_reranked_from_failed_open() {
-        let on = retrieval_line(true, true, 200);
+        let on = retrieval_line(true, true, 200, None);
         assert!(on.contains("rerank"), "{on}");
         assert!(on.contains("200"), "pool size must be visible: {on}");
 
-        let off = retrieval_line(true, false, 0);
+        let off = retrieval_line(true, false, 0, None);
         assert!(off.contains("BM25"), "{off}");
         assert!(
             !off.contains("reranked"),
             "must not claim rerank applied when it did not: {off}"
         );
 
-        let graph = retrieval_line(false, false, 0);
+        let graph = retrieval_line(false, false, 0, None);
         assert!(graph.contains("graph"), "{graph}");
+    }
+
+    /// "no reranker configured" and "the configured reranker died on every query" produce the same
+    /// hits, so only the report can tell them apart. A run of the second kind that reads like the
+    /// first is a measurement reporting a control arm as a treatment arm.
+    #[test]
+    fn retrieval_line_names_a_runtime_rerank_failure() {
+        let dead = retrieval_line(true, false, 50, Some("Reshape node: 80070057"));
+        assert!(dead.contains("FAILED"), "{dead}");
+        assert!(
+            dead.contains("80070057"),
+            "the engine's own error is what makes it diagnosable: {dead}"
+        );
+        let quiet = retrieval_line(true, false, 50, None);
+        assert!(
+            !quiet.contains("FAILED"),
+            "no reranker configured is not a failure: {quiet}"
+        );
+    }
+
+    #[test]
+    fn k_defaults_to_the_production_search_depth() {
+        let (k, notes) = resolve_k(None, 50, false);
+        assert_eq!(k, glossa::retrieve::config::DEFAULT_SEARCH_LIMIT);
+        assert!(
+            notes[0].contains(&k.to_string()) && notes[0].contains("default limit"),
+            "the report must say where the depth came from: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_k_wins_over_the_production_depth() {
+        let (k, notes) = resolve_k(Some(7), 50, false);
+        assert_eq!(k, 7);
+        assert!(notes[0].contains("--k"), "{notes:?}");
+    }
+
+    /// `retrieve_with` fetches `pool_size.max(k)` and the cross-encoder only reorders it, so at
+    /// `k >= pool_size` the returned SET — the thing FCR measures — cannot change. A run in that
+    /// configuration pays for the GPU and learns nothing about reranking; the report says so.
+    #[test]
+    fn warns_that_fcr_cannot_see_reranking_at_or_above_pool_size() {
+        let (_, at_pool) = resolve_k(Some(50), 50, true);
+        assert!(at_pool.iter().any(|n| n.contains("REORDER")), "{at_pool:?}");
+        let (_, below) = resolve_k(Some(10), 50, true);
+        assert!(
+            !below.iter().any(|n| n.contains("REORDER")),
+            "below pool_size reranking IS visible: {below:?}"
+        );
+        let (_, no_rerank) = resolve_k(Some(50), 50, false);
+        assert!(
+            no_rerank.iter().all(|n| !n.contains("rerank")),
+            "nothing to warn about with no reranker: {no_rerank:?}"
+        );
     }
 
     #[test]

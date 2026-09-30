@@ -21,21 +21,40 @@ impl Reranker for MockReranker {
 }
 
 pub struct RerankInfo {
+    /// True only when the cross-encoder actually scored the pool and the returned hits are in ITS
+    /// order. A configured reranker that failed at runtime reports `false` + a [`RerankInfo::fallback`]
+    /// reason — the hits are then plain BM25 and every consumer that reads this field is told so.
     pub reranked: bool,
     pub pool: usize,
+    /// Why the reranker did not apply, when one WAS configured and failed at runtime. `None` covers
+    /// both "no reranker configured" and "rerank applied", which `reranked` already distinguishes.
+    pub fallback: Option<String>,
+}
+
+/// What [`rerank_hits`] actually did. Returned alongside the hits because the two cases are
+/// indistinguishable from the hits alone: a fail-open returns BM25 order, which is exactly what a
+/// reranker that scored the pool in BM25 order would also return.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RerankOutcome {
+    /// The cross-encoder scored the whole pool; the hits carry its order and its scores.
+    Applied,
+    /// The scorer errored or returned the wrong number of scores. The hits are the BM25 order,
+    /// trimmed. Carries the reason, so a caller can report it instead of discarding it.
+    FailedOpen(String),
 }
 
 /// Reorder `pool` by a fresh cross-encoder score and keep the top `top_n`. The returned hits carry
 /// the RERANK score in `RankedHit.score` (so the trace + eval `ranked_sources` reflect rerank order —
 /// see plan Global Constraints). Fail-open: any scorer error or a score/length mismatch returns the
-/// BM25 order (trimmed to `top_n`) unchanged.
+/// BM25 order (trimmed to `top_n`) unchanged, together with a [`RerankOutcome::FailedOpen`] naming
+/// the cause. Pure — logging the failure belongs to the caller (see [`retrieve_with`]).
 pub fn rerank_hits(
     idx: &DocIndex,
     query: &str,
     pool: Vec<RankedHit>,
     rr: &dyn Reranker,
     top_n: usize,
-) -> Vec<RankedHit> {
+) -> (Vec<RankedHit>, RerankOutcome) {
     // Chunk text from the index's stored body (no disk re-parse). An unresolvable chunk gets "" and
     // sinks; it never panics.
     let texts: Vec<String> = pool
@@ -49,12 +68,12 @@ pub fn rerank_hits(
         })
         .collect();
     let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-    match rr.rerank(query, &refs) {
+    let reason = match rr.rerank(query, &refs) {
         Ok(scores) if scores.len() == pool.len() => {
             let mut order: Vec<usize> = (0..pool.len()).collect();
             // Descending by score; stable so equal scores keep BM25 order.
             order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
-            order
+            let hits = order
                 .into_iter()
                 .take(top_n)
                 .map(|i| {
@@ -62,10 +81,19 @@ pub fn rerank_hits(
                     h.score = scores[i]; // rerank logit becomes the reported score
                     h
                 })
-                .collect()
+                .collect();
+            return (hits, RerankOutcome::Applied);
         }
-        _ => pool.into_iter().take(top_n).collect(), // fail-open: BM25 order
-    }
+        Ok(scores) => format!(
+            "scorer returned {} score(s) for a pool of {}",
+            scores.len(),
+            pool.len()
+        ),
+        Err(e) => e.to_string(),
+    };
+    // Fail-open: BM25 order, with the cause carried out rather than dropped.
+    let hits = pool.into_iter().take(top_n).collect();
+    (hits, RerankOutcome::FailedOpen(reason))
 }
 
 /// Fetch + (optionally) rerank. With `reranker = None` this is `search_filtered(limit)` verbatim
@@ -87,12 +115,23 @@ pub fn retrieve_with(
             let pool =
                 idx.search_filtered(query, pool_size.max(limit).max(1), glob, file_type, scope)?;
             let n = pool.len();
-            let hits = rerank_hits(idx, query, pool, rr, limit.max(1));
+            let (hits, outcome) = rerank_hits(idx, query, pool, rr, limit.max(1));
+            // A reranker that dies at runtime used to be invisible: the hits silently became BM25
+            // while `reranked` still said true. Say it on stderr AND in the info, so neither a user
+            // watching a session nor a measurement harness mistakes BM25 order for rerank order.
+            let fallback = match outcome {
+                RerankOutcome::Applied => None,
+                RerankOutcome::FailedOpen(reason) => {
+                    eprintln!("rerank failed, falling back to BM25 order: {reason}");
+                    Some(reason)
+                }
+            };
             Ok((
                 hits,
                 RerankInfo {
-                    reranked: true,
+                    reranked: fallback.is_none(),
                     pool: n,
+                    fallback,
                 },
             ))
         }
@@ -104,6 +143,7 @@ pub fn retrieve_with(
                 RerankInfo {
                     reranked: false,
                     pool: n,
+                    fallback: None,
                 },
             ))
         }
@@ -288,7 +328,8 @@ mod tests {
     fn rerank_hits_reorders_by_descending_score() {
         let (_d, idx) = idx_with_pages();
         let pool = idx.search_filtered("swap", 10, None, None, None).unwrap();
-        let out = rerank_hits(&idx, "swap", pool, &ByPath, 10);
+        let (out, outcome) = rerank_hits(&idx, "swap", pool, &ByPath, 10);
+        assert_eq!(outcome, RerankOutcome::Applied);
         let bodies: Vec<String> = out
             .iter()
             .map(|h| idx.read_chunk_by_ord(&h.path, h.ord).unwrap().unwrap().body)
@@ -305,7 +346,7 @@ mod tests {
     fn rerank_hits_carries_rerank_score_into_hit_score() {
         let (_d, idx) = idx_with_pages();
         let pool = idx.search_filtered("swap", 10, None, None, None).unwrap();
-        let out = rerank_hits(&idx, "swap", pool, &ByPath, 10);
+        let (out, _) = rerank_hits(&idx, "swap", pool, &ByPath, 10);
         assert_eq!(out[0].score, 3.0); // top hit's score is the rerank logit, not BM25
     }
 
@@ -313,7 +354,7 @@ mod tests {
     fn rerank_hits_trims_to_top_n() {
         let (_d, idx) = idx_with_pages();
         let pool = idx.search_filtered("swap", 10, None, None, None).unwrap();
-        let out = rerank_hits(&idx, "swap", pool, &ByPath, 2);
+        let (out, _) = rerank_hits(&idx, "swap", pool, &ByPath, 2);
         assert_eq!(out.len(), 2);
     }
 
@@ -323,10 +364,20 @@ mod tests {
         let pool = idx.search_filtered("swap", 10, None, None, None).unwrap();
         let expected = pool.clone();
         // MockReranker returns too few scores -> fail open to BM25 order.
-        let out = rerank_hits(&idx, "swap", pool, &MockReranker { scores: vec![1.0] }, 10);
+        let (out, outcome) =
+            rerank_hits(&idx, "swap", pool, &MockReranker { scores: vec![1.0] }, 10);
         assert_eq!(
             out.iter().map(|h| h.ord).collect::<Vec<_>>(),
             expected.iter().map(|h| h.ord).collect::<Vec<_>>()
+        );
+        // The count mismatch names both numbers: "3 scores for a pool of 1" and its reverse are
+        // different defects, and a reason that says only "mismatch" cannot tell them apart.
+        let RerankOutcome::FailedOpen(reason) = outcome else {
+            panic!("a short score vector must not report Applied");
+        };
+        assert!(
+            reason.contains('1') && reason.contains('3'),
+            "reason should carry both lengths: {reason}"
         );
     }
 
@@ -343,11 +394,55 @@ mod tests {
         let pool = idx.search_filtered("swap", 10, None, None, None).unwrap();
         let expected = pool.clone();
         // FailingReranker always errors -> fail open to BM25 order.
-        let out = rerank_hits(&idx, "swap", pool, &FailingReranker, 10);
+        let (out, outcome) = rerank_hits(&idx, "swap", pool, &FailingReranker, 10);
         assert_eq!(
             out.iter().map(|h| h.ord).collect::<Vec<_>>(),
             expected.iter().map(|h| h.ord).collect::<Vec<_>>()
         );
+        assert_eq!(
+            outcome,
+            RerankOutcome::FailedOpen("boom".to_string()),
+            "the scorer's own error text is what makes a runtime failure diagnosable"
+        );
+    }
+
+    #[test]
+    fn retrieve_with_reports_not_reranked_when_the_scorer_dies() {
+        let (_d, idx) = idx_with_pages();
+        // The defect this pins: a reranker that loads and then fails on every call (what the
+        // DirectML build does) used to return `reranked: true` with BM25 hits, so a broken engine
+        // reported success and a measurement harness read its control arm as its treatment arm.
+        let (hits, info) = retrieve_with(
+            &idx,
+            "swap",
+            2,
+            None,
+            None,
+            None,
+            Some(&FailingReranker),
+            50,
+        )
+        .unwrap();
+        let base = idx.search_filtered("swap", 2, None, None, None).unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.ord).collect::<Vec<_>>(),
+            base.iter().map(|h| h.ord).collect::<Vec<_>>(),
+            "serving still fails open to BM25 — that part is deliberate"
+        );
+        assert!(
+            !info.reranked,
+            "a failed rerank must not claim to have ranked"
+        );
+        assert_eq!(info.fallback.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn retrieve_with_reports_reranked_and_no_fallback_when_the_scorer_works() {
+        let (_d, idx) = idx_with_pages();
+        let (_hits, info) =
+            retrieve_with(&idx, "swap", 2, None, None, None, Some(&ByPath), 50).unwrap();
+        assert!(info.reranked);
+        assert_eq!(info.fallback, None);
     }
 
     #[test]

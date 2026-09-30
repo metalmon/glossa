@@ -10,6 +10,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **BREAKING — CLI restructure.** The inference-server binary is renamed **`inference-server` → `kbi`**, and it now serves by default (bare `kbi <flags>`; the `serve` subcommand is gone), with `kbi service …` for install/management. The `kb` service command moves **`kb service` → `kb mcp service`** (the service is specifically the MCP service). Migration for an already-installed inference-server service: uninstall it, redeploy `~/bin` (`kbi` replaces `inference-server`), and reinstall via `kbi service install`.
 
+### Fixed
+
+- **A reranker that dies at run time no longer reports success.** `rerank_hits` swallowed every scorer error into a silent fall-back to BM25 order while `RerankInfo.reranked` was set unconditionally, so a build whose cross-encoder cannot execute served plain BM25 and told the trace it had reranked. The fall-back stays (serving must not fail on a dead scorer), but it now carries the cause: stderr names it, the `search` trace records `applied: false` plus the reason, and `kbx eval fcr` reports the run as a rerank FAILURE rather than as "no rerank configured" — the two used to be indistinguishable in a measurement.
+
+### Changed
+
+- **`kbx eval fcr --k` defaults to the production retrieval depth** (the agent `search` tool's default limit) instead of a hardcoded 20, and the report names where the depth came from. It also warns when `--k >= [rerank].pool_size`, where reranking can only reorder the returned set and therefore cannot move FCR at all.
+
 ### Added
 
 - **`kb mcp service` config parity.** `kb mcp service install` accepts the same global `--config` / `--root` / `--state-dir` as a direct `kb mcp`, plus `--vision` / `--dedup`, and bakes them into the service command — so a service is configured exactly like a foreground run.
