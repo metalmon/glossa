@@ -65,6 +65,15 @@ pub struct VerifyConfig {
     /// expose no memory option in this ort version and ignore it. Sourced from env
     /// `GLOSSA_VERIFY_NLI_GPU_MEM_MB` else ontology `[verify.nli].ep_mem_limit_mb`.
     pub execution_provider_mem_limit_mb: Option<usize>,
+    /// Per-batch token budget for the in-process NLI session. `None` ⇒ the engine default.
+    /// Env `GLOSSA_VERIFY_NLI_BATCH_TOKENS`, then `[verify.nli].batch_tokens`. `in_process` only,
+    /// and it ADDS UP with `[rerank].batch_tokens` on a shared device — an ORT arena never returns
+    /// a batch's peak, so both stay resident for the life of the process.
+    pub batch_tokens: Option<usize>,
+    /// ONNX Runtime intra-op threads for the in-process NLI session. `None` ⇒ the engine default.
+    /// Env `GLOSSA_VERIFY_NLI_INTRA_THREADS`, then `[verify.nli].intra_threads`. Two engines'
+    /// thread counts oversubscribe the same cores additively.
+    pub intra_threads: Option<usize>,
     /// Remote scorer (`scorer = "http"`) endpoint base URL; `None` ⇒ `resolve_scorer` cannot build
     /// an `HttpNli` and fails open to `None`. Env `GLOSSA_VERIFY_NLI_HTTP_ENDPOINT`.
     pub endpoint: Option<String>,
@@ -188,6 +197,15 @@ impl VerifyConfig {
             // (no memory options — today's behavior). Non-integer env value is dropped by env_usize.
             execution_provider_mem_limit_mb: env_usize("GLOSSA_VERIFY_NLI_GPU_MEM_MB")
                 .or_else(|| ont.as_ref().and_then(|o| o.verify_nli_gpu_mem_mb())),
+            // Per-engine env beats the ontology; `GLOSSA_NLI_BATCH_TOKENS` remains the blunt
+            // fallback that moves both engines at once. `in_process` only — see
+            // `retrieve::config::compute_knobs_inert`.
+            batch_tokens: env_usize("GLOSSA_VERIFY_NLI_BATCH_TOKENS")
+                .or_else(|| ont.as_ref().and_then(|o| o.verify_nli_batch_tokens()))
+                .filter(|n| *n > 0),
+            intra_threads: env_usize("GLOSSA_VERIFY_NLI_INTRA_THREADS")
+                .or_else(|| ont.as_ref().and_then(|o| o.verify_nli_intra_threads()))
+                .filter(|n| *n > 0),
             endpoint: env_string("GLOSSA_VERIFY_NLI_HTTP_ENDPOINT").or_else(|| {
                 ont.as_ref()
                     .and_then(|o| o.verify_nli_endpoint())

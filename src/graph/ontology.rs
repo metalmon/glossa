@@ -162,6 +162,14 @@ struct RawVerifyNli {
     /// Optional Bearer api-key for the remote scorer; `None`/absent when unset.
     #[serde(default)]
     api_key: Option<String>,
+    /// Per-batch token budget for this engine's session (`scorer = "in_process"` only). Unset ⇒
+    /// the engine default. See `[rerank].batch_tokens`; the two ADD UP on a shared device.
+    #[serde(default)]
+    batch_tokens: Option<usize>,
+    /// ONNX Runtime intra-op threads for this engine's session (`scorer = "in_process"` only).
+    /// Unset ⇒ the engine default.
+    #[serde(default)]
+    intra_threads: Option<usize>,
 }
 
 /// `[rerank]` overlay: the retrieve→rerank cross-encoder's runtime selection. Top-level sibling of
@@ -201,6 +209,15 @@ struct RawRerank {
     /// Served-model name for Jina-family backends (vLLM); `None`/absent when unset.
     #[serde(default)]
     model: Option<String>,
+    /// Per-batch token budget for the cross-encoder (`scorer = "in_process"` only). A batch is
+    /// filled while `rows × longest_row ≤ batch_tokens`, so this is a TOKEN budget and short
+    /// passages batch more densely than full-length ones. Unset ⇒ the engine default.
+    #[serde(default)]
+    batch_tokens: Option<usize>,
+    /// ONNX Runtime intra-op threads for this engine's session (`scorer = "in_process"` only).
+    /// Unset ⇒ the engine default.
+    #[serde(default)]
+    intra_threads: Option<usize>,
 }
 
 /// `[verify.combined]` overlay: per-bucket z-score consensus calibration (see
@@ -518,6 +535,13 @@ pub struct Ontology {
     rerank_endpoint: Option<String>,
     rerank_timeout_ms: Option<usize>,
     rerank_api_key: Option<String>,
+    /// Per-corpus `[rerank].batch_tokens` / `.intra_threads`, and the `[verify.nli]` pair. `None`
+    /// when unset OR when configured as 0 — a zero means "I did not choose", never "never batch"
+    /// or "no threads", neither of which is a state the engine can be in.
+    rerank_batch_tokens: Option<usize>,
+    rerank_intra_threads: Option<usize>,
+    verify_nli_batch_tokens: Option<usize>,
+    verify_nli_intra_threads: Option<usize>,
     rerank_backend: Option<String>,
     rerank_model: Option<String>,
 }
@@ -726,6 +750,23 @@ impl Ontology {
             rerank_api_key: raw.rerank.api_key.clone(),
             rerank_backend: raw.rerank.backend.clone(),
             rerank_model: raw.rerank.model.clone(),
+            // A configured 0 reads as unset, not as "never batch" / "no threads": zero would
+            // either silence the engine or hand ORT its own thread heuristic, and neither is what
+            // someone typing 0 intends.
+            rerank_batch_tokens: raw.rerank.batch_tokens.filter(|n| *n > 0),
+            rerank_intra_threads: raw.rerank.intra_threads.filter(|n| *n > 0),
+            verify_nli_batch_tokens: raw
+                .verify
+                .nli
+                .as_ref()
+                .and_then(|n| n.batch_tokens)
+                .filter(|n| *n > 0),
+            verify_nli_intra_threads: raw
+                .verify
+                .nli
+                .as_ref()
+                .and_then(|n| n.intra_threads)
+                .filter(|n| *n > 0),
             reasoning: raw.reasoning,
             constraint_types: raw
                 .constraint_types
@@ -1070,6 +1111,26 @@ impl Ontology {
     /// returns. `None` when unset or zero (engine default applies).
     pub fn search_limit(&self) -> Option<usize> {
         self.search_limit
+    }
+
+    /// Per-corpus `[rerank].batch_tokens`, or `None` when unset or zero.
+    pub fn rerank_batch_tokens(&self) -> Option<usize> {
+        self.rerank_batch_tokens
+    }
+
+    /// Per-corpus `[rerank].intra_threads`, or `None` when unset or zero.
+    pub fn rerank_intra_threads(&self) -> Option<usize> {
+        self.rerank_intra_threads
+    }
+
+    /// Per-corpus `[verify.nli].batch_tokens`, or `None` when unset or zero.
+    pub fn verify_nli_batch_tokens(&self) -> Option<usize> {
+        self.verify_nli_batch_tokens
+    }
+
+    /// Per-corpus `[verify.nli].intra_threads`, or `None` when unset or zero.
+    pub fn verify_nli_intra_threads(&self) -> Option<usize> {
+        self.verify_nli_intra_threads
     }
 
     /// Per-corpus `[rerank].enabled`, or `None` when unset.
@@ -1796,5 +1857,30 @@ props = []
         assert_eq!(o.rerank_enabled(), None);
         assert_eq!(o.rerank_scorer(), None);
         assert_eq!(o.rerank_device(), None);
+    }
+
+    /// Both engines carry the pair, and a configured 0 reads as unset. Zero is the interesting
+    /// case: someone writing it means "none", while the engine would read it as "never batch" or
+    /// as ORT's own thread heuristic — neither a state the engine can actually be in.
+    #[test]
+    fn compute_knobs_round_trip_and_zero_reads_as_unset() {
+        let o = Ontology::parse(
+            "[rerank]\nbatch_tokens=4096\nintra_threads=4\n\
+             [verify.nli]\nbatch_tokens=0\nintra_threads=0\n",
+        )
+        .unwrap();
+        assert_eq!(o.rerank_batch_tokens(), Some(4096));
+        assert_eq!(o.rerank_intra_threads(), Some(4));
+        assert_eq!(o.verify_nli_batch_tokens(), None, "a configured 0 is unset");
+        assert_eq!(o.verify_nli_intra_threads(), None);
+    }
+
+    #[test]
+    fn compute_knobs_absent_are_none_on_both_engines() {
+        let o = Ontology::parse("[meta]\nname=\"x\"\n").unwrap();
+        assert_eq!(o.rerank_batch_tokens(), None);
+        assert_eq!(o.rerank_intra_threads(), None);
+        assert_eq!(o.verify_nli_batch_tokens(), None);
+        assert_eq!(o.verify_nli_intra_threads(), None);
     }
 }

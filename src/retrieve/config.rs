@@ -53,6 +53,30 @@ pub struct RerankConfig {
     /// Optional served-model name sent to Jina-family backends only (vLLM requires it; llama.cpp
     /// and kbi ignore it). Env `GLOSSA_RERANK_HTTP_MODEL`.
     pub model: Option<String>,
+    /// Per-batch token budget for the in-process cross-encoder. `None` ⇒ the engine default.
+    /// Env `GLOSSA_RERANK_BATCH_TOKENS`, then `[rerank].batch_tokens`.
+    ///
+    /// `in_process` only — batching belongs to the server for every `scorer = "http"` backend.
+    /// And it is half of a pair: an ORT arena never returns a batch's peak, so this engine's
+    /// budget and the gate's ADD UP on a shared device, and stay added up for the process's life.
+    pub batch_tokens: Option<usize>,
+    /// ONNX Runtime intra-op threads for the in-process session. `None` ⇒ the engine default.
+    /// Env `GLOSSA_RERANK_INTRA_THREADS`, then `[rerank].intra_threads`. `in_process` only, and
+    /// likewise half of a pair: two engines' thread counts oversubscribe the same cores additively.
+    pub intra_threads: Option<usize>,
+}
+
+/// Whether a client-side compute knob is configured on a path where it cannot take effect.
+///
+/// Six remote reranker backends exist, and for every one of them batching and threading belong to
+/// the server. A budget set under `scorer = "http"` does nothing; the caller uses this to SAY so
+/// rather than drop it in silence, which is how the device keys on that path became a trap.
+pub fn compute_knobs_inert(
+    scorer: Option<&str>,
+    batch_tokens: Option<usize>,
+    intra_threads: Option<usize>,
+) -> bool {
+    scorer == Some("http") && (batch_tokens.is_some() || intra_threads.is_some())
 }
 
 impl RerankConfig {
@@ -117,6 +141,15 @@ impl RerankConfig {
                     .and_then(|o| o.rerank_model())
                     .map(str::to_string)
             }),
+            // Per-engine env beats the ontology. `GLOSSA_NLI_BATCH_TOKENS` still exists and still
+            // overrides BOTH engines at once, deeper in the harness — it is the blunt fallback,
+            // this is the sharp one.
+            batch_tokens: env_usize("GLOSSA_RERANK_BATCH_TOKENS")
+                .or_else(|| ont.as_ref().and_then(|o| o.rerank_batch_tokens()))
+                .filter(|n| *n > 0),
+            intra_threads: env_usize("GLOSSA_RERANK_INTRA_THREADS")
+                .or_else(|| ont.as_ref().and_then(|o| o.rerank_intra_threads()))
+                .filter(|n| *n > 0),
         }
     }
 
@@ -215,6 +248,61 @@ mod tests {
         let c = RerankConfig::resolve(&g);
         assert_eq!(c.backend, "vllm");
         assert_eq!(c.model.as_deref(), Some("BAAI/bge-reranker-v2-m3"));
+    }
+
+    /// Precedence, and the zero rule at the resolution layer — which is where a zero can actually
+    /// arrive from, either file or environment.
+    #[test]
+    fn compute_knobs_resolve_env_over_ontology_and_treat_zero_as_unset() {
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_RERANK_BATCH_TOKENS");
+        std::env::remove_var("GLOSSA_RERANK_INTRA_THREADS");
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[rerank]\nbatch_tokens=1024\nintra_threads=2\n",
+        )
+        .unwrap();
+
+        let c = RerankConfig::resolve(&g);
+        assert_eq!(c.batch_tokens, Some(1024), "from the ontology");
+        assert_eq!(c.intra_threads, Some(2));
+
+        std::env::set_var("GLOSSA_RERANK_BATCH_TOKENS", "8192");
+        assert_eq!(
+            RerankConfig::resolve(&g).batch_tokens,
+            Some(8192),
+            "env wins"
+        );
+
+        std::env::set_var("GLOSSA_RERANK_BATCH_TOKENS", "0");
+        assert_eq!(
+            RerankConfig::resolve(&g).batch_tokens,
+            None,
+            "a 0 is 'I did not choose', not 'never batch'"
+        );
+        std::env::remove_var("GLOSSA_RERANK_BATCH_TOKENS");
+    }
+
+    /// Setting an in-process knob on a remote scorer is a configuration mistake the operator
+    /// should hear about; these are the cases the caller warns on.
+    #[test]
+    fn compute_knobs_are_inert_only_on_a_remote_scorer_with_something_set() {
+        assert!(compute_knobs_inert(Some("http"), Some(4096), None));
+        assert!(compute_knobs_inert(Some("http"), None, Some(4)));
+        assert!(
+            !compute_knobs_inert(Some("http"), None, None),
+            "nothing configured, nothing to warn about"
+        );
+        assert!(
+            !compute_knobs_inert(Some("in_process"), Some(4096), None),
+            "in_process is exactly where these work"
+        );
+        assert!(!compute_knobs_inert(None, Some(4096), None));
     }
 
     #[test]
