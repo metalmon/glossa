@@ -65,7 +65,7 @@ The [project README](../README.md) has the fastest quickstart (three commands, n
 | [testing/e2e.md](testing/e2e.md) | Contributors | End-to-end test harness: spawn the real `kb` binary over real sockets (`e2e`/`tls` features) |
 | [constraint-gepa.md](constraint-gepa.md) | Contributors | GEPA prompt optimization for the `.csp` limit-table extraction agent |
 | [constraint-tables-compiler.md](constraint-tables-compiler.md) | Contributors | `kb graph build`'s capability set — what `.csp` tables compile into a constraint graph |
-| [eval-and-training.md](eval-and-training.md) | Benchmark developers | The `kbx` reasoning-layer pipeline (build/reason/train/distil/eval/export) + the legacy kb-eval/kb-train TensorZero workflow |
+| [eval-and-training.md](eval-and-training.md) | Benchmark developers | The `kbx` reasoning-layer pipeline: build/reason/train/distil/eval/export |
 | [finetuning-datasets.md](finetuning-datasets.md) | ML engineers | Build SFT/DPO datasets from your graph for Unsloth — teacher distillation + on-policy capture |
 | [graph-reasoning-directions.md](graph-reasoning-directions.md) | Contributors | Reasoning-graph direction: Peirce triad, planned inference modes |
 

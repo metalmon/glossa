@@ -9,6 +9,10 @@ subcommand.
 from source only — it is not part of the end-user surface and is not documented here. See
 [eval-and-training.md](eval-and-training.md).
 
+`kbi` (the remote inference server for NLI + reranker scoring) ships in the GPU-execution-provider
+release artifacts and is user-facing; it has its own CLI (`kbi <serve flags>` / `kbi service …`).
+See [deploy/service.md](deploy/service.md).
+
 `kb` auto-indexes on demand: every read path (`search`, `read`, `grep`, `glob`, and every MCP tool)
 calls `ensure_fresh` first, so an explicit `kb index` is optional. Running it once up front is
 still recommended before heavy agent use, so the first query isn't the one paying for indexing.
@@ -196,6 +200,12 @@ kb mcp dump-tz-tools [-d/--config-dir <DIR>]
 
 `kb mcp dump-tz-tools -d <config_dir>` regenerates TensorZero tool config from the live MCP tool
 definitions (default `config_dir`: `eval/tensorzero/config`); equivalent to `just tools`.
+
+`kb mcp service install|uninstall|start|stop|status` installs and manages `kb` as an OS service
+(Windows SCM / Linux systemd), always streamable-http. `install` takes `--service-name`, a corpus
+(positional or the global `--root`), `--bind`, `--profile`, repeatable `--allowed-host`, and
+`--vision`/`--dedup`; the global `--config`/`--state-dir` are baked in too. Full guide:
+[deploy/service.md](deploy/service.md#native-install-recommended--kb-mcp-service).
 
 Full tool table, profiles, and transports: [mcp.md](mcp.md). Deployment topology, TLS, systemd,
 Windows service: [deploy/mcp-server.md](deploy/mcp-server.md). Every env var and the `--config`

@@ -278,7 +278,7 @@ kb index ./my-corpus
 
 ### 2. Enrich (batch)
 
-The `kbx build` / `kbx reason` pipeline builds the reasoning layer directly from the corpus (the earlier `kb-train enrich` command reverse-traces solved cases into reasoning edges). See [eval-and-training.md](eval-and-training.md) and [graph-lifecycle.md](graph-lifecycle.md).
+The `kbx build` / `kbx reason` pipeline builds the reasoning layer directly from the corpus (the retired `kb-train enrich` binary used to do this by reverse-tracing solved cases into reasoning edges). See [eval-and-training.md](eval-and-training.md) and [graph-lifecycle.md](graph-lifecycle.md).
 
 ### 3. Diagnose (optional)
 

@@ -104,7 +104,7 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 Give reasoning facts a time dimension so the conformance engine can answer
 *"was this valid / known on date X"* and trace every verdict to the interval it
 held in. Built phase by phase to a professional (bitemporal, SQL:2011-informed)
-level. Design lives in `docs/superpowers/specs/` (per-phase spec → plan).
+level. Built phase by phase from an internal design spec.
 
 **Grounding parallel:** temporality is grounded in the ontology the same way
 `MENTIONS` grounding is — a per-entity `requires_validity` flag (mirror of
@@ -153,8 +153,7 @@ need_field | path+citations}` walks the tree, evaluating each fork's guard by re
 existing per-node evaluator (`build_constraint` + solver `validate`). Lazy/resumable —
 stops and names the missing fact instead of guessing. Aligned with the thin-skeleton
 principle: per-node guard stays flat; depth comes from edge recursion + deterministic
-traversal, not a complex graph fed to a weak model. Design (with preset sketch):
-`docs/superpowers/specs/2026-08-06-decision-tree-walker-design.md`.
+traversal, not a complex graph fed to a weak model. Design captured in an internal spec.
 
 | Item | Status | Notes |
 |------|--------|-------|

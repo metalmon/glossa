@@ -9,9 +9,6 @@ For the data model and ontology reference, see [graph-and-ontology.md](graph-and
 for the full MCP tool surface, [mcp.md](mcp.md); for the reasoning-layer pipeline in depth,
 [eval-and-training.md](eval-and-training.md).
 
-> Sections marked **[Planned]** describe behaviour that is designed but not yet shipped. Every
-> other command here is meant to run as written against the current binary.
-
 ---
 
 ## The graph has two layers

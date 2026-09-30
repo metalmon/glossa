@@ -164,12 +164,15 @@ enabled here and has a calibrated threshold.
 
 | Key | Values / default | Meaning |
 |-----|------------------|---------|
-| `scorer` | `"in_process"` \| `"http"` | NLI scorer implementation (`http` is not built yet). Unset ⇒ no scorer ⇒ AC-only. |
-| `model_dir` | path | Exported NLI model directory (in-process scorer only). |
+| `scorer` | `"in_process"` \| `"http"` | NLI scorer: `in_process` loads the model in this process; `http` offloads scoring to a remote `kbi` inference server (see `endpoint` below). Unset ⇒ no scorer ⇒ AC-only. |
+| `model_dir` | path | Exported NLI model directory (`in_process` scorer only). |
 | `entail_index` | integer | Softmax index of the entailment class in the model's output (model-export-specific). |
-| `device` | `"cpu"` \| `"cuda"` \| `"directml"` \| `"coreml"` \| `"rocm"` · default `"cpu"` | Compute device for the `nli-ort` engine. A single value with automatic CPU fallback (e.g. `"cuda"` runs on GPU, falling back to CPU if it can't initialize). Unknown names fall through to ORT's implicit CPU EP. A GPU device works only in a build that compiled that provider in. |
+| `device` | `"cpu"` \| `"cuda"` \| `"directml"` \| `"coreml"` \| `"rocm"` · default `"cpu"` | Compute device for the `nli-ort` engine (`in_process` only). A single value with automatic CPU fallback (e.g. `"cuda"` runs on GPU, falling back to CPU if it can't initialize). Unknown names fall through to ORT's implicit CPU EP. A GPU device works only in a build that compiled that provider in. |
 | `gpu_id` | integer · default unset | GPU device id the CUDA/DirectML/ROCm provider binds to; unset ⇒ the provider's default device. |
 | `gpu_mem_mb` | integer · default unset | GPU arena memory cap (MB) for the provider, so NLI can share a GPU with an LLM. Effective on CUDA; ROCm honors only arena growth; DirectML/CoreML expose no memory option. |
+| `endpoint` | URL · default unset | `scorer = "http"` only: base URL of the remote `kbi` server (e.g. `https://gpuhost:8071`). Env `GLOSSA_VERIFY_NLI_HTTP_ENDPOINT`. |
+| `timeout_ms` | integer · default `5000` | `http` per-call timeout in milliseconds. Env `GLOSSA_VERIFY_NLI_HTTP_TIMEOUT_MS`. |
+| `api_key` | string · default unset | `http` optional Bearer token for the remote server. Env `GLOSSA_VERIFY_NLI_HTTP_API_KEY`. |
 
 > **Migrating from the old keys (≥ 0.5.2):** the pre-0.5.2 keys `execution_providers` (a list),
 > `ep_device`, and `ep_mem_limit_mb` were renamed to `device` (a single value), `gpu_id`, and
@@ -178,6 +181,20 @@ enabled here and has a calibrated threshold.
 > corpus's `.glossa/ontology.toml`: `execution_providers = ["cuda", "cpu"]` → `device = "cuda"`
 > (the CPU fallback is automatic), `ep_device = N` → `gpu_id = N`, `ep_mem_limit_mb = N` →
 > `gpu_mem_mb = N`. The same rename applies to `[rerank]`.
+
+### `[rerank]` — cross-encoder reranker
+
+Reorders the fetched candidate pool with a cross-encoder; off unless explicitly enabled. Written by
+`kbx rerank set`. Mirrors `[verify.nli]`'s device/http knobs.
+
+| Key | Values / default | Meaning |
+|-----|------------------|---------|
+| `enabled` | bool · default `false` | Turn reranking on. Env `GLOSSA_RERANK_ENABLED`. |
+| `scorer` | `"in_process"` \| `"http"` | `in_process` loads the cross-encoder locally; `http` offloads to a remote `kbi` server (`endpoint` below). |
+| `model_dir` | path | Cross-encoder ONNX model dir (`in_process` only). |
+| `pool_size` | integer · default `50` | How many fetched candidates to rerank; set larger than the search limit to pool deeper. Env `GLOSSA_RERANK_POOL_SIZE`. |
+| `device` / `gpu_id` / `gpu_mem_mb` | as in `[verify.nli]` | Compute device + GPU knobs (`in_process`). Same single-value/auto-CPU-fallback semantics + the same migration from the old `execution_providers`/`ep_*` keys. |
+| `endpoint` / `timeout_ms` / `api_key` | as in `[verify.nli]` | `scorer = "http"` remote `kbi` endpoint, timeout, and optional Bearer key. Env `GLOSSA_RERANK_HTTP_ENDPOINT` / `_TIMEOUT_MS` / `_API_KEY`. |
 
 ## Eval-harness config (`lab.toml`)
 

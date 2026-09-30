@@ -1,6 +1,6 @@
 # glossa — benchmark log & progress toward SOTA
 
-Curated record of agent-eval runs (the `kb-eval` harness). Raw `eval-*.json` reports are git-ignored;
+Curated record of agent-eval runs (the `kbx eval` harness). Raw `eval-*.json` reports are git-ignored;
 this file is the durable, human-readable history. One row per meaningful run. Append, don't rewrite.
 
 ## Reference targets — HotpotQA (distractor setting), Answer EM / F1

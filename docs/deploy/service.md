@@ -64,7 +64,7 @@ All scripts download a pinned version from GitHub Releases — **no `cargo build
 ```bash
 cd deploy/ansible
 ansible-playbook -i inventory playbook.yml \
-  -e glossa_version=0.4.5 \
+  -e glossa_version=0.5.2 \
   -e glossa_corpus_path=/srv/glossa/corpus
 ```
 
@@ -74,7 +74,7 @@ ansible-playbook -i inventory playbook.yml \
 
 ```powershell
 .\deploy\windows\install-service.ps1 `
-  -Version 0.4.5 `
+  -Version 0.5.2 `
   -CorpusPath "C:\glossa\corpus" `
   -Profile reader `
   -Bind "127.0.0.1:8080"
@@ -86,7 +86,7 @@ ansible-playbook -i inventory playbook.yml \
 
 ```bash
 ./deploy/macos/install-service.sh \
-  --version 0.4.5 \
+  --version 0.5.2 \
   --corpus "$HOME/Documents/my-kb" \
   --profile reader \
   --bind 127.0.0.1:8080
@@ -136,7 +136,7 @@ Remove the install directory and corpus `.glossa/` if you want a clean slate. Co
 
 When you bump `kb` to a release that changes the index schema (`index_schema_version`):
 
-1. Stop MCP (stdio or HTTP service) and any `kb-train enrich` on the same corpus.
+1. Stop MCP (stdio or HTTP service) and any `kbx build` / `kbx reason` job on the same corpus.
 2. Run `kb index <corpus> --force` once before restarting MCP.
 3. Do not run enrich and an MCP **editor** on the same `<corpus>` while a full rebuild is in progress — they share `.glossa` and contend on the tantivy writer lock.
 

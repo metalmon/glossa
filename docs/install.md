@@ -13,14 +13,14 @@ Contributors who hack on the source: see [Build from source](#build-from-source)
 | macOS Apple Silicon | `glossa-{version}-aarch64-apple-darwin.tar.gz` | `kb` |
 | macOS Intel | `glossa-{version}-x86_64-apple-darwin.tar.gz` | `kb` |
 
-Replace `{version}` with the tag you download (e.g. `0.4.5` for release `v0.4.5`).
+Replace `{version}` with the tag you download (e.g. `0.5.2` for release `v0.5.2`).
 
 ## Manual install
 
 ### Linux / macOS
 
 ```bash
-VERSION=0.4.5
+VERSION=0.5.2
 TARGET=x86_64-unknown-linux-gnu   # or aarch64-apple-darwin / x86_64-apple-darwin
 
 curl -LO "https://github.com/metalmon/glossa/releases/download/v${VERSION}/glossa-${VERSION}-${TARGET}.tar.gz"
@@ -32,7 +32,7 @@ kb --version
 ### Windows (PowerShell)
 
 ```powershell
-$Version = "0.4.5"
+$Version = "0.5.2"
 $Zip = "glossa-$Version-x86_64-pc-windows-msvc.zip"
 $Url = "https://github.com/metalmon/glossa/releases/download/v$Version/$Zip"
 Invoke-WebRequest -Uri $Url -OutFile $Zip
