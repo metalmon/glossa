@@ -148,12 +148,44 @@ jobs:
           Copy-Item README.md, LICENSE "dist/$stem/"
           Compress-Archive -Path "dist/$stem" -DestinationPath "dist/$stem.zip"
 
+      # A SECOND, binaries-only zip for the cuda13 row. The full zip above is ~260 MB, and ~100 MB of
+      # that is the ONNX Runtime GPU DLLs fetched above — which are pinned to the `ort` version, not
+      # to our code, so they are byte-identical between builds. A machine that already ran a cuda13
+      # build has them beside the binaries with `ORT_DYLIB_PATH` pointing at them, so redeploying
+      # needs the three executables and nothing else.
+      #
+      # Kept as a SEPARATE artifact rather than replacing the full one: the full zip is the drop-in
+      # thing a release publishes, and shipping binaries that cannot find an ONNX Runtime would break
+      # that promise. This one is for `gh run download` on an already-provisioned box.
+      - name: Package (Windows, binaries only — cuda13)
+        if: matrix.engine == 'cuda13'
+        shell: pwsh
+        run: |
+          $tag = ("${{ github.ref_name }}" -replace '^v', '') -replace '/', '-'
+          $stem = "glossa-${tag}-${{ matrix.target }}-${{ matrix.engine }}-binsonly"
+          New-Item -ItemType Directory -Force -Path "dist-bins/$stem"
+          Copy-Item "target/${{ matrix.target }}/release/kb.exe"  "dist-bins/$stem/"
+          Copy-Item "target/${{ matrix.target }}/release/kbx.exe" "dist-bins/$stem/"
+          Get-ChildItem "target/${{ matrix.target }}/release/kbi.exe" -ErrorAction SilentlyContinue |
+            Copy-Item -Destination "dist-bins/$stem/"
+          Copy-Item README.md, LICENSE "dist-bins/$stem/"
+          Compress-Archive -Path "dist-bins/$stem" -DestinationPath "dist-bins/$stem.zip"
+          "{0:N1} MB (full zip stays the drop-in artifact)" -f ((Get-Item "dist-bins/$stem.zip").Length / 1MB)
+
       - uses: actions/upload-artifact@v4
         with:
           name: glossa-${{ matrix.target }}-${{ matrix.engine }}
           path: |
             dist/*.tar.gz
             dist/*.zip
+
+      # Named OUTSIDE the `glossa-*` namespace on purpose: the release job downloads `glossa-*` only,
+      # so this never becomes a published release asset.
+      - uses: actions/upload-artifact@v4
+        if: matrix.engine == 'cuda13'
+        with:
+          name: binsonly-${{ matrix.target }}-${{ matrix.engine }}
+          path: dist-bins/*.zip
 
   release:
     name: publish GitHub Release
@@ -166,6 +198,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          # `glossa-*` only: the cuda13 row also uploads a `binsonly-*` artifact (executables without
+          # the ONNX Runtime DLLs) for redeploys onto an already-provisioned machine. That one must
+          # NOT become a release asset — downloaded from a Release it would look drop-in and fail to
+          # find an ONNX Runtime at startup.
+          pattern: glossa-*
           merge-multiple: true
 
       # Publish with retry: the GitHub release API intermittently returns a
