@@ -117,18 +117,34 @@ impl BucketFcr {
     }
 }
 
-/// FCR aggregated by `hop_type`.
+/// FCR aggregated by `hop_type`, and separately by case FAMILY (the id prefix).
+///
+/// The family split exists because question SHAPE, not hop count, is what some retrieval changes
+/// move. A dataset usually mixes families of very different prose — verbatim user messages hundreds
+/// of characters long next to curated one-line questions — and a change that helps one while hurting
+/// the other nets out to "no change" in the hop_type rows. The shape is recorded nowhere else:
+/// `tags` and `hop_type` both describe the reasoning, not the wording.
 #[derive(Default)]
 pub struct FcrReport {
     pub by_hop: BTreeMap<String, BucketFcr>,
+    pub by_family: BTreeMap<String, BucketFcr>,
     pub skipped_no_gold: usize,
 }
 
+/// The family of a case id: everything before the first `-` (`alpha-42` -> `alpha`).
+fn family_of(id: &str) -> &str {
+    id.split_once('-').map_or(id, |(head, _)| head)
+}
+
 impl FcrReport {
-    pub fn add(&mut self, hop: &str, full: bool, any: bool, partial: f32) {
+    pub fn add(&mut self, hop: &str, id: &str, full: bool, any: bool, partial: f32) {
         let key = if hop.is_empty() { "(untyped)" } else { hop };
         self.by_hop
             .entry(key.to_string())
+            .or_default()
+            .add(full, any, partial);
+        self.by_family
+            .entry(family_of(id).to_string())
             .or_default()
             .add(full, any, partial);
     }
@@ -171,6 +187,12 @@ impl FcrReport {
             s.push_str(&line(hop, b));
         }
         s.push_str(&line("ALL", &self.overall()));
+        // Same cases, split by question SHAPE instead of reasoning type — a retrieval change can
+        // help curated one-liners and hurt pasted emails, and that cancels out in the rows above.
+        s.push_str("by case family (question shape):\n");
+        for (fam, b) in &self.by_family {
+            s.push_str(&line(fam, b));
+        }
         s
     }
 }
@@ -240,6 +262,8 @@ pub fn run_fcr(args: FcrArgs) -> anyhow::Result<()> {
     // Queries whose retrieval call errored. They score as zero coverage, so a non-zero count means
     // the reported percentages understate retrieval for a non-retrieval reason.
     let mut retrieval_errors = 0usize;
+    // Distinct error messages -> how many questions hit each. See the `Err(e)` arm below.
+    let mut error_kinds: BTreeMap<String, usize> = BTreeMap::new();
 
     let mut report = FcrReport::default();
     for q in &golds {
@@ -293,16 +317,19 @@ pub fn run_fcr(args: FcrArgs) -> anyhow::Result<()> {
                 // One failed query must not abort a whole run, so it scores as zero coverage — the
                 // behaviour this call site already had. Counted so the tally is not mistaken for a
                 // retrieval result: a swallowed error depresses FCR for a reason that has nothing
-                // to do with retrieval quality.
-                Err(_) => {
+                // to do with retrieval quality. The MESSAGE is kept too: the count alone said 59
+                // questions failed but not why, and finding the cause (the query parser rejecting
+                // prose) took a script outside this harness. A failure class should name itself.
+                Err(e) => {
                     retrieval_errors += 1;
+                    *error_kinds.entry(e.to_string()).or_insert(0usize) += 1;
                     HashSet::new()
                 }
             },
         };
         let (full, partial) = chain_recall(&gold, &retrieved);
         let any = any_gold(&gold, &retrieved);
-        report.add(&q.hop_type, full, any, partial);
+        report.add(&q.hop_type, &q.id, full, any, partial);
     }
 
     println!(
@@ -315,6 +342,18 @@ pub fn run_fcr(args: FcrArgs) -> anyhow::Result<()> {
             "WARNING: {retrieval_errors} question(s) failed retrieval and scored as zero coverage — \
              the percentages above understate retrieval quality by that much"
         );
+        // Name the failure classes. Without this the count is a dead end: it says how much the
+        // numbers understate, not what to fix.
+        let mut kinds: Vec<(&String, &usize)> = error_kinds.iter().collect();
+        kinds.sort_by(|a, b| b.1.cmp(a.1));
+        for (msg, n) in kinds.iter().take(10) {
+            let one_line = msg.replace('\n', " ");
+            let trimmed: String = one_line.chars().take(160).collect();
+            println!("  {n:>4}  {trimmed}");
+        }
+        if kinds.len() > 10 {
+            println!("  … and {} more distinct message(s)", kinds.len() - 10);
+        }
     }
     if report.skipped_no_gold > 0 {
         println!(
@@ -391,13 +430,38 @@ mod tests {
     #[test]
     fn render_reports_any_of_column() {
         let mut r = FcrReport::default();
-        r.add("multihop", false, true, 0.5);
+        r.add("multihop", "alpha-1", false, true, 0.5);
         let out = r.render(20);
         assert!(
             out.contains("any-of="),
             "render must expose the aggregate: {out}"
         );
         assert!(out.contains("ALL"), "{out}");
+    }
+
+    /// The family split is what makes a shape-specific regression visible: two families whose
+    /// questions are written very differently can move in opposite directions and cancel out in the
+    /// hop_type rows, since neither `tags` nor `hop_type` records the prose shape.
+    #[test]
+    fn report_splits_by_case_family() {
+        let mut r = FcrReport::default();
+        r.add("lexical", "alpha-42", false, false, 0.0);
+        r.add("lexical", "beta-7", true, true, 1.0);
+        assert_eq!(r.by_family.get("alpha").map(|b| b.n), Some(1));
+        assert_eq!(r.by_family.get("beta").map(|b| b.full), Some(1));
+        // Both families land in the same hop_type bucket — which is exactly why the split is needed.
+        assert_eq!(r.by_hop.get("lexical").map(|b| b.n), Some(2));
+        let out = r.render(20);
+        assert!(out.contains("by case family"), "{out}");
+        assert!(out.contains("alpha") && out.contains("beta"), "{out}");
+    }
+
+    #[test]
+    fn family_is_the_id_prefix() {
+        assert_eq!(family_of("alpha-42"), "alpha");
+        assert_eq!(family_of("qa30-2"), "qa30");
+        // No separator: the whole id is its own family rather than a panic or an empty key.
+        assert_eq!(family_of("solo"), "solo");
     }
 
     /// A configured-but-unloadable reranker fails open to BM25. The report must say rerank did NOT
@@ -442,9 +506,9 @@ mod tests {
     fn report_aggregates_by_hop_and_overall() {
         let mut r = FcrReport::default();
         // partial 0.5 means half the golds were hit, so any-of holds even where the chain broke.
-        r.add("multihop", false, true, 0.5);
-        r.add("multihop", true, true, 1.0);
-        r.add("lexical", true, true, 1.0);
+        r.add("multihop", "alpha-1", false, true, 0.5);
+        r.add("multihop", "alpha-2", true, true, 1.0);
+        r.add("lexical", "beta-1", true, true, 1.0);
         let mh = &r.by_hop["multihop"];
         assert_eq!((mh.n, mh.full, mh.any), (2, 1, 2));
         assert!((mh.fcr() - 0.5).abs() < 1e-6);

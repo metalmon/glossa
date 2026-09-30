@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
 use tantivy::schema::Value;
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, INDEXED, STORED, STRING,
@@ -313,10 +312,109 @@ impl DocIndex {
         Ok(())
     }
 
-    pub fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<RankedHit>> {
+    /// One whitespace-separated piece of the query text, turned into the query tantivy's parser
+    /// would have built for the same leaf — minus the grammar. `None` when the analyzer emits no
+    /// token (punctuation-only piece).
+    ///
+    /// Term vs phrase mirrors `query_parser::generate_literals_for_str`: one token is a `TermQuery`,
+    /// several are a `PhraseQuery` over the analyzer's `(position, term)` pairs (`body` is indexed
+    /// `WithFreqsAndPositions`, so a piece like `v3_8_7.pdf` has always been a phrase). The offsets
+    /// are used rather than a bare `PhraseQuery::new` so the phrase stays correct by construction
+    /// even if the analyzer ever starts dropping tokens.
+    ///
+    /// The analyzer runs PER PIECE on purpose: `multilang` detects the language from the text it is
+    /// handed (see `multilang::script_detector`), so analyzing a whole question at once would stem
+    /// an English word inside a Russian sentence with Russian rules.
+    fn leaf_query(&self, piece: &str) -> anyhow::Result<Option<Box<dyn tantivy::query::Query>>> {
+        use tantivy::query::{PhraseQuery, Query, TermQuery};
+        let mut analyzer = self
+            .index
+            .tokenizers()
+            .get("multilang")
+            .context("index is missing the `multilang` tokenizer")?;
+        let mut terms: Vec<(usize, tantivy::Term)> = Vec::new();
+        let mut stream = analyzer.token_stream(piece);
+        while stream.advance() {
+            let t = stream.token();
+            terms.push((
+                t.position,
+                tantivy::Term::from_field_text(self.fields.body, &t.text),
+            ));
+        }
+        Ok(match terms.len() {
+            0 => None,
+            1 => Some(Box::new(TermQuery::new(
+                terms.pop().expect("len checked").1,
+                IndexRecordOption::WithFreqs,
+            )) as Box<dyn Query>),
+            _ => Some(Box::new(PhraseQuery::new_with_offset(terms)) as Box<dyn Query>),
+        })
+    }
+
+    /// The pre-2026-09-30 implementation, kept ONLY as a differential oracle for the parity tests:
+    /// for a query whose whitespace pieces carry none of ``- ^ ` : { } " ' [ ] ( ) \ + ! *`` and are
+    /// not the words AND/OR/NOT/IN, `search` must return exactly what this returns. Freezing those
+    /// expectations as literals instead would pin a guess at BM25's output; comparing against the
+    /// real old code pins the invariant.
+    #[cfg(test)]
+    fn search_via_parser(&self, query: &str, limit: usize) -> anyhow::Result<Vec<RankedHit>> {
         let searcher = self.reader.searcher();
-        let parser = QueryParser::for_index(&self.index, vec![self.fields.body]);
+        let parser = tantivy::query::QueryParser::for_index(&self.index, vec![self.fields.body]);
         let parsed = parser.parse_query(query)?;
+        let top = searcher.search(&parsed, &TopDocs::with_limit(limit).order_by_score())?;
+        let snippet_gen = SnippetGenerator::create(&searcher, &*parsed, self.fields.body)?;
+        let mut hits = Vec::with_capacity(top.len());
+        for (score, addr) in top {
+            let d: TantivyDocument = searcher.doc(addr)?;
+            let get = |f: tantivy::schema::Field| -> String {
+                d.get_first(f)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            let snippet = snippet_gen.snippet_from_doc(&d).fragment().to_string();
+            let ord = d
+                .get_first(self.fields.ord)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            hits.push(RankedHit {
+                path: get(self.fields.path),
+                location: get(self.fields.location),
+                file_type: get(self.fields.file_type),
+                ord,
+                snippet,
+                score,
+            });
+        }
+        Ok(hits)
+    }
+
+    /// BM25 search over `body` for a KEYWORD query — the caller's own words, not a query DSL.
+    ///
+    /// The text is split on whitespace and each piece analyzed separately; pieces are OR'd
+    /// (`Occur::Should`), one clause per occurrence so a repeated word keeps its weight. Nothing is
+    /// parsed, so `[`, `:`, `-`, `+`, `"`, `*` and the words AND/OR/NOT/IN are ordinary text rather
+    /// than syntax. As a query DSL they made a question containing a bracketed placeholder, a URL or
+    /// a word followed by a colon fail outright, and quietly re-aimed the ones that did parse (a
+    /// leading `-` excluded a term; `-` also ends a word, so `ACL-Manager` meant "ACL and NOT
+    /// Manager"). See docs/superpowers/specs/2026-09-30-keyword-search-query-design.md.
+    pub fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<RankedHit>> {
+        use tantivy::query::{BooleanQuery, Occur, Query};
+        // `TopDocs::with_limit(0)` panics; a zero-hit request is answered, not crashed.
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let searcher = self.reader.searcher();
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        for piece in query.split_whitespace() {
+            if let Some(q) = self.leaf_query(piece)? {
+                clauses.push((Occur::Should, q));
+            }
+        }
+        if clauses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let parsed: Box<dyn Query> = Box::new(BooleanQuery::new(clauses));
         let top = searcher.search(&parsed, &TopDocs::with_limit(limit).order_by_score())?;
 
         let snippet_gen = SnippetGenerator::create(&searcher, &*parsed, self.fields.body)?;
@@ -4674,6 +4772,186 @@ mod search_tests {
             Some("pdf")
         );
         assert_eq!(i.file_type_for_ord("d.pdf", 99).unwrap(), None);
+    }
+
+    /// Fixture for the keyword-query tests: distinct bodies so a hit identifies which chunk matched.
+    fn kw_index(dir: &std::path::Path) -> DocIndex {
+        let idx = DocIndex::open_or_create(dir).unwrap();
+        idx.write_chunks(&[
+            Chunk {
+                doc_path: PathBuf::from("a.md"),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: "alpha bravo charlie alpha".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("b.md"),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: "bravo delta".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("c.md"),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: "manager only, no acronym here".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("d.md"),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: "ACL Manager configuration".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("e.md"),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: "see section 2.2.7.1 of the manual".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("f.md"),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: "the number 7 stands alone".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("g.md"),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: "настройка Modbus на линии".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("h.md"),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: "write to support@example.com or read https://example.com/guide".into(),
+            },
+            Chunk {
+                doc_path: PathBuf::from("i.md"),
+                location: "S1".into(),
+                file_type: "md".into(),
+                text: "стоп и пуск насоса".into(),
+            },
+        ])
+        .unwrap();
+        idx
+    }
+
+    fn ids(hits: &[RankedHit]) -> Vec<(String, u64)> {
+        hits.iter().map(|h| (h.path.clone(), h.ord)).collect()
+    }
+
+    /// PARITY: for input that carries no grammar character and no reserved word, the keyword query
+    /// must return exactly what the parser returned — same hits, same order, same scores.
+    #[test]
+    fn search_matches_the_parser_on_plain_queries() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = kw_index(dir.path());
+        for q in [
+            "alpha",             // single word
+            "bravo delta",       // several words
+            "alpha bravo alpha", // a repeated word must keep its doubled weight
+            "2.2.7.1",           // one piece, several tokens -> PhraseQuery
+            "Modbus настройка",  // mixed scripts: per-piece language detection
+            "словоКоторогоНетВКорпусе",
+        ] {
+            let new = idx.search(q, 10).unwrap();
+            let old = idx.search_via_parser(q, 10).unwrap();
+            assert_eq!(ids(&new), ids(&old), "hit sequence changed for {q:?}");
+            for (n, o) in new.iter().zip(old.iter()) {
+                assert!(
+                    (n.score - o.score).abs() < f32::EPSILON,
+                    "score changed for {q:?}: {} vs {}",
+                    n.score,
+                    o.score
+                );
+            }
+        }
+    }
+
+    /// PARITY, spelled out: a dotted token stays a phrase, so it must NOT match the chunk that only
+    /// holds one of its tokens.
+    #[test]
+    fn search_keeps_a_dotted_token_a_phrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = kw_index(dir.path());
+        let hits = ids(&idx.search("2.2.7.1", 10).unwrap());
+        assert!(
+            hits.iter().any(|(p, _)| p.contains("e.md")),
+            "the chunk containing the dotted reference must match: {hits:?}"
+        );
+        assert!(
+            !hits.iter().any(|(p, _)| p.contains("f.md")),
+            "a chunk holding only `7` must NOT match a phrase: {hits:?}"
+        );
+    }
+
+    /// DIVERGENCE: the whole point. Each of these ERRORS today (or means something else); all must
+    /// now return the chunk a person asking that question wants.
+    #[test]
+    fn search_accepts_prose_that_the_parser_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = kw_index(dir.path());
+        for q in [
+            "напишите на [email] адрес", // `[` opened a range query -> Syntax Error
+            "смотрите https://example.com/guide", // `https:` -> Field does not exist
+            "уточнить: настройка Modbus", // `уточнить:` -> Field does not exist
+        ] {
+            assert!(
+                idx.search_via_parser(q, 10).is_err(),
+                "precondition: the parser must reject {q:?} — if this fails the test is stale"
+            );
+            assert!(
+                !idx.search(q, 10).unwrap().is_empty(),
+                "keyword search must answer {q:?}"
+            );
+        }
+    }
+
+    /// DIVERGENCE: the silent half. A leading `-`/`+` and the bare word AND were operators; they are
+    /// words now.
+    #[test]
+    fn search_treats_operators_as_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = kw_index(dir.path());
+
+        // `-alpha` excluded alpha; it must now FIND it.
+        let minus = ids(&idx.search("-alpha", 10).unwrap());
+        assert!(
+            minus.iter().any(|(p, _)| p.contains("a.md")),
+            "leading dash must be a term, not a negation: {minus:?}"
+        );
+
+        // `+charlie bravo` REQUIRED charlie; b.md (bravo only) must still come back.
+        let plus = ids(&idx.search("+charlie bravo", 10).unwrap());
+        assert!(
+            plus.iter().any(|(p, _)| p.contains("b.md")),
+            "leading plus must not make a clause mandatory: {plus:?}"
+        );
+
+        // `ACL-Manager` meant `ACL` AND NOT `Manager`; it must now match the chunk with both.
+        let hyphen = ids(&idx.search("ACL-Manager", 10).unwrap());
+        assert!(
+            hyphen.iter().any(|(p, _)| p.contains("d.md")),
+            "a hyphenated pair must match the chunk holding both words: {hyphen:?}"
+        );
+
+        // `AND` was a conjunction keyword; as a word it simply adds a term.
+        let kw = ids(&idx.search("стоп AND пуск", 10).unwrap());
+        assert!(
+            kw.iter().any(|(p, _)| p.contains("i.md")),
+            "a reserved word must be treated as text: {kw:?}"
+        );
+    }
+
+    /// GUARDS: nothing to search for is an empty answer, not an error or a panic.
+    #[test]
+    fn search_handles_empty_and_zero_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = kw_index(dir.path());
+        assert!(idx.search("...", 10).unwrap().is_empty());
+        assert!(idx.search("", 10).unwrap().is_empty());
+        assert!(idx.search("alpha", 0).unwrap().is_empty());
     }
 
     #[test]
