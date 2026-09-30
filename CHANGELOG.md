@@ -18,6 +18,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **`kbx eval fcr --k` defaults to the production retrieval depth** (the agent `search` tool's default limit) instead of a hardcoded 20, and the report names where the depth came from. It also warns when `--k >= [rerank].pool_size`, where reranking can only reorder the returned set and therefore cannot move FCR at all.
 
+- **`GLOSSA_NLI_BATCH_TOKENS` is now read once per session, not per call.** It used to be consulted on every rerank, which looked live but was not: the session underneath had already been built, and the batch budget is part of what defines it. Changing the variable now takes effect on restart. The value an unconfigured deployment gets is unchanged.
+
 ### Added
 
 - **`[retrieval].search_limit`** (env `GLOSSA_SEARCH_LIMIT`): how many hits a `search` that names no `limit` returns — the depth the reader sees, previously a hardcoded per-entry-point number with no way to configure it. An explicit `limit` still wins, and a corpus that sets nothing keeps today's numbers (50 for the agent tool, 100 for `kb search`). `kbx eval fcr` measures at the same depth, so the harness and production stay in step without anyone passing a flag.

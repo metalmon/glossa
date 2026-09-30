@@ -24,7 +24,7 @@ pub fn resolve_search_limit(glossa_dir: &Path) -> Option<usize> {
         .or_else(|| {
             glossa_dir
                 .parent()
-                .map(Ontology::load_or_default)
+                .map(Ontology::load_or_default_shared)
                 .and_then(|o| o.search_limit())
         })
         .filter(|n| *n > 0)
@@ -92,7 +92,7 @@ impl RerankConfig {
     /// `glossa_dir` is the corpus `.glossa` dir; ontology loads from its parent (mirrors
     /// `VerifyConfig::resolve`).
     pub fn resolve(glossa_dir: &Path) -> RerankConfig {
-        let ont = glossa_dir.parent().map(Ontology::load_or_default);
+        let ont = glossa_dir.parent().map(Ontology::load_or_default_shared);
         RerankConfig {
             enabled: env_bool("GLOSSA_RERANK_ENABLED")
                 .or_else(|| ont.as_ref().and_then(|o| o.rerank_enabled()))

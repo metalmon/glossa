@@ -212,6 +212,13 @@ the batching and threading belong to that server, and a value set here says so o
 than being silently ignored. `GLOSSA_NLI_BATCH_TOKENS` remains a blunt override that moves BOTH
 engines at once; the per-engine variables above are the sharp ones and win over it.
 
+**All three are read once, when the session loads.** Changing one afterwards does not affect a
+process that is already running — the batch budget is part of the session's identity (it is in the
+model cache key) and the session is built around it, so a value re-read per call would have
+described something the engine was no longer doing. Restart to change it. This is a deliberate
+change from the earlier behaviour, where `GLOSSA_NLI_BATCH_TOKENS` was consulted on every rerank
+call and appeared to be live while the session underneath it was not.
+
 The reranker `/rerank` endpoint is interoperable across servers: point `endpoint` at a
 [Text Embeddings Inference](https://github.com/huggingface/text-embeddings-inference) (`backend = "tei"`),
 [vLLM](https://docs.vllm.ai) (`backend = "vllm"`, plus `model`),

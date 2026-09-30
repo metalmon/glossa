@@ -960,6 +960,53 @@ impl Ontology {
         Self::load_or_default_checked(root).0
     }
 
+    /// [`Ontology::load_or_default`], shared and parsed at most once per (file, revision).
+    ///
+    /// `RerankConfig::resolve`, `VerifyConfig::resolve` and `resolve_search_limit` each load the
+    /// ontology, so a single MCP `search` parsed the same file twice. Caching the parse outright
+    /// would be a behaviour change in the wrong direction: today an edited `ontology.toml` takes
+    /// effect on the next query, and a long-lived server is exactly where that matters. So an
+    /// entry is reused only while the file's modification time and length are unchanged — a
+    /// `stat` per call instead of a parse per call, with the same visible semantics.
+    ///
+    /// Callers that only READ fields take the `Arc`; `load_or_default` still returns an owned
+    /// value for the paths that need one.
+    ///
+    /// Note there is a SECOND ontology cache, per server instance, in the MCP layer
+    /// (`GlossaServer::ontology_cache`) with the same mtime-stamped shape. It sits in front of the
+    /// tool handlers, while this one sits behind them, in the config resolvers that `retrieve()`
+    /// and the gate reach directly and that have no access to a server object. Both validate, so
+    /// the pair is correct but redundant; collapsing them is worth doing and is not this change —
+    /// the MCP one carries a race-guard and a test seam that deserve their own pass.
+    pub fn load_or_default_shared(root: &std::path::Path) -> std::sync::Arc<Ontology> {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex, OnceLock};
+        type Stamp = (Option<std::time::SystemTime>, u64);
+        #[allow(clippy::type_complexity)]
+        static CACHE: OnceLock<Mutex<HashMap<std::path::PathBuf, (Stamp, Arc<Ontology>)>>> =
+            OnceLock::new();
+
+        let path = root.join(".glossa").join("ontology.toml");
+        let stamp: Stamp = std::fs::metadata(&path)
+            .map(|m| (m.modified().ok(), m.len()))
+            .unwrap_or((None, 0));
+
+        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        // A poisoned lock must not take the gate or retrieval down: fall back to parsing, which is
+        // exactly the behaviour this cache replaces.
+        let Ok(mut guard) = cache.lock() else {
+            return Arc::new(Self::load_or_default(root));
+        };
+        if let Some((seen, ont)) = guard.get(&path) {
+            if *seen == stamp {
+                return Arc::clone(ont);
+            }
+        }
+        let ont = Arc::new(Self::load_or_default(root));
+        guard.insert(path, (stamp, Arc::clone(&ont)));
+        ont
+    }
+
     /// Like [`Ontology::load_or_default`] but also reports WHERE the ontology came from — loaded
     /// cleanly from `.glossa/ontology.toml`, or silently defaulted because that file is missing or
     /// unparseable. Every existing caller keeps using `load_or_default` (which discards the origin);
@@ -1873,6 +1920,44 @@ props = []
         assert_eq!(o.rerank_intra_threads(), Some(4));
         assert_eq!(o.verify_nli_batch_tokens(), None, "a configured 0 is unset");
         assert_eq!(o.verify_nli_intra_threads(), None);
+    }
+
+    /// The cache must not cost the semantics it replaces: an unchanged file is parsed once, and an
+    /// EDITED one still takes effect — a long-lived server is exactly where that matters, and it
+    /// is the reason this is stamped rather than simply memoised.
+    #[test]
+    fn shared_ontology_is_reused_until_the_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        let path = g.join("ontology.toml");
+        std::fs::write(&path, "[rerank]\npool_size=40\n").unwrap();
+
+        let a = Ontology::load_or_default_shared(dir.path());
+        let b = Ontology::load_or_default_shared(dir.path());
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "an unchanged file must be parsed once"
+        );
+        assert_eq!(a.rerank_pool_size(), Some(40));
+
+        // Rewrite with a different length, so the stamp differs regardless of filesystem
+        // timestamp granularity.
+        std::fs::write(&path, "[rerank]\npool_size=400\n").unwrap();
+        let c = Ontology::load_or_default_shared(dir.path());
+        assert!(!std::sync::Arc::ptr_eq(&a, &c), "an edit must be picked up");
+        assert_eq!(c.rerank_pool_size(), Some(400));
+    }
+
+    /// A corpus with no ontology at all still resolves, and still caches — the missing-file case is
+    /// the common one, and re-deriving the default per query was the cost being removed.
+    #[test]
+    fn shared_ontology_handles_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = Ontology::load_or_default_shared(dir.path());
+        let b = Ontology::load_or_default_shared(dir.path());
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
+        assert_eq!(a.rerank_pool_size(), None);
     }
 
     #[test]

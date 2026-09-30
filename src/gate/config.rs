@@ -122,8 +122,10 @@ impl CombinedStats {
 impl VerifyConfig {
     /// `glossa_dir` is the corpus `.glossa` dir; ontology loads from its parent.
     pub fn resolve(glossa_dir: &Path) -> VerifyConfig {
-        let ont = glossa_dir.parent().map(Ontology::load_or_default);
-        let og = |f: fn(&Ontology) -> Option<f32>| ont.as_ref().and_then(f);
+        let ont = glossa_dir.parent().map(Ontology::load_or_default_shared);
+        // `as_deref`, not `as_ref`: `ont` is an `Arc` now, and a function pointer taking
+        // `&Ontology` gets no auto-deref through `and_then`.
+        let og = |f: fn(&Ontology) -> Option<f32>| ont.as_deref().and_then(f);
         VerifyConfig {
             enabled: env_bool("GLOSSA_VERIFY_ENABLED")
                 .or_else(|| ont.as_ref().and_then(|o| o.verify_enabled()))
