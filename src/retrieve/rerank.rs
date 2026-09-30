@@ -181,6 +181,10 @@ pub fn retrieve(
 /// Batching and threading belong to the SERVER for every `scorer = "http"` backend, so a
 /// client-side `batch_tokens` / `intra_threads` does nothing there. Dropping it in silence is how
 /// the device keys on this path became a trap; this is one line on stderr instead.
+///
+/// Gated like its call sites: without `http-scorer` there is no remote path to warn about, and an
+/// ungated definition is dead code in the no-default-features build.
+#[cfg(feature = "http-scorer")]
 fn warn_if_compute_knobs_inert(cfg: &RerankConfig) {
     if crate::retrieve::config::compute_knobs_inert(
         cfg.scorer.as_deref(),
