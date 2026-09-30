@@ -66,9 +66,10 @@ arc-swap = "1"
 parking_lot = "0.12"
 futures = "0.3"
 # Native TLS + mTLS behind the opt-in `tls` feature (§3b) -- OFF by default so the standard
-# binary carries zero crypto surface. `rustls`/`tokio-rustls` are already transitively resolved
-# in this workspace's Cargo.lock (aws-lc-rs backend), so enabling this feature doesn't introduce
-# a new crypto stack, only a new call path.
+# binary carries zero crypto surface. `rustls`/`tokio-rustls` use their default `aws-lc-rs`
+# provider (the same one `reqwest` pulls in the eval crate, so the eval binaries link a SINGLE
+# provider). `tls.rs` names the provider EXPLICITLY at each builder so it stays deterministic even
+# when `http-scorer`'s `ureq` also links `ring`. See [[http-scorer-tls-rustls-provider-clash]].
 rustls = { version = "0.23", optional = true }
 rustls-pemfile = { version = "2", optional = true }
 tokio-rustls = { version = "0.26", optional = true }

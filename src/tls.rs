@@ -124,10 +124,24 @@ fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
 /// Load `f.cert`/`f.key` and build a rustls `ServerConfig`. When `f.client_ca` is set, installs a
 /// `WebPkiClientVerifier` over that CA's certificates: client certs are REQUIRED and verified
 /// against it (mTLS). Otherwise no client authentication is performed.
+/// The rustls crypto provider glossa's TLS names EXPLICITLY (aws-lc-rs) instead of relying on
+/// rustls's process-default. aws-lc-rs is rustls's own default backend and the one `reqwest` pulls
+/// in the eval crate, so the shipped binaries already link it and the crypto is unchanged. Naming
+/// it here matters for the future `tls` + `http-scorer` combination: `ureq` (http-scorer) also
+/// links rustls's `ring` provider, and with two providers compiled the no-provider
+/// `ServerConfig::builder()` / verifier builders panic ("no process-level CryptoProvider"). An
+/// explicit provider keeps TLS deterministic regardless of what else is linked.
+/// See [[http-scorer-tls-rustls-provider-clash]].
+fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
+    Arc::new(rustls::crypto::aws_lc_rs::default_provider())
+}
+
 pub fn build_server_config(f: &TlsFiles) -> Result<Arc<ServerConfig>> {
     let certs = load_certs(&f.cert)?;
     let key = load_key(&f.key)?;
-    let builder = ServerConfig::builder();
+    let builder = ServerConfig::builder_with_provider(crypto_provider())
+        .with_safe_default_protocol_versions()
+        .context("rustls server config: safe default protocol versions")?;
     let config = match &f.client_ca {
         Some(ca_path) => {
             let ca_certs = load_certs(ca_path)?;
@@ -137,9 +151,10 @@ pub fn build_server_config(f: &TlsFiles) -> Result<Arc<ServerConfig>> {
                     .add(c)
                     .context("add client-CA certificate to the mTLS root store")?;
             }
-            let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
-                .build()
-                .context("build mTLS client-certificate verifier")?;
+            let verifier =
+                WebPkiClientVerifier::builder_with_provider(Arc::new(roots), crypto_provider())
+                    .build()
+                    .context("build mTLS client-certificate verifier")?;
             builder
                 .with_client_cert_verifier(verifier)
                 .with_single_cert(certs, key)
@@ -784,7 +799,9 @@ mod tests {
 
     fn client_config(roots: RootCertStore) -> Arc<rustls::ClientConfig> {
         Arc::new(
-            rustls::ClientConfig::builder()
+            rustls::ClientConfig::builder_with_provider(crypto_provider())
+                .with_safe_default_protocol_versions()
+                .unwrap()
                 .with_root_certificates(roots)
                 .with_no_client_auth(),
         )
@@ -802,7 +819,9 @@ mod tests {
         let mut kd = BufReader::new(key_pem.as_bytes());
         let key = rustls_pemfile::private_key(&mut kd).unwrap().unwrap();
         Arc::new(
-            rustls::ClientConfig::builder()
+            rustls::ClientConfig::builder_with_provider(crypto_provider())
+                .with_safe_default_protocol_versions()
+                .unwrap()
                 .with_root_certificates(roots)
                 .with_client_auth_cert(certs, key)
                 .unwrap(),

@@ -58,10 +58,7 @@ jobs:
       # glossa-nli `compile_error!`. This explicit set is the old `--all-features` minus `nli-burn`
       # (ORT engine + notebook + e2e + lingua + constraint + tls); the burn engine is covered by its
       # own job below. Covers the `tls` handshake/mTLS/reload tests on both matrix OSes (§3b).
-      # NOTE: `http-scorer` is deliberately NOT combined with `tls` here — ureq (http-scorer) links
-      # rustls's `ring` provider while `tls` relies on the `aws-lc-rs` default, and two linked
-      # providers make rustls's no-provider `ServerConfig::builder()` panic. http-scorer is tested
-      # in its own step below (it never ships alongside tls in a release binary today).
+      # `http-scorer` is exercised in its own steps below (on its own, and combined with `tls`).
       - name: cargo test (glossa, all features except burn engine)
         run: cargo test -p glossa --release --locked --features "notebook e2e lingua constraint nli nli-dynamic tls"
 
@@ -69,6 +66,14 @@ jobs:
       # and the multi-backend reranker wire. Single rustls provider (ureq's ring), so no clash.
       - name: cargo test (glossa, http-scorer feature)
         run: cargo test -p glossa --release --locked --no-default-features --features http-scorer
+
+      # Provider-coexistence guard: `tls` + `http-scorer` in ONE build link TWO rustls providers
+      # (tls's aws-lc-rs + ureq's ring). `tls.rs` names the provider explicitly at every builder, so
+      # the tls handshake/mTLS tests must still pass here — before the explicit fix they panicked
+      # with "no process-level CryptoProvider". This is the regression guard for that fix.
+      - name: cargo test (glossa, tls + http-scorer provider coexistence)
+        run: |
+          cargo test -p glossa --release --locked --features "tls http-scorer" tls::
 
       - name: cargo test (kb-eval)
         run: cargo test -p kb-eval --release --locked
