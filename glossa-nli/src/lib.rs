@@ -291,7 +291,12 @@ mod ort_engine {
             // Deliberately NO `.error_on_failure()` on these dispatches: a GPU EP that can't register
             // falls through to ORT's implicit CPU EP — the fail-open serving contract (see module
             // doc). `probe_gpu_ep` is the opt-in STRICT counterpart used by `kbx nli check`.
-            let session = build_session(&model_path, eps, mem_limit_mb)?;
+            let session = build_session(
+                &model_path,
+                eps,
+                mem_limit_mb,
+                harness::DEFAULT_INTRA_THREADS,
+            )?;
 
             Ok(Inner {
                 tokenizer,
@@ -327,6 +332,7 @@ mod ort_engine {
         model_path: &Path,
         eps: Vec<ExecutionProviderDispatch>,
         mem_limit_mb: Option<usize>,
+        intra_threads: usize,
     ) -> anyhow::Result<Session> {
         let mut builder = Session::builder()
             .map_err(|e| anyhow::anyhow!("onnx session builder: {e}"))?
@@ -334,7 +340,10 @@ mod ort_engine {
             .map_err(|e| anyhow::anyhow!("onnx session execution providers: {e}"))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| anyhow::anyhow!("onnx session optimization level: {e}"))?
-            .with_intra_threads(1)
+            // `.max(1)`: ORT reads 0 as "choose a thread count for me", the opposite of what
+            // someone configuring 0 to mean "none" intends. Clamped here so no caller can hand it
+            // through by accident.
+            .with_intra_threads(intra_threads.max(1))
             .map_err(|e| anyhow::anyhow!("onnx session intra-threads: {e}"))?;
         // Under a GPU memory limit, disable the memory-pattern optimizer: it pre-plans one big
         // contiguous arena, which fights a hard cap and inflates peak VRAM. Only applied when a
@@ -380,7 +389,12 @@ mod ort_engine {
         let model_path = resolve_model_file(model_dir)?;
         // `.error_on_failure()` flips the ONE bit that differs from `load`: this dispatch now returns
         // Err (instead of silently falling back to CPU) if the EP can't register.
-        build_session(&model_path, vec![dispatch.error_on_failure()], mem_limit_mb)?;
+        build_session(
+            &model_path,
+            vec![dispatch.error_on_failure()],
+            mem_limit_mb,
+            harness::DEFAULT_INTRA_THREADS,
+        )?;
         Ok(Some(name.to_string()))
     }
 
@@ -526,7 +540,12 @@ mod ort_engine {
             // cannot register falls through to ORT's implicit CPU EP. `probe_rerank_ep` is the strict
             // counterpart. `build_session`/`commit_from_file` loads `model.onnx_data` (external
             // weights) from the model dir automatically.
-            let session = build_session(&model_path, eps, mem_limit_mb)?;
+            let session = build_session(
+                &model_path,
+                eps,
+                mem_limit_mb,
+                harness::DEFAULT_INTRA_THREADS,
+            )?;
             let input_names = session
                 .inputs()
                 .iter()
@@ -633,7 +652,12 @@ mod ort_engine {
             return Ok(None);
         };
         let model_path = resolve_model_file(model_dir)?;
-        build_session(&model_path, vec![dispatch.error_on_failure()], mem_limit_mb)?;
+        build_session(
+            &model_path,
+            vec![dispatch.error_on_failure()],
+            mem_limit_mb,
+            harness::DEFAULT_INTRA_THREADS,
+        )?;
         Ok(Some(name.to_string()))
     }
 

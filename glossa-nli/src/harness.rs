@@ -27,6 +27,15 @@ pub const NLI_BATCH_TOKENS: usize = DEFAULT_MAX_SEQ_LEN;
 /// short rows building one huge batch).
 pub const NLI_BATCH_MAX_ROWS: usize = 64;
 
+/// ONNX Runtime intra-op threads per session.
+///
+/// One is what has always shipped, and it is a policy in both directions: a single-threaded
+/// session cannot saturate a machine and cannot use one either. The value that is actually right
+/// has never been measured against anything, so this preserves today's behaviour and exists to be
+/// turned by someone who has measured. Note the two in-process engines each take their own, and
+/// two counts oversubscribe the same cores additively.
+pub const DEFAULT_INTRA_THREADS: usize = 1;
+
 /// Read the `GLOSSA_NLI_BATCH_TOKENS` override, falling back to [`NLI_BATCH_TOKENS`] when unset,
 /// unparsable, or zero.
 pub fn parse_batch_budget_tokens() -> usize {
