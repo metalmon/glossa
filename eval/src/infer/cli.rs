@@ -1,9 +1,10 @@
-//! `kbi serve` arguments. Pure clap struct (no ORT), so it compiles in every build.
+//! `kbi` serve arguments (serve is the default — bare `kbi <flags>`). Pure clap struct (no ORT),
+//! so it compiles in every build.
 use std::path::PathBuf;
 
 use clap::Args;
 
-/// Flags for `kbi serve` (and, via the service runner, the installed service).
+/// Flags for the `kbi` server (serve is the default) — and, via the service runner, the installed service.
 #[derive(Args, Debug, Clone)]
 pub struct ServeArgs {
     /// Local NLI model dir (skips download). If absent and `--nli-repo` is set, the variant is

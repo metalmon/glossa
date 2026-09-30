@@ -23,6 +23,10 @@ use kb_eval::infer::cli::ServeArgs;
 ))]
 #[derive(clap::Parser)]
 #[command(name = "kbi", version = glossa::version())]
+// The serve flags and the `service` subcommand are mutually exclusive: reject `kbi --bind X service …`
+// (which would otherwise parse both and silently drop the pre-subcommand serve flags) rather than
+// running the wrong thing.
+#[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     /// `kbi service …` — install/manage as an OS service. Absent ⇒ serve with the flags below.
     #[command(subcommand)]
@@ -313,4 +317,35 @@ fn main() {
          (self-contained) or `--features nli-cuda` (GPU)."
     );
     std::process::exit(2);
+}
+
+// Gated with the real CLI (compile-covered by CI's `--features "http-scorer nli-cuda" --all-targets`).
+#[cfg(all(
+    test,
+    any(
+        feature = "nli-directml",
+        feature = "nli-coreml",
+        feature = "nli-cuda",
+        feature = "nli-rocm"
+    )
+))]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn bare_flags_serve_and_service_is_the_only_subcommand() {
+        // Bare flags => serve (no subcommand), proving serve is the default (decision B).
+        let cli = Cli::try_parse_from(["kbi", "--bind", "0.0.0.0:9000"]).unwrap();
+        assert!(cli.service.is_none());
+        assert_eq!(cli.serve.bind, "0.0.0.0:9000");
+        // `kbi service status <name>` => the service subcommand.
+        let cli = Cli::try_parse_from(["kbi", "service", "status", "svc"]).unwrap();
+        assert!(matches!(cli.service, Some(InferServiceAction::Status(_))));
+        // Mixing serve flags before the subcommand is REJECTED (args_conflicts_with_subcommands).
+        assert!(
+            Cli::try_parse_from(["kbi", "--bind", "0.0.0.0:9000", "service", "status", "svc"])
+                .is_err()
+        );
+    }
 }
