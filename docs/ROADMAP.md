@@ -1,6 +1,6 @@
 # glossa — roadmap and backlog
 
-Status as of **2026-08-30**. Version **0.4.5** (last tag `v0.4.5`).
+Status as of **2026-09-30**. Version **0.5.2** (last tag `v0.5.2`), plus unreleased work (the `kbi` rename + `kb mcp service`).
 
 For what ships today, see [README.md](../README.md) and [architecture.md](architecture.md). This file tracks performance notes, technical debt, and direction.
 
@@ -8,6 +8,10 @@ For the reasoning graph’s inference-method direction (abduction / deduction / 
 
 Legend used below: **Shipped** = in a release today; **Partial** = exists but incomplete vs the goal; **Open** = not built.
 
+> **New in 0.5.2:** the **remote inference server (`kbi`)** — a standalone HTTP scorer for NLI + reranker (TEI/Jina protocol, bearer-auth + non-loopback interlock, TLS/mTLS, 429 overload guard) so a GPU-less host offloads scoring to one shared VRAM copy; `scorer = "http"` for `[verify.nli]`/`[rerank]`; cross-platform **`kb mcp service` / `kbi service`** install (Windows SCM + Linux systemd); the ONNX device-flag rename (`--device`/`--gpu-id`/`--gpu-mem-mb`, no back-compat).
+> **New in 0.5.1:** `kbx rerank download`/`set` + fp16/int8 precision-variant downloads for the NLI and reranker models.
+> **New in 0.5.0:** the model-free answer-grounding gate (`verify` tool + `[verify]` `ac`/`nli`/`combined`), the **NLI support-verifier** with ONNX + burn/Vulkan GPU engines (`kbx nli check`, engine in `kb --version`), the **cross-encoder reranker**, run-free calibration (`kbx eval calibrate`), coverage abstention + FP/FN scoring, GEPA checkpoint/resume + 3-phase bar, the `kbx dataset` group, graph-doctor `--relink` + a 4th `dangling` doubt, retrieval-engine knobs (deterministic Louvain communities, `bridge` mode, `spine_weight`, out-of-core mmap PPR), reasoning-scope controls, and canonical CLI output.
+>
 > **New in 0.4.0** *(kbx pipeline)*: multi-API transport (`api = "openai" | "anthropic" | "openai_responses"` via one unified `ChatTransport`), opt-in rate-limit resilience (retry/backoff/throttle) with ordered per-stage fallback chains, per-endpoint temperature, parallel `kbx` pipeline workers (`build`/`reason`/`train`/`distil`/`eval`), a `user_sim` dialogue gate, an evidence-grounded judge, fine-tuning dataset export (SFT + DPO, Unsloth-ready), and anti-loop retrieval signals (plateau/repeat/streak, novelty-gated trimming). See [CHANGELOG.md](../CHANGELOG.md).
 >
 > **New in 0.3.2:** first-class **OpenDocument** extraction (odt/ods/odp), **chart-data extraction** (OOXML + ODF charts → searchable GFM tables, incl. ODF cell-range resolution), and **embedded-image delivery to vision** (ODF `Pictures/`, legacy `.doc`/`.xls` raster). Marked **Shipped** below.
@@ -30,12 +34,10 @@ Legend used below: **Shipped** = in a release today; **Partial** = exists but in
 - **Graph UX:** `graph_stats`, SIMILAR + COMMUNITY in `related`, structural `neighbors` (typed 1-hop edges) and `reach` (cross-document connection between two nodes), formatted `graph_upsert` responses (Written / Merged / REJECTED).
 - **Ontology presets** *(post-v0.2.7)*: 26 baked task ontologies (Tier 1 conformance / Tier 2 operational), `kb ontology list/show/init/suggest` + `kb index --ontology <name>`; thin reasoning skeletons — one grounded terminal per preset, no Evidence node.
 - **Mandatory grounding + valid-time** *(post-v0.2.7)*: `requires_grounding` / `requires_validity` enforced at `graph_upsert` and advertised by `get_ontology`; valid-time Phase 1 — `--as-of` / `as_of`, `SUPERSEDES`, per-node status (current/future/expired).
-- **Graph doctor** *(post-v0.2.7)*: `kb graph doctor` + MCP `graph_doctor` — ungrounded / stale (source `file_sig` drift) / incomplete report and targeted prune; `generalize` is derived-layer only; inline `⚠ stale` marker on reads.
+- **Graph doctor** *(post-v0.2.7, extended 0.5.0)*: `kb graph doctor` + MCP `graph_doctor` — four doubt buckets (ungrounded / stale (source `file_sig` drift) / incomplete / **dangling**), targeted prune, **`--relink`** (heal moved sources) and `--prune-dangling` with mass-wipe force-guards; `generalize` is derived-layer only; inline `⚠ stale` marker on reads.
 - **HTML graph explorer** *(post-v0.2.7)*: `kb graph dump -f html` — one self-contained offline interactive explorer (search → focused local view, light/dark, mobile-friendly).
-- **Eval harness:** `kb-eval`, `kb-train enrich`, TensorZero backend, TZ episode export, initial GEPA (search + read micro-tasks). Alongside it, the **`kbx` pipeline** (`build`/`reason`/`distil`/`train`/`eval`) now covers multi-API transport, retry/backoff/fallback, per-endpoint temperature, parallel workers, the `user_sim` gate, an evidence-grounded judge, and fine-tuning dataset export — see [eval-and-training.md](eval-and-training.md).
-- **Dev pipeline:** `justfile` recipes; Windows-friendly eval tooling.
-- **Quad GEPA:** optimize prod `answer_hotpot` prompt against search, grep, glob, and read via TensorZero micro-functions + `gepa_reflect`; Pareto parent selection and full-val final pick.
-- **export-tz:** four jsonl streams (`search`, `grep`, `glob`, `read`); synthetic grep/glob rows when episodes lack those tool calls; `TrainCase.source` gold join when present.
+- **Eval / train pipeline (`kbx`):** the self-contained `kbx` toolkit (`build`/`reason`/`train`/`distil`/`eval`/`dataset`/`nli`/`rerank`) — multi-API transport, retry/backoff/fallback, per-endpoint temperature, parallel workers, the `user_sim` gate, an evidence-grounded judge, GEPA (checkpoint/resume) prompt optimization, run-free calibration, and fine-tuning dataset export (SFT + DPO). See [eval-and-training.md](eval-and-training.md). *(The earlier `kb-eval`/`kb-train`/`kb-eval-constraint` binaries + TensorZero/ClickHouse harness were retired — `kbx` replaced them.)*
+- **Dev pipeline:** `justfile` recipes.
 - **Constraint graph (CSP):** solver in `constraint/src/solver.rs` (validate/infer/check, ~1218 lines), `constraint_solve` MCP tool — behind `--features constraint`.
 - **Image output opt-in:** off by default, enabled with `--vision` (`GLOSSA_VISION`); all images served as JPEG (embedded PNGs re-encoded, PDF-embedded/raster JPEGs passed through), so a figure-heavy page no longer overflows the stdio frame. `-N` / `--noimage` kept as a deprecated no-op (v0.2.7; the original `--noimage` toggle shipped in v0.2.5).
 
@@ -182,7 +184,7 @@ traversal, not a complex graph fed to a weak model. Design captured in an intern
 | Hotpot distractor runs | **Shipped** | Logged in [benchmarks.md](benchmarks.md) (50q slices) |
 | `prep-fullwiki` | **Shipped** | CLI + shard builder in `kb-eval prep-fullwiki` |
 | `export-tz` quad jsonl + GEPA | **Shipped** | v1.2.0 — search, grep, glob, read micro-tasks only |
-| Constraint GEPA (5 pools: discover / materialize / compile / coverage / validate) | **Partial** | 5-pool loop, TZ functions, and apply path shipped; graph_build / graph_stats / constraint_solve scorers still use text-recall proxies. See [constraint-gepa.md](constraint-gepa.md). |
+| Constraint GEPA (5 pools) | **Retired** | Was a TensorZero/`kb-eval-constraint` loop; the tooling was retired with the legacy harness and has no `kbx` equivalent yet. Reintroduce under `kbx` only if the `.csp` extraction agent needs prompt optimization again. |
 | GEPA graph micro-tasks (`glossary`, `related`) | **Open** | Extend prompt optimization to graph-first retrieval: export episodes → jsonl, TZ micro-functions, scored like search/read (symptom → chain hit, related → alternate case / gold chunk). Needed so GEPA tunes the prod prompt's graph protocol, not only flat retrieval. |
 | `--no-graph` control arm | **Shipped** | `kb-eval run --no-graph`, MCP `--no-graph` |
 | Gold join / `case_id` | **Partial** | TZ sets `case_id`; export joins by id or question; OpenAI backend has no tags; enrich sets `case_id` |

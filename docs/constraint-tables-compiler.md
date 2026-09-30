@@ -168,8 +168,6 @@ Post-step in the constraint eval harness runs the same function after a phase-A 
 
 MCP / eval agent tool: **`graph_build(doc)`** — same compile, compiler-style OK/FAILED output; use on SOP step 3 to fix `.csp` before `done`.
 
-To improve agent `.csp` quality before compile, see [constraint-gepa.md](constraint-gepa.md) (GEPA over table value recall vs reference validation tables).
-
 ---
 
 ## Implementation map (code)

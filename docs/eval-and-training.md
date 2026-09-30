@@ -1,118 +1,64 @@
 # Eval and training — playbook
 
-Developer guide: run the agent, accumulate TensorZero telemetry, export a GEPA dataset, and improve the prod prompt. Corpus operators can skip most of this — see [getting-started.md](getting-started.md).
+Developer guide: build the reasoning layer, synthesize training data, optimize the answer
+prompt with GEPA, and evaluate the reader end to end — all with the self-contained **`kbx`**
+toolkit. Corpus operators can skip most of this — see [getting-started.md](getting-started.md).
 
 ## Why this exists
 
-glossa measures not a bare LLM but an **agent with tools** (`search`, `grep`, `glob`, `read`, graph, …). TensorZero (TZ) logs every run to ClickHouse: question, tool-call chain, metrics. From that history we:
-
-1. **Export** — build labeled dumps of how the model searched, grepped, globbed, and read vs gold chunks.
-2. **GEPA** — iteratively improve the system prompt (`answer_hotpot`) without changing agent code.
-3. **Eval** — check end-to-end (answer, recall, judge) before and after.
+glossa measures not a bare LLM but an **agent with tools** (`search`, `grep`, `glob`, `read`,
+graph, …). The `kbx` toolkit builds a thin query-side reasoning layer over an indexed corpus,
+synthesizes grounded `(question, answer)` cases from it, optimizes the answer prompt, and scores
+the reader — graph-on vs graph-off, optionally graded by an LLM judge. It needs no external
+gateway: everything is driven by a per-workspace `lab.toml` (a model endpoint per role).
 
 ```mermaid
 flowchart TB
-  subgraph once [One-time setup]
-    build[just build]
-    up[just up]
-    lm[LM Studio qwen]
+  subgraph corpus [Indexed corpus]
+    index[kb index --force]
   end
 
-  subgraph corpus [kb-test corpus]
-    index[kb index --force once]
-    enrich[just enrich]
+  subgraph graph [Reasoning layer]
+    init[kbx init]
+    build[kbx build]
+    reason[kbx reason]
+    distil[kbx distil]
   end
 
-  subgraph measure [Measurement]
-    eval[kb-eval → TZ episodes]
+  subgraph work [Measurement + training]
+    eval[kbx eval]
+    train[kbx train]
   end
 
-  subgraph train [Prompt optimization]
-    export[just export-tz]
-    gepa[just gepa]
-    prompt[answer_hotpot.prompt.txt]
-  end
-
-  build --> enrich
-  up --> eval
-  lm --> eval
-  enrich --> eval
-  eval --> export
-  export --> gepa
-  gepa --> prompt
-  prompt --> eval
+  index --> init
+  init --> build
+  build --> reason
+  reason --> distil
+  distil --> eval
+  distil --> train
+  train --> eval
 ```
 
 ---
 
-## Playbook 0 — 2-minute smoke
+## Corpus and reasoning graph
 
-No Docker, no corpus, no GPU:
-
-```bash
-just build
-just eval-fixture
-```
-
-Confirms `kb-eval` builds and scoring works (mock backend, [sample-hotpot-distractor.json](../eval/fixtures/sample-hotpot-distractor.json)).
-
----
-
-## Playbook 1 — First-time infrastructure
-
-### 1. Build
+Default work corpus: **`kb-test/`** (git-ignored). The `kbx` pipeline runs over any indexed
+corpus. Build or rebuild the search index **before** eval or training (not per question):
 
 ```bash
-just build          # kb + kb-eval + kb-train
-just test           # optional
+./target/release/kb index kb-test --force    # Windows: kb.exe
 ```
 
-Binaries land in `target/release/`. On Windows use **`kb-eval.exe`** and **`kb-train.exe`** (release builds). After code changes: `just build-eval force` / `just build-train force`.
-
-| Binary | Purpose |
-|--------|---------|
-| `kb` | index, search, MCP (shipped in GitHub Releases) |
-| `kb-eval` | benchmark, scoring |
-| `kb-train` | enrich, export-tz, GEPA optimize |
-
-### 2. TensorZero + ClickHouse
-
-```bash
-cd eval/tensorzero
-cp .env.example .env    # LMSTUDIO_API_KEY, OPENROUTER_API_KEY
-just up
-just health             # expect gateway 200
-```
-
-Details: [eval/tensorzero/README.md](../eval/tensorzero/README.md).
-
-### 3. Models
-
-| Role | Where | Used for |
-|------|-------|----------|
-| **Qwen3.5-4B** | LM Studio `:1234` | agent (`answer_hotpot`), GEPA micro-task scoring, optional judge |
-| **DeepSeek-R1** | OpenRouter via TZ | GEPA reflect/mutate (`gepa_mutator`) |
-
-After changing TZ tool schemas:
-
-```bash
-just tools
-just gw-restart
-```
-
----
-
-## Playbook 2 — Corpus and reasoning graph
-
-Default work corpus: **`kb-test/`** (git-ignored). Case registry: **`kb-val/derived/train.json`** + **`synthetic-train.json`**.
-
-> **Local prerequisites:** the `kb-val/derived/*.json` case registries, `eval-corpus/`, and `gepa-out/` are local, git-ignored data — they do not ship with the repo. Recipes that reference them require generating or providing this data locally first.
+> **Local prerequisites:** the `kb-val/derived/*.json` case registries and any `eval-corpus/`
+> are local, git-ignored data — they do not ship with the repo. Recipes that reference them
+> require generating or providing this data locally first.
 
 ### The `kbx` pipeline (reasoning-layer toolkit)
 
 The reasoning layer is built and evaluated by the **`kbx`** toolkit — a single self-contained
 binary with a verb per lifecycle stage, configured by a per-workspace `lab.toml` (a model endpoint
-per role). It needs no TensorZero gateway. Over an indexed corpus:
+per role). Over an indexed corpus:
 
 | Verb | Stage |
 |---|---|
@@ -336,289 +282,13 @@ is silently dropped:
 test** (correct = the reader declines / says it is not in the KB), scored as such by `kbx eval run`
 when a `[judge]` endpoint is configured.
 
-The remainder of this guide is the earlier **TensorZero-gateway apparatus** — the `kb-eval` /
-`kb-train` binaries, the `enrich` silver-graph path, and GEPA over the four retrieval micro-tasks.
-It remains supported for that research workflow; `kbx` is the current self-contained path.
-
-### Index once
-
-Build or rebuild the search index **before** eval or GEPA (not per question):
-
-```bash
-./target/release/kb index kb-test --force    # Windows: kb.exe
-```
-
-TensorZero eval uses a **pre-built index** in `--work`; it does not wipe `.glossa` between questions.
-
-### Enrich — silver graph from solved cases
-
-```bash
-just enrich          # all cases from synthetic-train.json
-just enrich 10       # first 10 only
-just graph-stats
-```
-
-The enricher reverse-traces Q→A into reasoning nodes. Gold for export can come from graph `MENTIONS` when train JSON has no `source` field.
-
----
-
-## Playbook 3 — Eval: record episodes in ClickHouse
-
-Eval = one question = one TZ **episode**. `export-tz` reads these later.
-
-### Standard run
-
-```bash
-just eval kb-val/derived/synthetic-train.json answer_hotpot kb-test after-gepa
-```
-
-Positional args: `DATASET`, `FUNCTION`, `WORK`, **`RUN_TAG`** (4th). Sets `tags.run=after-gepa`. **`tags.case_id = _id`** is added from the dataset.
-
-`just eval` also passes `--judge-endpoint http://localhost:1234 --judge-model qwen3.5-4b` (LM Studio must be up for judge metrics).
-
-### Dataset formats
-
-| Format | Used for | `context` field |
-|--------|----------|-----------------|
-| HotpotQA | mini-corpus per question (CLI/OpenAI backends) | required paragraphs |
-| glossa-train (`synthetic-train.json`, `train.json`) | enrich + eval on fixed corpus | optional (empty OK) |
-
-Parsed by [`eval/src/dataset.rs`](../eval/src/dataset.rs). Sample Hotpot: [sample-hotpot-distractor.json](../eval/fixtures/sample-hotpot-distractor.json). Sample train: [sample-train.json](../eval/fixtures/sample-train.json).
-
-### After eval
-
-```bash
-just eval-metrics
-```
-
-Columns: `run`, `arm`, `n`, `f1`, `r10`, `judge` — `r10` is the `recall_at_10` metric averaged per
-run. These come from TensorZero metric feedback in ClickHouse (see the `eval-metrics` recipe in the
-justfile), not from the eval crate's own scoring code.
-
----
-
-## Playbook 4 — Export: episodes → GEPA dataset
-
-Export **does not run the model**. It reads ClickHouse, parses tool calls from transcripts, labels against gold.
-
-```bash
-just export-tz                  # all answer_hotpot episodes
-just export-tz gepa-v1          # only tags.run=gepa-v1
-```
-
-Output in `gepa-out/` (git-ignored):
-
-| File | Contents |
-|------|----------|
-| `search.jsonl` | question, search_query, gold, hit@k |
-| `grep.jsonl` | question, grep pattern, gold, hit@k |
-| `glob.jsonl` | question, glob pattern, gold paths |
-| `read.jsonl` | prefilled search hits, model read pick, hit/miss |
-
-If episodes lack grep/glob tool calls, export **synthesizes** rows from registry cases.
-
-### Gold join
-
-1. **`tags.case_id`** → lookup in train/synthetic-train (best).
-2. **Question text** (normalized) → fallback for old episodes.
-3. Gold chunk: **`source`** field (`path#loc`) or graph **`MENTIONS`**.
-
-Prefer explicit **`source`** on train cases over graph-only gold.
-
-### Report line (example)
-
-```
-export-tz: episodes=160 skipped_no_q=1 skipped_no_gold=89 joined_by_id=42
-  search=217 (hit=43) grep=49 (hit=8) glob=109 (hit=74) read=97 (hit=22)
-```
-
-| Field | Meaning |
-|-------|---------|
-| `joined_by_id` | Episodes matched via `case_id` (re-run eval with current `kb-eval` if 0) |
-| `search` / `grep` / `glob` / `read` | Row counts — **what GEPA needs** |
-| `hit` | Retrospective on that episode; GEPA re-scores live during optimize |
-
----
-
-## Playbook 5 — GEPA: improve the prod prompt
-
-Target: [`eval/tensorzero/config/answer_hotpot/system.minijinja`](../eval/tensorzero/config/answer_hotpot/system.minijinja).
-
-GEPA scores four micro-tasks via TZ functions **`search`**, **`grep`**, **`glob`**, **`read`** — each with the evolving prod prompt passed as `input.system`.
-
-### Quick run (dump already exists)
-
-```bash
-just gepa
-just gepa-metrics
-```
-
-Artifact: **`gepa-out/answer_hotpot.prompt.txt`**.
-
-### Full cycle
-
-```bash
-just gepa-all run=gepa-v1
-# export-tz + optimize; auto run tag if omitted
-```
-
-### `just gepa` parameters (named)
-
-| Param | Default | Meaning |
-|-------|---------|---------|
-| `budget` | `40` | Reflect→mutate iterations |
-| `minibatch` | `12` | Failure traces per iteration (weighted across tools) |
-| `w_search` | `0.35` | Combined metric weight |
-| `w_read` | `0.40` | |
-| `w_grep` | `0.15` | |
-| `w_glob` | `0.10` | |
-| `pareto-size` | `20` (in recipe) | D_pareto sample cap |
-| `run` | `gepa-long-YYYYMMDD-HHMM` | TZ tag for metrics |
-
-Examples:
-
-```bash
-just gepa budget=80 w_search=0.45 w_read=0.30 run=my-run
-just gepa budget=12 minibatch=8
-```
-
-Seed: `gepa-out/answer_hotpot.prompt.txt` if present, else prod `system.minijinja`.
-
-### Quad sub-tasks
-
-| Sub-task | Model must | Score |
-|----------|------------|-------|
-| **search** | `search(query)` | gold chunk in top-k |
-| **grep** | `grep(pattern)` | gold in grep hits |
-| **glob** | `glob(pattern)` | gold path in listing |
-| **read** | `read(path,n)` after prefilled hits | pick matches gold |
-
-Combined: weighted macro-average of per-task val accuracies (`gepa_combined_acc` = `w_search·search + w_grep·grep + w_glob·glob + w_read·read`, normalized). Acceptance: minibatch improve → pool; **final pick** re-scores all candidates on **full val**.
-
-**Reading `just gepa-metrics`:**
-
-| Column | Meaning |
-|--------|---------|
-| `search` / `grep` / `glob` / `read` | Absolute macro-accuracy per micro-task on **full val** (not weighted). |
-| `final` / `baseline` | Weighted combined using the run's `w_*` tags (stored from v0.2.0+; older runs: infer weights or compare per-task only). |
-| `iter_avg` | Mean of `gepa_iter_combined` — **D_pareto subset**, not full val; can exceed `final` and must not be compared to per-task columns. |
-
-Recompute combined from per-task: `(w_search·search + w_grep·grep + w_glob·glob + w_read·read) / (w_search + w_grep + w_glob + w_read)` using weights from TZ tags (`w_search`, …) or the `just gepa` recipe defaults.
-
-### Production checklist
-
-```bash
-just build-train force
-just gw-restart
-
-just eval kb-val/derived/synthetic-train.json answer_hotpot kb-test gepa-v1
-just export-tz gepa-v1
-just gepa budget=40 run=gepa-v1
-
-just gepa-metrics
-# Review gepa-out/answer_hotpot.prompt.txt — apply manually when satisfied:
-just gepa-apply
-just gw-restart
-
-just eval kb-val/derived/synthetic-train.json answer_hotpot kb-test gepa-v1-applied
-just eval-metrics
-```
-
-**`gepa-apply` is manual** — copies optimized prompt to prod template (creates `.bak`; `.bak` is git-ignored).
-
----
-
-## Playbook 5b — Constraint GEPA: improve `constraint_validate` prompts
-
-Target: the constraint SOP slices in [`eval/sops/example/SOP.md`](../eval/sops/example/SOP.md) (the 5-step table-extraction SOP). `gepa-constraint-apply` runs `kb-train apply-sop-slices` to merge optimized slices back into the SOP.
-
-Unlike main GEPA (chunk retrieval), constraint GEPA uses **five micro-task pools** aligned with the 5-step SOP (Discover → Materialize → Compile → Coverage → Validate). Production stays **one agent** with five merged prompt slices.
-
-**Full playbook:** [constraint-gepa.md](constraint-gepa.md)
-
-```bash
-just constraint-synthetic          # reference tables → gepa-constraint-out/*.jsonl
-just gepa-constraint budget=6      # optimize 3 prompt slices
-just gepa-constraint-metrics
-just gepa-constraint-apply         # merge → system.minijinja
-just gw-restart
-# sanity: kb-eval-constraint --tag run=gepa-c-applied ...
-```
-
-Artifacts: `gepa-constraint-out/constraint_{research,materialize,compile_fix}.prompt.txt` (git-ignored).
-
----
-
-## Playbook 6 — Reset ClickHouse history
-
-```bash
-just gepa-reset    # search/grep/glob/read/gepa_reflect + GEPA metrics
-just eval-reset    # answer_hotpot* only
-# wait ~5s
-just gepa-metrics
-just eval-metrics
-```
-
-Eval and GEPA history are independent.
-
----
-
-## Recipe cheat sheet
-
-| Recipe | When |
-|--------|------|
-| `just build` | After pull / code changes |
-| `just build-eval force` / `just build-train force` | Force rebuild on Windows |
-| `just up` / `just down` | TZ stack |
-| `just enrich` | Build reasoning graph |
-| `just eval DATASET [FUNC] [WORK] [RUN]` | Benchmark → episodes (+ judge) |
-| `just export-tz [run]` | Episodes → four jsonl files |
-| `just gepa [budget=…] [run=…]` | Optimize prompt |
-| `just gepa-all` | export-tz + gepa |
-| `just gepa-apply` | Copy optimized prompt → prod (manual step) |
-| `just gepa-metrics` / `just eval-metrics` | Terminal tables |
-| `just constraint-synthetic` | Bootstrap constraint GEPA jsonl from reference tables |
-| `just gepa-constraint` | Optimize `constraint_validate` prompt slices |
-| `just gepa-constraint-apply` | Merge constraint GEPA prompts → prod template |
-| `just gepa-constraint-metrics` | Constraint GEPA metrics table |
-| `just dump` | **Legacy** graph dump |
-| `just graph-stats` | Graph size |
-
-Full list: `just --list`.
-
----
-
-## Troubleshooting
-
-| Symptom | Check |
-|---------|-------|
-| `export-tz` search=0 | No episodes or no registry join; run eval on train questions |
-| `joined_by_id=0` | Re-run eval with current `kb-eval` (needs `case_id` tag) |
-| GEPA baseline 0.000 | Empty index → `kb index kb-test --force`; LM Studio up; `just gw-restart` |
-| `Unknown function: search` | Gateway on old config — `just gw-restart` |
-| `missing field context` | Stale `kb-eval` without `.exe` — `just build-eval force` |
-| `indexed: N added` every question | Stale eval binary or Hotpot dataset with `context` paragraphs |
-| Per-question reindex on kb-test | Use TensorZero backend (default in `just eval`); rebuild `kb-eval` |
-| No `judge` in TZ metrics | LM Studio down or judge model missing |
-| After tool schema changes | `just tools && just gw-restart` |
-
----
-
-## kb-eval backends
-
-| Backend | When |
-|---------|------|
-| `tensorzero` | Prod-like: TZ gateway + glossa tools in-process |
-| `openai` | LM Studio / OpenAI without TZ |
-| `cli` | External MCP client |
-| `mock` | Unit smoke |
-
 ---
 
 ## Related
 
-- [constraint-gepa.md](constraint-gepa.md) — GEPA prompt optimization for `.csp` table extraction
-- [graph-and-ontology.md](graph-and-ontology.md) — ontology for enrich
+- [graph-lifecycle.md](graph-lifecycle.md) — create / maintain the reasoning graph
+- [finetuning-datasets.md](finetuning-datasets.md) — SFT / DPO dataset formats
+- [graph-and-ontology.md](graph-and-ontology.md) — ontology model
 - [benchmarks.md](benchmarks.md) — published eval numbers
 - [mcp.md](mcp.md) — agent tools
 - [ROADMAP.md](ROADMAP.md) — backlog
