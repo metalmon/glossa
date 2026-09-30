@@ -5,9 +5,8 @@
 //! supplies the raw cross-encoder forward via [`RerankForward`], so ORT and burn cannot diverge in
 //! anything but the forward itself.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use burn::prelude::*;
@@ -46,8 +45,8 @@ pub struct InProcessBurnReranker {
 
 /// Keyed by canonicalized model dir alone: the burn backend selects its own device, so the ORT
 /// key's provider / device-id / memory-limit components have no analogue here.
-type BurnRerankCache = OnceLock<Mutex<HashMap<PathBuf, Arc<BurnRerankInner>>>>;
-static BURN_RERANK_CACHE: BurnRerankCache = OnceLock::new();
+type BurnRerankCache = harness::LoadOnce<PathBuf, BurnRerankInner>;
+static BURN_RERANK_CACHE: BurnRerankCache = BurnRerankCache::new();
 
 impl InProcessBurnReranker {
     /// Load the tokenizer (`tokenizer.json`), model config (`config.json`), and weights (a
@@ -60,23 +59,9 @@ impl InProcessBurnReranker {
         let key = model_dir
             .canonicalize()
             .unwrap_or_else(|_| model_dir.to_path_buf());
-        let cache = BURN_RERANK_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-        if let Some(inner) = cache
-            .lock()
-            .map_err(|_| anyhow!("burn rerank cache mutex poisoned"))?
-            .get(&key)
-        {
-            return Ok(Self {
-                inner: Arc::clone(inner),
-            });
-        }
-        let built = Arc::new(Self::build_inner(model_dir)?);
-        let mut guard = cache
-            .lock()
-            .map_err(|_| anyhow!("burn rerank cache mutex poisoned"))?;
-        // `or_insert`, not `insert`: two threads that both missed the read above must end up
-        // sharing ONE instance, with the loser's build dropped.
-        let inner = Arc::clone(guard.entry(key).or_insert(built));
+        let inner = BURN_RERANK_CACHE.get_or_try_init(key, "burn rerank", || {
+            Ok(Arc::new(Self::build_inner(model_dir)?))
+        })?;
         Ok(Self { inner })
     }
 

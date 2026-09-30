@@ -27,6 +27,86 @@ pub const NLI_BATCH_TOKENS: usize = DEFAULT_MAX_SEQ_LEN;
 /// short rows building one huge batch).
 pub const NLI_BATCH_MAX_ROWS: usize = 64;
 
+/// A process-global load-once cache with a per-key BUILD lock.
+///
+/// The naive shape — check the map, drop the lock, build, re-lock, `or_insert` — leaves everyone
+/// sharing one instance, but two threads that miss together both build a full model and one result
+/// is thrown away. For these engines that is two sets of weights and two GPU sessions transiently
+/// live, which on a card already shared with an LLM is the spike that fails. Holding the map's lock
+/// across the build would instead serialize loads of DIFFERENT models, which is worse.
+///
+/// So: a second map of per-key mutexes. A thread that misses takes its key's build lock, re-checks
+/// the cache (whoever held the lock before it may have just filled the entry), and only then
+/// builds. Threads wanting other keys are unaffected.
+///
+/// `build` must do everything that has to happen BEFORE an entry becomes visible — including
+/// validating it. Publishing first and checking afterwards leaves a failed entry for the next
+/// caller to hit, which is a defect this cache exists partly to prevent.
+pub struct LoadOnce<K, V> {
+    entries: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<K, std::sync::Arc<V>>>>,
+    builds: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<K, std::sync::Arc<std::sync::Mutex<()>>>>,
+    >,
+}
+
+impl<K: std::hash::Hash + Eq + Clone, V> LoadOnce<K, V> {
+    pub const fn new() -> Self {
+        Self {
+            entries: std::sync::OnceLock::new(),
+            builds: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The cached value for `key`, building it with `build` if absent. `what` names the cache in
+    /// the message a poisoned mutex produces.
+    pub fn get_or_try_init<F>(
+        &self,
+        key: K,
+        what: &str,
+        build: F,
+    ) -> anyhow::Result<std::sync::Arc<V>>
+    where
+        F: FnOnce() -> anyhow::Result<std::sync::Arc<V>>,
+    {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        let entries = self.entries.get_or_init(|| Mutex::new(HashMap::new()));
+        let poisoned = || anyhow::anyhow!("{what} cache mutex poisoned");
+
+        if let Some(v) = entries.lock().map_err(|_| poisoned())?.get(&key) {
+            return Ok(Arc::clone(v));
+        }
+
+        let build_lock = {
+            let builds = self.builds.get_or_init(|| Mutex::new(HashMap::new()));
+            let mut guard = builds.lock().map_err(|_| poisoned())?;
+            Arc::clone(
+                guard
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            )
+        };
+        let _building = build_lock.lock().map_err(|_| poisoned())?;
+
+        if let Some(v) = entries.lock().map_err(|_| poisoned())?.get(&key) {
+            return Ok(Arc::clone(v));
+        }
+
+        let built = build()?;
+        entries
+            .lock()
+            .map_err(|_| poisoned())?
+            .insert(key, Arc::clone(&built));
+        Ok(built)
+    }
+}
+
+impl<K: std::hash::Hash + Eq + Clone, V> Default for LoadOnce<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The largest batch budget the planner can actually spend: [`NLI_BATCH_MAX_ROWS`] full-length
 /// rows. A configured budget above this is silently equivalent to it, so a caller announces the
 /// clamp rather than leave an operator believing a number that does nothing.
@@ -408,6 +488,60 @@ pub fn softmax3(logits: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The point of the per-key build lock: two threads missing together must BUILD once, not
+    /// merely end up sharing once. Counting builds is the only way to see the difference — both
+    /// designs return the same instance, and only one of them loads the weights twice.
+    #[test]
+    fn concurrent_misses_build_once_per_key() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        static CACHE: LoadOnce<&'static str, usize> = LoadOnce::new();
+        let builds = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(Barrier::new(4));
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let builds = Arc::clone(&builds);
+                let gate = Arc::clone(&gate);
+                std::thread::spawn(move || {
+                    gate.wait(); // maximise the overlap
+                    CACHE
+                        .get_or_try_init("k", "test", || {
+                            builds.fetch_add(1, Ordering::SeqCst);
+                            std::thread::sleep(std::time::Duration::from_millis(30));
+                            Ok(Arc::new(7usize))
+                        })
+                        .unwrap()
+                })
+            })
+            .collect();
+
+        let got: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(builds.load(Ordering::SeqCst), 1, "built more than once");
+        for v in &got {
+            assert!(Arc::ptr_eq(v, &got[0]), "every caller gets one instance");
+            assert_eq!(**v, 7);
+        }
+    }
+
+    /// A failed build must leave nothing behind: the next caller has to try again, not inherit an
+    /// entry that never validated.
+    #[test]
+    fn a_failed_build_is_not_cached() {
+        static CACHE: LoadOnce<&'static str, usize> = LoadOnce::new();
+        assert!(CACHE
+            .get_or_try_init("bad", "test", || anyhow::bail!("nope"))
+            .is_err());
+        assert!(CACHE
+            .get_or_try_init("bad", "test", || anyhow::bail!("still nope"))
+            .is_err());
+        let ok = CACHE
+            .get_or_try_init("bad", "test", || Ok(std::sync::Arc::new(1usize)))
+            .expect("a later good build succeeds");
+        assert_eq!(*ok, 1);
+    }
 
     /// A budget above what the planner can spend is not an error, but it is not the number the
     /// operator wrote either — the caller announces the effective value, and this pins when.

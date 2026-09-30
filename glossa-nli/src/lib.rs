@@ -125,9 +125,8 @@ mod ort_engine {
         "feature `nli-ort` needs a linking strategy: enable `nli-ort-bundled` (self-contained CPU/DirectML/CoreML) or `nli-ort-dynamic` (CUDA/ROCm runtime dll)"
     );
 
-    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, Mutex};
 
     use ort::execution_providers::ExecutionProviderDispatch;
     use ort::session::{builder::GraphOptimizationLevel, Session};
@@ -160,13 +159,13 @@ mod ort_engine {
         Option<usize>,
         Option<usize>,
     );
-    type ModelCache = OnceLock<Mutex<HashMap<ModelCacheKey, Arc<Inner>>>>;
+    type ModelCache = harness::LoadOnce<ModelCacheKey, Inner>;
 
     /// Process-global load-once cache, keyed by [`ModelCacheKey`]. A different EP set, GPU device,
     /// GPU memory limit, batch budget or thread count is a different ONNX session (spec §2.1a), so
     /// every one of them is part of the key — otherwise two callers configured differently would
     /// silently share whichever session loaded first.
-    static MODEL_CACHE: ModelCache = OnceLock::new();
+    static MODEL_CACHE: ModelCache = ModelCache::new();
 
     /// An in-process NLI scorer over an ONNX 3-way NLI model. Constructed from a local `model_dir`
     /// (`model.onnx` + `tokenizer.json`) and the entailment class index (from the model's
@@ -255,41 +254,27 @@ mod ort_engine {
                 batch_tokens,
                 intra_threads,
             );
-            let cache = MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-
-            if let Some(inner) = cache
-                .lock()
-                .map_err(|_| anyhow::anyhow!("nli model cache mutex poisoned"))?
-                .get(&cache_key)
-            {
-                return Ok(Self {
-                    inner: Arc::clone(inner),
+            let inner = MODEL_CACHE.get_or_try_init(cache_key, "nli model", || {
+                let built = Arc::new(Self::build_inner(
+                    model_dir,
+                    providers,
+                    device_id,
+                    mem_limit_mb,
+                    batch_tokens,
+                    intra_threads,
+                )?);
+                // Inside the build closure, so validation happens BEFORE the entry is visible.
+                // Publishing first and validating after leaves a session that cannot run its own
+                // budget in the map: this `load` returns Err and the caller fails open, but the
+                // NEXT one is a cache hit — it skips validation, returns Ok, and OOMs on real
+                // work. `resolve_scorer` runs per call, so "the next one" is the next query.
+                Self {
+                    inner: Arc::clone(&built),
                     entail_index,
-                });
-            }
-
-            let built = Arc::new(Self::build_inner(
-                model_dir,
-                providers,
-                device_id,
-                mem_limit_mb,
-                batch_tokens,
-                intra_threads,
-            )?);
-            // Validate BEFORE publishing to the cache. Publishing first and validating after
-            // leaves a session that cannot run its own budget sitting in the map: this `load`
-            // returns Err and the caller fails open, but the NEXT one is a cache hit — it skips
-            // validation, returns Ok, and OOMs on real work. `resolve_scorer` runs per call, so
-            // "the next one" is the next query.
-            Self {
-                inner: Arc::clone(&built),
-                entail_index,
-            }
-            .validate_budget(batch_tokens)?;
-            let mut guard = cache
-                .lock()
-                .map_err(|_| anyhow::anyhow!("nli model cache mutex poisoned"))?;
-            let inner = Arc::clone(guard.entry(cache_key).or_insert(built));
+                }
+                .validate_budget(batch_tokens)?;
+                Ok(built)
+            })?;
             Ok(Self {
                 inner,
                 entail_index,
@@ -513,10 +498,10 @@ mod ort_engine {
         batch_budget_tokens: usize,
     }
 
-    type RerankCache = OnceLock<Mutex<HashMap<ModelCacheKey, Arc<RerankInner>>>>;
+    type RerankCache = harness::LoadOnce<ModelCacheKey, RerankInner>;
 
     /// Process-global load-once cache for rerankers, keyed exactly like `MODEL_CACHE`.
-    static RERANK_CACHE: RerankCache = OnceLock::new();
+    static RERANK_CACHE: RerankCache = RerankCache::new();
 
     /// An in-process relevance scorer over an ONNX cross-encoder (e.g. bge-reranker-v2-m3). Unlike
     /// [`InProcessNli`] it tokenizes (query, passage) PAIRS and reads ONE relevance logit per pair
@@ -551,37 +536,24 @@ mod ort_engine {
                 batch_tokens,
                 intra_threads,
             );
-            let cache = RERANK_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-
-            if let Some(inner) = cache
-                .lock()
-                .map_err(|_| anyhow::anyhow!("rerank model cache mutex poisoned"))?
-                .get(&cache_key)
-            {
-                return Ok(Self {
-                    inner: Arc::clone(inner),
-                });
-            }
-
-            let built = Arc::new(Self::build_inner(
-                model_dir,
-                providers,
-                device_id,
-                mem_limit_mb,
-                batch_tokens,
-                intra_threads,
-            )?);
-            // Validate BEFORE publishing to the cache — see `InProcessNli::load`. A session left
-            // in the map after its own budget failed is one the next caller picks up as a cache
-            // hit, skips validation on, and takes into production.
-            Self {
-                inner: Arc::clone(&built),
-            }
-            .validate_budget(batch_tokens)?;
-            let mut guard = cache
-                .lock()
-                .map_err(|_| anyhow::anyhow!("rerank model cache mutex poisoned"))?;
-            let inner = Arc::clone(guard.entry(cache_key).or_insert(built));
+            let inner = RERANK_CACHE.get_or_try_init(cache_key, "rerank model", || {
+                let built = Arc::new(Self::build_inner(
+                    model_dir,
+                    providers,
+                    device_id,
+                    mem_limit_mb,
+                    batch_tokens,
+                    intra_threads,
+                )?);
+                // Inside the build closure, so this happens BEFORE the entry becomes visible: a
+                // session left in the map after its own budget failed is one the next caller picks
+                // up as a cache hit, skips validation on, and takes into production.
+                Self {
+                    inner: Arc::clone(&built),
+                }
+                .validate_budget(batch_tokens)?;
+                Ok(built)
+            })?;
             Ok(Self { inner })
         }
 

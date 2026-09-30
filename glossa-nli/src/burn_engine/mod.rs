@@ -9,9 +9,8 @@ mod reranker_model;
 
 pub use reranker::InProcessBurnReranker;
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use burn::prelude::*;
@@ -59,8 +58,8 @@ pub struct InProcessBurnNli {
 }
 
 /// Keyed by canonicalized model dir alone; the burn backend selects its own device.
-type BurnNliCache = OnceLock<Mutex<HashMap<PathBuf, Arc<BurnNliInner>>>>;
-static BURN_NLI_CACHE: BurnNliCache = OnceLock::new();
+type BurnNliCache = harness::LoadOnce<PathBuf, BurnNliInner>;
+static BURN_NLI_CACHE: BurnNliCache = BurnNliCache::new();
 
 /// Resolve the burn weights file inside `model_dir`: `model.safetensors` if present, else the lone
 /// `*.safetensors`, else `Err`. Weights are the RuBERT NLI parameters in PyTorch orientation
@@ -110,23 +109,9 @@ impl InProcessBurnNli {
         let key = model_dir
             .canonicalize()
             .unwrap_or_else(|_| model_dir.to_path_buf());
-        let cache = BURN_NLI_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-        if let Some(inner) = cache
-            .lock()
-            .map_err(|_| anyhow!("burn nli cache mutex poisoned"))?
-            .get(&key)
-        {
-            return Ok(Self {
-                inner: Arc::clone(inner),
-                entail_index,
-            });
-        }
-        let built = Arc::new(Self::build_inner(model_dir)?);
-        let mut guard = cache
-            .lock()
-            .map_err(|_| anyhow!("burn nli cache mutex poisoned"))?;
-        // `or_insert`, not `insert`: a thread that lost the race adopts the winner's instance.
-        let inner = Arc::clone(guard.entry(key).or_insert(built));
+        let inner = BURN_NLI_CACHE.get_or_try_init(key, "burn nli", || {
+            Ok(Arc::new(Self::build_inner(model_dir)?))
+        })?;
         Ok(Self {
             inner,
             entail_index,
