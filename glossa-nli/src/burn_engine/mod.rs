@@ -191,6 +191,32 @@ impl InProcessBurnNli {
     }
 }
 
+impl RawForward for InProcessBurnNli {
+    fn forward_logits(
+        &self,
+        input_ids: &[i64],
+        attention_mask: &[i64],
+        token_type_ids: &[i64],
+        n: usize,
+        seq: usize,
+    ) -> Result<Vec<f32>> {
+        let mk = |v: &[i64]| {
+            Tensor::<BurnBackend, 2, Int>::from_data(
+                TensorData::new(v.to_vec(), [n, seq]),
+                &self.inner.device,
+            )
+        };
+        let logits =
+            self.inner
+                .model
+                .forward(mk(input_ids), mk(attention_mask), mk(token_type_ids));
+        logits
+            .into_data()
+            .to_vec::<f32>()
+            .map_err(|e| anyhow!("burn logits to_vec: {e:?}"))
+    }
+}
+
 #[cfg(test)]
 mod cache_tests {
     use super::*;
@@ -228,31 +254,5 @@ mod cache_tests {
         assert!(Arc::ptr_eq(&a.inner, &b.inner), "the model is shared");
         assert_eq!(a.entail_index, 0);
         assert_eq!(b.entail_index, 2, "the index belongs to the handle");
-    }
-}
-
-impl RawForward for InProcessBurnNli {
-    fn forward_logits(
-        &self,
-        input_ids: &[i64],
-        attention_mask: &[i64],
-        token_type_ids: &[i64],
-        n: usize,
-        seq: usize,
-    ) -> Result<Vec<f32>> {
-        let mk = |v: &[i64]| {
-            Tensor::<BurnBackend, 2, Int>::from_data(
-                TensorData::new(v.to_vec(), [n, seq]),
-                &self.inner.device,
-            )
-        };
-        let logits =
-            self.inner
-                .model
-                .forward(mk(input_ids), mk(attention_mask), mk(token_type_ids));
-        logits
-            .into_data()
-            .to_vec::<f32>()
-            .map_err(|e| anyhow!("burn logits to_vec: {e:?}"))
     }
 }
