@@ -15,6 +15,46 @@ Run `kb mcp` in the background so agents connect over HTTP without spawning a ne
 
 Default profile in the install scripts is **`reader`** (query-only tools). Use **`editor`** if the service should expose graph write tools.
 
+## Native install (recommended) — `kb mcp service`
+
+`kb` installs and manages itself as an OS service, cross-platform, with no external `sc.exe` / unit
+files: **Windows** via the Service Control Manager programmatically, **Linux** via a generated
+`systemd` unit (`Type=notify`). Run **elevated** (Administrator / `sudo`) — a non-elevated run prints
+a clear "run elevated" message.
+
+```bash
+# Register (auto-starts on boot); transport is ALWAYS streamable-http (no --transport flag by design).
+kb mcp service install --service-name glossa-editor <corpus> \
+    --profile editor --bind 127.0.0.1:8081 \
+    --allowed-host kb.example.com --allowed-host 127.0.0.1 \
+    --vision            # enable image output in `read`; add --dedup for the anti-loop guard
+
+kb mcp service start   glossa-editor
+kb mcp service status  glossa-editor      # → Running
+kb mcp service stop    glossa-editor
+kb mcp service uninstall glossa-editor
+```
+
+- **Multiple corpora from one binary:** repeat `install` with distinct `--service-name` + `--bind`.
+- **Config parity with `kb mcp`:** the global `--config <role.toml>`, `--root label=path` (repeatable,
+  in place of the positional `<corpus>`), and `--state-dir <dir>` all work here and are baked into the
+  service command — a service is configured exactly like a direct `kb mcp` invocation.
+- **stdio is unrepresentable by design:** there is no `--transport` flag (a service has no client/stdin
+  under the SCM/systemd), so a service is always streamable-http.
+
+### Inference server (`kbi service`)
+
+The GPU inference server ships as `kbi` (in the GPU-execution-provider release artifacts). It installs
+the same way, but as a **top-level** subcommand (kbi is single-purpose), and the serve flags are passed
+after `--`:
+
+```bash
+kbi service install --service-name glossa-scorer -- \
+    --rerank-repo metalmon80/bge-reranker-v2-m3-en-ru-onnx --device cuda --bind 127.0.0.1:8071
+kbi service start  glossa-scorer
+kbi service status glossa-scorer
+```
+
 ## Platform scripts (release binary)
 
 All scripts download a pinned version from GitHub Releases — **no `cargo build`**.

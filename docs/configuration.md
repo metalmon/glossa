@@ -171,6 +171,14 @@ enabled here and has a calibrated threshold.
 | `gpu_id` | integer · default unset | GPU device id the CUDA/DirectML/ROCm provider binds to; unset ⇒ the provider's default device. |
 | `gpu_mem_mb` | integer · default unset | GPU arena memory cap (MB) for the provider, so NLI can share a GPU with an LLM. Effective on CUDA; ROCm honors only arena growth; DirectML/CoreML expose no memory option. |
 
+> **Migrating from the old keys (≥ 0.5.2):** the pre-0.5.2 keys `execution_providers` (a list),
+> `ep_device`, and `ep_mem_limit_mb` were renamed to `device` (a single value), `gpu_id`, and
+> `gpu_mem_mb`. There is **no back-compat** — an old key is silently ignored and the engine falls
+> back to CPU (`kbx nli check` shows `ep_active = cpu (no GPU EP configured)`). Rename them in each
+> corpus's `.glossa/ontology.toml`: `execution_providers = ["cuda", "cpu"]` → `device = "cuda"`
+> (the CPU fallback is automatic), `ep_device = N` → `gpu_id = N`, `ep_mem_limit_mb = N` →
+> `gpu_mem_mb = N`. The same rename applies to `[rerank]`.
+
 ## Eval-harness config (`lab.toml`)
 
 The `kbx` eval/train toolkit reads its own `lab.toml`. Two knobs worth calling out here:

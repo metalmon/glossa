@@ -1,10 +1,18 @@
 # Changelog
 
-All notable changes to glossa are documented here. Release tags ship the **`kb`** binary only; `kb-eval` / `kb-train` are built from source.
+All notable changes to glossa are documented here. Release tags ship **`kb`**, **`kbx`**, and — in the GPU-execution-provider artifacts (cuda13 / DirectML / CoreML) — **`kbi`** (the inference server); `kb-train` and other utilities are built from source.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+### Changed
+
+- **BREAKING — CLI restructure.** The inference-server binary is renamed **`inference-server` → `kbi`**, and it now serves by default (bare `kbi <flags>`; the `serve` subcommand is gone), with `kbi service …` for install/management. The `kb` service command moves **`kb service` → `kb mcp service`** (the service is specifically the MCP service). Migration for an already-installed inference-server service: uninstall it, redeploy `~/bin` (`kbi` replaces `inference-server`), and reinstall via `kbi service install`.
+
+### Added
+
+- **`kb mcp service` config parity.** `kb mcp service install` accepts the same global `--config` / `--root` / `--state-dir` as a direct `kb mcp`, plus `--vision` / `--dedup`, and bakes them into the service command — so a service is configured exactly like a foreground run.
 
 ## [0.5.2] — 2026-09-30
 
