@@ -216,9 +216,10 @@ pub struct FcrArgs {
     /// Override the workspace's default `dataset.toml`.
     #[arg(long)]
     pub dataset: Option<PathBuf>,
-    /// Retrieve this many hits per question before checking gold coverage. Unset ⇒ the depth
-    /// production serves at (the agent `search` tool's default limit), so the default run answers
-    /// "what can production surface" rather than a depth nothing uses.
+    /// Retrieve this many hits per question before checking gold coverage. Unset ⇒ the depth this
+    /// corpus actually serves at (`[retrieval].search_limit`, else the agent `search` tool's
+    /// default), so the default run answers "what can production surface" rather than a depth
+    /// nothing uses.
     #[arg(long)]
     pub k: Option<usize>,
     /// Only score cases whose `tags` include this value.
@@ -241,17 +242,22 @@ pub struct FcrArgs {
 ///   set. Same set, different order, identical numbers — and a GPU run that costs 7x the time.
 pub fn resolve_k(
     requested: Option<usize>,
+    configured_limit: Option<usize>,
     pool_size: usize,
     rerank_enabled: bool,
 ) -> (usize, Vec<String>) {
-    let k = requested.unwrap_or(glossa::retrieve::config::DEFAULT_SEARCH_LIMIT);
-    let mut notes = Vec::new();
-    notes.push(match requested {
-        Some(_) => format!("depth: k = {k} (--k)"),
-        None => format!(
-            "depth: k = {k} (the agent `search` tool's default limit; pass --k to override)"
-        ),
-    });
+    let k = requested
+        .or(configured_limit)
+        .unwrap_or(glossa::retrieve::config::DEFAULT_SEARCH_LIMIT);
+    let mut notes = vec![match (requested, configured_limit) {
+        (Some(_), _) => format!("depth: k = {k} (--k)"),
+        (None, Some(_)) => format!("depth: k = {k} (the corpus's [retrieval].search_limit)"),
+        (None, None) => {
+            format!(
+                "depth: k = {k} (the agent `search` tool's default limit; pass --k to override)"
+            )
+        }
+    }];
     if rerank_enabled {
         notes.push(format!("rerank: [rerank] is on, pool_size = {pool_size}"));
         if k >= pool_size {
@@ -307,7 +313,13 @@ pub fn run_fcr(args: FcrArgs) -> anyhow::Result<()> {
     // The retrieval depth is resolved from the SAME config the serving path reads, so a default run
     // measures the corpus as it is actually served rather than at a depth chosen by this harness.
     let rerank_cfg = glossa::retrieve::config::RerankConfig::resolve(&glossa_dir);
-    let (k, k_notes) = resolve_k(args.k, rerank_cfg.pool_size, rerank_cfg.enabled);
+    let configured_limit = glossa::retrieve::config::resolve_search_limit(&glossa_dir);
+    let (k, k_notes) = resolve_k(
+        args.k,
+        configured_limit,
+        rerank_cfg.pool_size,
+        rerank_cfg.enabled,
+    );
     // What the search arm actually did, for the header line. Every question takes the same path, so
     // the last observation describes the run.
     let mut rerank_seen = (false, 0usize);
@@ -574,7 +586,7 @@ mod tests {
 
     #[test]
     fn k_defaults_to_the_production_search_depth() {
-        let (k, notes) = resolve_k(None, 50, false);
+        let (k, notes) = resolve_k(None, None, 50, false);
         assert_eq!(k, glossa::retrieve::config::DEFAULT_SEARCH_LIMIT);
         assert!(
             notes[0].contains(&k.to_string()) && notes[0].contains("default limit"),
@@ -582,9 +594,18 @@ mod tests {
         );
     }
 
+    /// The point of the knob: a corpus that serves 80 hits is measured at 80 without anyone
+    /// remembering to pass `--k 80`.
+    #[test]
+    fn k_follows_the_corpus_search_limit_when_one_is_set() {
+        let (k, notes) = resolve_k(None, Some(80), 50, false);
+        assert_eq!(k, 80);
+        assert!(notes[0].contains("search_limit"), "{notes:?}");
+    }
+
     #[test]
     fn explicit_k_wins_over_the_production_depth() {
-        let (k, notes) = resolve_k(Some(7), 50, false);
+        let (k, notes) = resolve_k(Some(7), Some(80), 50, false);
         assert_eq!(k, 7);
         assert!(notes[0].contains("--k"), "{notes:?}");
     }
@@ -594,14 +615,14 @@ mod tests {
     /// configuration pays for the GPU and learns nothing about reranking; the report says so.
     #[test]
     fn warns_that_fcr_cannot_see_reranking_at_or_above_pool_size() {
-        let (_, at_pool) = resolve_k(Some(50), 50, true);
+        let (_, at_pool) = resolve_k(Some(50), None, 50, true);
         assert!(at_pool.iter().any(|n| n.contains("REORDER")), "{at_pool:?}");
-        let (_, below) = resolve_k(Some(10), 50, true);
+        let (_, below) = resolve_k(Some(10), None, 50, true);
         assert!(
             !below.iter().any(|n| n.contains("REORDER")),
             "below pool_size reranking IS visible: {below:?}"
         );
-        let (_, no_rerank) = resolve_k(Some(50), 50, false);
+        let (_, no_rerank) = resolve_k(Some(50), None, 50, false);
         assert!(
             no_rerank.iter().all(|n| !n.contains("rerank")),
             "nothing to warn about with no reranker: {no_rerank:?}"

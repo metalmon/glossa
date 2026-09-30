@@ -9,11 +9,26 @@ use crate::graph::ontology::Ontology;
 // out of the box rerank reorders the same 50 hits rather than pooling deeper.
 pub const DEFAULT_POOL_SIZE: usize = 50;
 
-/// How many hits the AGENT's `search` tool returns when the call names no `limit` — the depth a
-/// reader actually sees in production. Named rather than repeated so a harness measuring "what can
-/// production surface" reads that depth instead of picking its own. (`kb search -l` defaults
-/// higher: it prints to a human, who scrolls.)
+/// How many hits the AGENT's `search` tool returns when the call names no `limit` and the corpus
+/// configures none — the depth a reader actually sees in production. Named rather than repeated so
+/// a harness measuring "what can production surface" reads that depth instead of picking its own.
+/// (`kb search -l` defaults higher: it prints to a human, who scrolls.)
 pub const DEFAULT_SEARCH_LIMIT: usize = 50;
+
+/// Per-corpus `[retrieval].search_limit` (env `GLOSSA_SEARCH_LIMIT`), or `None` when the corpus
+/// sets none. Returned as an `Option` on purpose: each entry point keeps its OWN fallback — the
+/// agent tool's is [`DEFAULT_SEARCH_LIMIT`], the human CLI's is deliberately larger — so adding
+/// this knob changes nothing for a corpus that does not set it.
+pub fn resolve_search_limit(glossa_dir: &Path) -> Option<usize> {
+    env_usize("GLOSSA_SEARCH_LIMIT")
+        .or_else(|| {
+            glossa_dir
+                .parent()
+                .map(Ontology::load_or_default)
+                .and_then(|o| o.search_limit())
+        })
+        .filter(|n| *n > 0)
+}
 
 pub struct RerankConfig {
     pub enabled: bool,

@@ -146,6 +146,7 @@ built-in engine default. The matching env vars (where listed) override the file 
 | `sim_weight` | float ≥ 0 · default `0.1` | PPR transition weight of a mechanical `SIMILAR` edge relative to a reasoning edge (`1.0`). Lower = leaner similarity mass (suits a stronger reader); higher = heavier (suits a weaker reader). Env `GLOSSA_PPR_SIM_WEIGHT`. |
 | `spine_weight` | float ≥ 0 · default `1.0` | PPR transition weight of a reasoning-spine (`Chaining`-role) edge relative to a plain reasoning edge (`1.0`, a no-op). `> 1.0` boosts the spine so a load-bearing bridge edge isn't diluted by out-degree against grounding/descriptive edges. Env `GLOSSA_PPR_SPINE_WEIGHT`. |
 | `bridge` | `"off"` \| `"geomean"` · default `"off"` | Dual-seed combination mode for composed PPR (query-time seeding only). Env `GLOSSA_PPR_BRIDGE`. |
+| `search_limit` | integer > 0 · default unset | How many hits a `search` that names no `limit` returns — the depth the **reader** sees. Unset ⇒ 50 for the agent `search` tool, 100 for `kb search` (which prints to a human). `[rerank].pool_size` is a different knob: how deep the cross-encoder pools *behind* this, so pooling 200 to hand the reader 20 is a normal configuration. `kbx eval fcr` measures at this depth unless `--k` overrides it. Env `GLOSSA_SEARCH_LIMIT`. |
 
 ### `[verify]` — answer-grounding gate
 
@@ -208,10 +209,11 @@ TEI `/predict` or `kbi` protocol; only the reranker is multi-backend.)
 
 #### `device = "directml"` and reshape-heavy exports
 
-DirectML's `Reshape` kernel rejects a target shape that is computed at run time and still carries
-the `-1` placeholder. Cross-encoders exported by recent PyTorch build every attention reshape that
-way — `Concat(Shape(ids, start=0, end=1), Shape(mask, start=1, end=2), [-1], [64])` — so such a
-model loads, reports `ep_active = directml (initialized)`, and then fails on the first forward with
+DirectML's `Reshape` kernel rejects some target shapes that are computed at run time and still
+carry the `-1` placeholder — in particular the attention head-split, where the `-1` sits on an
+interior dimension. Cross-encoders exported by recent PyTorch build that reshape exactly that way,
+`Concat(Shape(ids, start=0, end=1), Shape(mask, start=1, end=2), [-1], [64])`, so such a model
+loads, reports `ep_active = directml (initialized)`, and then fails on the first forward with
 
 ```
 Non-zero status code returned while running Reshape node ... DmlExecutionProvider ... 80070057
@@ -219,9 +221,16 @@ Non-zero status code returned while running Reshape node ... DmlExecutionProvide
 
 No session setting avoids it (every graph-optimization level and either memory-pattern mode fail
 identically); the CUDA and CPU providers run the same file without complaint. The fix is in the
-model: substitute each `-1` with the dimension it stands for — always a fixed feature dimension, so
-the scores are unchanged — and re-save. `kbx rerank check --device directml` is the one-command
-test, and it exits non-zero on the failure rather than reporting a ready engine.
+model: in the shape `Concat` feeding each attention reshape, substitute the `-1` with the dimension
+it stands for — a fixed feature dimension, so the scores do not change — and re-save. Give each
+substitution its own initializer: the `[-1]` tensor is shared across the graph and is also used as
+a `Slice` bound, which editing in place would corrupt. `kbx rerank check --device directml` is the
+one-command test, and it exits non-zero on the failure rather than reporting a ready engine.
+
+Repairing the export makes DirectML *work*; it does not make it fast. On the same card a
+cross-encoder pool drives DirectML to roughly a quarter of the device utilization CUDA reaches, so
+where a CUDA build is available it stays the reranking path — DirectML is the fallback for hardware
+that has no CUDA at all.
 
 ## Eval-harness config (`lab.toml`)
 

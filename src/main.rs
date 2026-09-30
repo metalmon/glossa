@@ -216,9 +216,9 @@ enum Cmd {
         /// ANDed with --glob when both are set.
         #[arg(long)]
         scope: Option<String>,
-        /// Max number of hits.
-        #[arg(short = 'l', long, default_value_t = 100)]
-        limit: usize,
+        /// Max number of hits [default: the corpus's `[retrieval].search_limit`, else 100].
+        #[arg(short = 'l', long)]
+        limit: Option<usize>,
         /// Raw ripgrep regex over file text instead of the BM25 index (slower, not stemmed; matches
         /// are line-based, so they carry no `path#N` chunk ref).
         #[arg(short = 's', long)]
@@ -1623,6 +1623,13 @@ fn main() -> anyhow::Result<()> {
             format,
         } => {
             let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
+            let glossa_dir = rr.state_base.join(".glossa");
+            // `-l` wins; then the corpus's `[retrieval].search_limit`; then this command's own
+            // default, which stays larger than the agent tool's — this output goes to a human who
+            // scrolls, not into a context window.
+            let limit = limit.unwrap_or_else(|| {
+                glossa::retrieve::config::resolve_search_limit(&glossa_dir).unwrap_or(100)
+            });
             let pretty = match format {
                 OutputFormat::Pretty => true,
                 OutputFormat::Rg => false,
@@ -1638,7 +1645,6 @@ fn main() -> anyhow::Result<()> {
                     glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
                 // Route through the shared rerank stage so `kb search` order matches the MCP `search`
                 // tool. With no `[rerank]` config this is plain BM25 (identity) — output unchanged.
-                let glossa_dir = rr.state_base.join(".glossa");
                 let (hits, _info) = glossa::retrieve::rerank::retrieve(
                     &idx,
                     &glossa_dir,

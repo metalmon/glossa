@@ -81,6 +81,12 @@ struct RawRetrieval {
     /// See `graph::ppr::bridge_mode`.
     #[serde(default)]
     bridge: Option<String>,
+    /// How many hits a `search` that names no `limit` returns. Unset → the engine default
+    /// (`retrieve::config::DEFAULT_SEARCH_LIMIT`). This is the depth the READER sees; `[rerank]
+    /// .pool_size` is how deep the cross-encoder pools behind it, and the two are independent —
+    /// pooling 200 to hand the reader 20 is a normal configuration.
+    #[serde(default)]
+    search_limit: Option<usize>,
 }
 
 /// The `[verify]` overlay: per-corpus answer-grounding-gate tuning (see `crate::gate`). All keys
@@ -452,6 +458,9 @@ pub struct Ontology {
     /// Per-corpus dual-seed PPR mode from `[retrieval].bridge`. `None` when unset → engine default
     /// Off. See [`Ontology::ppr_bridge_mode`].
     ppr_bridge: Option<String>,
+    /// Per-corpus `[retrieval].search_limit`: default hit count for a `search` that names none.
+    /// `None` when unset → the engine default. See [`Ontology::search_limit`].
+    search_limit: Option<usize>,
     /// Per-corpus answer-grounding-gate overlay from `[verify]`. `None` per field when unset →
     /// `gate::config::VerifyConfig` applies its engine default. See the `verify_*` getters.
     verify_enabled: Option<bool>,
@@ -651,6 +660,9 @@ impl Ontology {
                 .spine_weight
                 .filter(|w| w.is_finite() && *w >= 0.0),
             ppr_bridge: raw.retrieval.bridge,
+            // A limit of 0 would silence search entirely; treat it as unset rather than as a
+            // configuration that returns nothing.
+            search_limit: raw.retrieval.search_limit.filter(|n| *n > 0),
             verify_enabled: raw.verify.enabled,
             verify_rare_df_frac: raw.verify.rare_df_frac,
             verify_min_answer_tokens: raw.verify.min_answer_tokens,
@@ -1052,6 +1064,12 @@ impl Ontology {
     /// Per-corpus `[verify.nli].api_key` Bearer key for the remote scorer, or `None`.
     pub fn verify_nli_api_key(&self) -> Option<&str> {
         self.verify_nli_api_key.as_deref()
+    }
+
+    /// Per-corpus `[retrieval].search_limit`: how many hits a `search` with no explicit `limit`
+    /// returns. `None` when unset or zero (engine default applies).
+    pub fn search_limit(&self) -> Option<usize> {
+        self.search_limit
     }
 
     /// Per-corpus `[rerank].enabled`, or `None` when unset.
