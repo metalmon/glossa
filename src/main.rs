@@ -191,13 +191,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Install/manage `kb` as an OS service (Windows SCM / Linux systemd), always streamable-http.
-    /// `install --service-name <n> <corpus> --bind <addr> [--profile …] [--allowed-host …]…
-    /// [--vision] [--dedup]`; `uninstall|start|stop|status <name>`.
-    Service {
-        #[command(subcommand)]
-        action: glossa::service_cli::ServiceAction,
-    },
     /// Search the knowledge base (BM25-ranked keywords over the index).
     Search {
         /// Search keywords (BM25-ranked, stemmed). With `--scan`, a raw ripgrep regex over file text.
@@ -486,6 +479,14 @@ enum McpAction {
         /// Directory containing tensorzero.toml and tools/.
         #[arg(short = 'd', long, default_value = "eval/tensorzero/config")]
         config_dir: PathBuf,
+    },
+    /// Install/manage this corpus as an OS MCP service (Windows SCM / Linux systemd), always
+    /// streamable-http. `service install --service-name <n> [<corpus> | --root …] --bind <addr>
+    /// [--profile …] [--allowed-host …]… [--vision] [--dedup] [--config …] [--state-dir …]`;
+    /// `service uninstall|start|stop|status <name>`.
+    Service {
+        #[command(subcommand)]
+        action: glossa::service_cli::ServiceAction,
     },
 }
 
@@ -2094,6 +2095,7 @@ fn main() -> anyhow::Result<()> {
                 );
                 Ok(())
             }
+            Some(McpAction::Service { action }) => glossa::service_cli::run(action),
             None => {
                 let c = &deploy_cfg;
                 // Corpus (Spec A): fall through to the file's roots/state_dir ONLY when neither
@@ -2193,7 +2195,6 @@ fn main() -> anyhow::Result<()> {
                 Ok(())
             }
         },
-        Cmd::Service { action } => glossa::service_cli::run(action),
         Cmd::Graph { action } => match action {
             GraphAction::Stats { path } => {
                 let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
@@ -2921,6 +2922,30 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod cli_root_wiring_tests {
     use super::*;
+
+    #[test]
+    fn kb_mcp_service_parses_and_mcp_corpus_still_serves() {
+        // Change 2: `kb mcp service <action>` nests under mcp (via the existing McpAction enum).
+        let cli = Cli::try_parse_from(["kb", "mcp", "service", "status", "svc-x"]).unwrap();
+        match cli.cmd {
+            Cmd::Mcp {
+                action: Some(McpAction::Service { action }),
+                ..
+            } => assert!(matches!(
+                action,
+                glossa::service_cli::ServiceAction::Status(_)
+            )),
+            _ => panic!("expected Mcp -> Service(Status)"),
+        }
+        // Non-breaking: `kb mcp <corpus>` still parses as serve (no subcommand).
+        let cli = Cli::try_parse_from(["kb", "mcp", "somecorpus"]).unwrap();
+        match cli.cmd {
+            Cmd::Mcp {
+                action: None, path, ..
+            } => assert_eq!(path.as_deref(), Some(std::path::Path::new("somecorpus"))),
+            _ => panic!("expected Mcp serve (action=None)"),
+        }
+    }
 
     #[test]
     fn glossa_roots_env_and_flag_merge_flag_wins() {
