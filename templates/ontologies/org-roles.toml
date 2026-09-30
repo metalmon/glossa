@@ -101,6 +101,16 @@ mentions = "MENTIONS"
 # GPU arena memory cap (MB), so this can share a card with an LLM. Effective on
 # CUDA; ROCm honours only arena growth; DirectML/CoreML expose no memory option.
 # gpu_mem_mb = 1024
+# Per-batch token budget for this engine (in_process only). A batch fills while
+# rows x longest_row <= batch_tokens. Unset = engine default. Validated at load:
+# a size the device cannot take fails there, naming the number. NOTE it ADDS UP
+# with the other engine's -- an ORT arena never gives a batch's peak back.
+# Env GLOSSA_VERIFY_NLI_BATCH_TOKENS.
+# batch_tokens = 4096
+# ONNX Runtime intra-op threads for this engine's session (in_process only).
+# Unset = 1. Two engines' counts oversubscribe the same cores additively.
+# Env GLOSSA_VERIFY_NLI_INTRA_THREADS.
+# intra_threads = 1
 # scorer = "http" only:
 # endpoint = "http://127.0.0.1:8071"
 # timeout_ms = 5000
@@ -134,6 +144,16 @@ mentions = "MENTIONS"
 # model_dir = "/path/to/reranker-model-dir"
 # Candidates fetched and reranked before trimming to the caller's limit.
 # pool_size = 50
+# Per-batch token budget for this engine (in_process only). A batch fills while
+# rows x longest_row <= batch_tokens. Unset = engine default. Validated at load:
+# a size the device cannot take fails there, naming the number. NOTE it ADDS UP
+# with the other engine's -- an ORT arena never gives a batch's peak back.
+# Env GLOSSA_RERANK_BATCH_TOKENS.
+# batch_tokens = 4096
+# ONNX Runtime intra-op threads for this engine's session (in_process only).
+# Unset = 1. Two engines' counts oversubscribe the same cores additively.
+# Env GLOSSA_RERANK_INTRA_THREADS.
+# intra_threads = 1
 # device = "cpu"
 # gpu_id = 0
 # gpu_mem_mb = 2048

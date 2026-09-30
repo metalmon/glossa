@@ -171,6 +171,8 @@ enabled here and has a calibrated threshold.
 | `device` | `"cpu"` \| `"cuda"` \| `"directml"` \| `"coreml"` \| `"rocm"` · default `"cpu"` | Compute device for the `nli-ort` engine (`in_process` only). A single value with automatic CPU fallback (e.g. `"cuda"` runs on GPU, falling back to CPU if it can't initialize). Unknown names fall through to ORT's implicit CPU EP. A GPU device works only in a build that compiled that provider in. |
 | `gpu_id` | integer · default unset | GPU device id the CUDA/DirectML/ROCm provider binds to; unset ⇒ the provider's default device. |
 | `gpu_mem_mb` | integer · default unset | GPU arena memory cap (MB) for the provider, so NLI can share a GPU with an LLM. Effective on CUDA; ROCm honors only arena growth; DirectML/CoreML expose no memory option. |
+| `batch_tokens` | integer > 0 · default unset | Per-batch token budget for this engine's session (`in_process` only); see the note under `[rerank]` — it ADDS UP with the reranker's. Validated at load. Env `GLOSSA_VERIFY_NLI_BATCH_TOKENS`. |
+| `intra_threads` | integer > 0 · default unset | ONNX Runtime intra-op threads for this engine's session (`in_process` only). Unset ⇒ the engine default of 1. Env `GLOSSA_VERIFY_NLI_INTRA_THREADS`. |
 | `endpoint` | URL · default unset | `scorer = "http"` only: base URL of the remote `kbi` server (e.g. `https://gpuhost:8071`). Env `GLOSSA_VERIFY_NLI_HTTP_ENDPOINT`. |
 | `timeout_ms` | integer · default `5000` | `http` per-call timeout in milliseconds. Env `GLOSSA_VERIFY_NLI_HTTP_TIMEOUT_MS`. |
 | `api_key` | string · default unset | `http` optional Bearer token for the remote server. Env `GLOSSA_VERIFY_NLI_HTTP_API_KEY`. |
@@ -195,9 +197,20 @@ Reorders the fetched candidate pool with a cross-encoder; off unless explicitly 
 | `model_dir` | path | Cross-encoder ONNX model dir (`in_process` only). |
 | `pool_size` | integer · default `50` | How many fetched candidates to rerank; set larger than the search limit to pool deeper. Env `GLOSSA_RERANK_POOL_SIZE`. |
 | `device` / `gpu_id` / `gpu_mem_mb` | as in `[verify.nli]` | Compute device + GPU knobs (`in_process`). Same single-value/auto-CPU-fallback semantics + the same migration from the old `execution_providers`/`ep_*` keys. |
+| `batch_tokens` | integer > 0 · default unset | Per-batch token budget (`in_process` only). A batch fills while `rows × longest_row ≤ batch_tokens`, so short passages batch more densely than full-length ones. Unset ⇒ the engine default. A configured budget is validated at load: a size the device cannot take fails there, naming the number, rather than on the first query. Env `GLOSSA_RERANK_BATCH_TOKENS`. |
+| `intra_threads` | integer > 0 · default unset | ONNX Runtime intra-op threads for this engine's session (`in_process` only). Unset ⇒ the engine default of 1. Env `GLOSSA_RERANK_INTRA_THREADS`. |
 | `endpoint` / `timeout_ms` / `api_key` | as in `[verify.nli]` | `scorer = "http"` remote endpoint, timeout, and optional Bearer key. Env `GLOSSA_RERANK_HTTP_ENDPOINT` / `_TIMEOUT_MS` / `_API_KEY`. |
 | `backend` | `"tei"` \| `"vllm"` \| `"llamacpp"` \| `"kbi"` \| `"jina"` \| `"cohere"` · default `"kbi"` | `scorer = "http"` only: which reranker server sits behind `endpoint`. You name the **server you run**; the client picks the wire shape for you — `tei` and our own `kbi` → TEI `{query, texts}` → bare `[{index, score}]`; `vllm` / `llamacpp` / `jina` / `cohere` → Jina/Cohere `{query, documents}` → `{results:[{index, relevance_score}]}`. `jina`/`cohere` are generic aliases for any other Jina-compatible server. A typo is rejected (fail-open to plain BM25), not silently mis-sent. Env `GLOSSA_RERANK_HTTP_BACKEND`. |
 | `model` | string · default unset | `scorer = "http"` Jina-family backends only: the served-model name. **vLLM requires it** (set it to the model you served, e.g. `BAAI/bge-reranker-v2-m3`); `llamacpp`/`kbi` ignore it and it is omitted from the request when unset. Env `GLOSSA_RERANK_HTTP_MODEL`. |
+
+**`batch_tokens` and `intra_threads` are half of a pair each.** The reranker and the NLI gate take
+them independently, and both add up on a shared machine: an ONNX Runtime arena never returns a
+batch's peak, so two configured budgets cost their **sum** in resident GPU memory and keep costing
+it for the life of the process, and two thread counts oversubscribe the same cores. Setting one is
+setting half of something. Both are also `in_process` only — for every `scorer = "http"` backend
+the batching and threading belong to that server, and a value set here says so on stderr rather
+than being silently ignored. `GLOSSA_NLI_BATCH_TOKENS` remains a blunt override that moves BOTH
+engines at once; the per-engine variables above are the sharp ones and win over it.
 
 The reranker `/rerank` endpoint is interoperable across servers: point `endpoint` at a
 [Text Embeddings Inference](https://github.com/huggingface/text-embeddings-inference) (`backend = "tei"`),

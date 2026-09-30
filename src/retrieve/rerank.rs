@@ -176,6 +176,25 @@ pub fn retrieve(
     )
 }
 
+/// Say when a compute knob was configured on a path that cannot honour it.
+///
+/// Batching and threading belong to the SERVER for every `scorer = "http"` backend, so a
+/// client-side `batch_tokens` / `intra_threads` does nothing there. Dropping it in silence is how
+/// the device keys on this path became a trap; this is one line on stderr instead.
+fn warn_if_compute_knobs_inert(cfg: &RerankConfig) {
+    if crate::retrieve::config::compute_knobs_inert(
+        cfg.scorer.as_deref(),
+        cfg.batch_tokens,
+        cfg.intra_threads,
+    ) {
+        eprintln!(
+            "[rerank] batch_tokens / intra_threads are in_process settings and do nothing with \
+             scorer = \"http\" (backend {}); tune that server instead",
+            cfg.backend
+        );
+    }
+}
+
 /// Build the in-process reranker from `[rerank]`, or `None` (=> plain BM25, fail-open). Any load
 /// error (bad path, corrupt export, missing runtime) logs and downgrades to `None`.
 #[cfg(all(
@@ -185,6 +204,7 @@ pub fn retrieve(
 pub fn resolve_reranker(cfg: &RerankConfig) -> Option<Box<dyn Reranker>> {
     #[cfg(feature = "http-scorer")]
     if cfg.enabled && cfg.scorer.as_deref() == Some("http") {
+        warn_if_compute_knobs_inert(cfg);
         let endpoint = cfg.endpoint.clone()?;
         match crate::http_scorer::client::new_ureq_reranker(
             endpoint,
@@ -228,6 +248,7 @@ pub fn resolve_reranker(cfg: &RerankConfig) -> Option<Box<dyn Reranker>> {
 pub fn resolve_reranker(cfg: &RerankConfig) -> Option<Box<dyn Reranker>> {
     #[cfg(feature = "http-scorer")]
     if cfg.enabled && cfg.scorer.as_deref() == Some("http") {
+        warn_if_compute_knobs_inert(cfg);
         let endpoint = cfg.endpoint.clone()?;
         match crate::http_scorer::client::new_ureq_reranker(
             endpoint,
@@ -261,6 +282,7 @@ pub fn resolve_reranker(cfg: &RerankConfig) -> Option<Box<dyn Reranker>> {
 pub fn resolve_reranker(cfg: &RerankConfig) -> Option<Box<dyn Reranker>> {
     #[cfg(feature = "http-scorer")]
     if cfg.enabled && cfg.scorer.as_deref() == Some("http") {
+        warn_if_compute_knobs_inert(cfg);
         let endpoint = cfg.endpoint.clone()?;
         match crate::http_scorer::client::new_ureq_reranker(
             endpoint,

@@ -280,9 +280,35 @@ mod ort_engine {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("nli model cache mutex poisoned"))?;
             let inner = Arc::clone(guard.entry(cache_key).or_insert(built));
-            Ok(Self {
+            let handle = Self {
                 inner,
                 entail_index,
+            };
+            handle.validate_budget(batch_tokens)?;
+            Ok(handle)
+        }
+
+        /// See `InProcessReranker::validate_budget` — same contract, and this engine's forward
+        /// additionally declares `token_type_ids`, fed as zeros exactly as the serving path does.
+        fn validate_budget(&self, batch_tokens: Option<usize>) -> anyhow::Result<()> {
+            let Some(requested) = batch_tokens else {
+                return Ok(());
+            };
+            let rows = (requested / DEFAULT_MAX_SEQ_LEN).clamp(1, harness::NLI_BATCH_MAX_ROWS);
+            let n = rows * DEFAULT_MAX_SEQ_LEN;
+            self.forward_logits(
+                &vec![0i64; n],
+                &vec![1i64; n],
+                &vec![0i64; n],
+                rows,
+                DEFAULT_MAX_SEQ_LEN,
+            )
+            .map(|_| ())
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "configured batch_tokens = {requested} ({rows} rows of \
+                         {DEFAULT_MAX_SEQ_LEN}) could not run on this device: {e}"
+                )
             })
         }
 
@@ -534,7 +560,37 @@ mod ort_engine {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("rerank model cache mutex poisoned"))?;
             let inner = Arc::clone(guard.entry(cache_key).or_insert(built));
-            Ok(Self { inner })
+            let handle = Self { inner };
+            handle.validate_budget(batch_tokens)?;
+            Ok(handle)
+        }
+
+        /// Run one synthetic batch at an explicitly CONFIGURED budget, so a size this device
+        /// cannot take fails here — naming the number the operator wrote — instead of on someone's
+        /// first query. "Out of memory" without that number sends them looking in the wrong file.
+        ///
+        /// Only when a budget was configured. The probe allocates a batch of that size, and an ORT
+        /// arena never returns a batch's peak, so validating commits that memory for the life of
+        /// the process: the right trade for a size about to be used anyway, the wrong one to
+        /// impose on the default path. A cache HIT skips it — the budget is part of the cache key,
+        /// so whoever built that session already validated this exact size.
+        fn validate_budget(&self, batch_tokens: Option<usize>) -> anyhow::Result<()> {
+            let Some(requested) = batch_tokens else {
+                return Ok(());
+            };
+            // Clamped to what the planner can actually build, so this never tests a batch shape
+            // the serving path would never produce.
+            let rows = (requested / DEFAULT_MAX_SEQ_LEN).clamp(1, harness::NLI_BATCH_MAX_ROWS);
+            let ids = vec![0i64; rows * DEFAULT_MAX_SEQ_LEN];
+            let mask = vec![1i64; rows * DEFAULT_MAX_SEQ_LEN];
+            self.forward_logits(&ids, &mask, rows, DEFAULT_MAX_SEQ_LEN)
+                .map(|_| ())
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "configured batch_tokens = {requested} ({rows} rows of \
+                         {DEFAULT_MAX_SEQ_LEN}) could not run on this device: {e}"
+                    )
+                })
         }
 
         fn build_inner(

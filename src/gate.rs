@@ -50,6 +50,24 @@ pub fn verify_outcome(
     verify_outcome_with_scorer(glossa_dir, answer, chunk_paths, scorer.as_deref())
 }
 
+/// Say when a compute knob was configured on a path that cannot honour it — the NLI counterpart of
+/// `retrieve::rerank::warn_if_compute_knobs_inert`. A remote scorer batches and threads on its own
+/// side, so a client-side setting does nothing there, and silence is exactly what made the device
+/// keys on this path a trap.
+#[cfg(feature = "http-scorer")]
+fn warn_if_compute_knobs_inert(cfg: &VerifyConfig) {
+    if crate::retrieve::config::compute_knobs_inert(
+        cfg.scorer.as_deref(),
+        cfg.batch_tokens,
+        cfg.intra_threads,
+    ) {
+        eprintln!(
+            "[verify.nli] batch_tokens / intra_threads are in_process settings and do nothing \
+             with scorer = \"http\"; tune that server instead"
+        );
+    }
+}
+
 /// Build the runtime NLI scorer from `[verify.nli]`, or `None` (=> AC-only, fail-open — spec 4).
 /// `scorer = "in_process"` + feature `nli` compiled in + `model_dir` set => a real `InProcessNli`;
 /// any load error (bad path, corrupt export, missing ort runtime) is logged and downgraded to
@@ -64,6 +82,7 @@ pub fn verify_outcome(
 pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
     #[cfg(feature = "http-scorer")]
     if cfg.scorer.as_deref() == Some("http") {
+        warn_if_compute_knobs_inert(cfg);
         let endpoint = cfg.endpoint.clone()?;
         return Some(Box::new(crate::http_scorer::client::new_ureq_nli(
             endpoint,
@@ -104,6 +123,7 @@ pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
 pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
     #[cfg(feature = "http-scorer")]
     if cfg.scorer.as_deref() == Some("http") {
+        warn_if_compute_knobs_inert(cfg);
         let endpoint = cfg.endpoint.clone()?;
         return Some(Box::new(crate::http_scorer::client::new_ureq_nli(
             endpoint,
@@ -132,6 +152,7 @@ pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
 pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
     #[cfg(feature = "http-scorer")]
     if cfg.scorer.as_deref() == Some("http") {
+        warn_if_compute_knobs_inert(cfg);
         let endpoint = cfg.endpoint.clone()?;
         return Some(Box::new(crate::http_scorer::client::new_ureq_nli(
             endpoint,
@@ -290,6 +311,8 @@ mod resolve_scorer_tests {
             execution_providers: vec!["cpu".into()],
             execution_provider_device: None,
             execution_provider_mem_limit_mb: None,
+            batch_tokens: None,
+            intra_threads: None,
             endpoint: None,
             timeout_ms: 5000,
             api_key: None,
