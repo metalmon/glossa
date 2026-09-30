@@ -5,7 +5,9 @@
 //! supplies the raw cross-encoder forward via [`RerankForward`], so ORT and burn cannot diverge in
 //! anything but the forward itself.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, Result};
 use burn::prelude::*;
@@ -25,9 +27,10 @@ fn cfg_usize(v: &serde_json::Value, key: &str) -> Result<usize> {
         .ok_or_else(|| anyhow!("config.json missing/invalid `{key}` (expected unsigned int)"))
 }
 
-/// In-process reranker backed by the hand-written burn XLM-RoBERTa cross-encoder. Holds the loaded
-/// model, its device, the tokenizer, and the shared truncation/batching config.
-pub struct InProcessBurnReranker {
+/// The loaded model + tokenizer for one `model_dir`, shared by every handle pointing at it.
+/// Mirrors the ORT engine's `RerankInner`/`RERANK_CACHE`. Without it a burn build reloaded the
+/// weights from disk on EVERY query, because `resolve_reranker` runs inside `retrieve()`.
+struct BurnRerankInner {
     model: RobertaRerankerModel<BurnBackend>,
     device: Dev,
     tokenizer: Tokenizer,
@@ -35,11 +38,49 @@ pub struct InProcessBurnReranker {
     batch_budget_tokens: usize,
 }
 
+/// In-process reranker backed by the hand-written burn XLM-RoBERTa cross-encoder. A cheap handle
+/// onto a [`BurnRerankInner`] shared with every other handle for the same model dir.
+pub struct InProcessBurnReranker {
+    inner: Arc<BurnRerankInner>,
+}
+
+/// Keyed by canonicalized model dir alone: the burn backend selects its own device, so the ORT
+/// key's provider / device-id / memory-limit components have no analogue here.
+type BurnRerankCache = OnceLock<Mutex<HashMap<PathBuf, Arc<BurnRerankInner>>>>;
+static BURN_RERANK_CACHE: BurnRerankCache = OnceLock::new();
+
 impl InProcessBurnReranker {
     /// Load the tokenizer (`tokenizer.json`), model config (`config.json`), and weights (a
-    /// `.safetensors` file) from `model_dir`. Fail-open: returns `Err` on any missing/garbage file
-    /// or incomplete weight set; never panics.
+    /// `.safetensors` file) from `model_dir`, reusing an already-loaded model for the same dir.
+    /// Fail-open: returns `Err` on any missing/garbage file or incomplete weight set; never panics.
+    ///
+    /// Caching brings the same contract the ORT engines already have: an edited config or weights
+    /// file takes effect on the next process start, not on the next query.
     pub fn load(model_dir: &Path) -> Result<Self> {
+        let key = model_dir
+            .canonicalize()
+            .unwrap_or_else(|_| model_dir.to_path_buf());
+        let cache = BURN_RERANK_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(inner) = cache
+            .lock()
+            .map_err(|_| anyhow!("burn rerank cache mutex poisoned"))?
+            .get(&key)
+        {
+            return Ok(Self {
+                inner: Arc::clone(inner),
+            });
+        }
+        let built = Arc::new(Self::build_inner(model_dir)?);
+        let mut guard = cache
+            .lock()
+            .map_err(|_| anyhow!("burn rerank cache mutex poisoned"))?;
+        // `or_insert`, not `insert`: two threads that both missed the read above must end up
+        // sharing ONE instance, with the loser's build dropped.
+        let inner = Arc::clone(guard.entry(key).or_insert(built));
+        Ok(Self { inner })
+    }
+
+    fn build_inner(model_dir: &Path) -> Result<BurnRerankInner> {
         let tokenizer_path = model_dir.join("tokenizer.json");
         let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow!("tokenizer load ({}): {e}", tokenizer_path.display()))?;
@@ -114,7 +155,7 @@ impl InProcessBurnReranker {
             );
         }
 
-        Ok(Self {
+        Ok(BurnRerankInner {
             model,
             device,
             tokenizer,
@@ -129,9 +170,9 @@ impl InProcessBurnReranker {
     pub fn rerank(&self, query: &str, passages: &[&str]) -> Result<Vec<f32>> {
         harness::rerank(
             self,
-            &self.tokenizer,
-            self.max_seq_len,
-            self.batch_budget_tokens,
+            &self.inner.tokenizer,
+            self.inner.max_seq_len,
+            self.inner.batch_budget_tokens,
             query,
             passages,
         )
@@ -143,10 +184,11 @@ impl RerankForward for InProcessBurnReranker {
         let mk = |v: &[i64]| {
             Tensor::<BurnBackend, 2, Int>::from_data(
                 TensorData::new(v.to_vec(), [n, seq]),
-                &self.device,
+                &self.inner.device,
             )
         };
-        self.model
+        self.inner
+            .model
             .forward(mk(ids), mk(mask))
             .into_data()
             .to_vec::<f32>()
@@ -157,6 +199,43 @@ impl RerankForward for InProcessBurnReranker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The staged weights dir the other burn tests are gated on. CI has no 1.5 GB model, so these
+    /// skip there and the compile is what CI proves.
+    fn staged_model_dir() -> Option<PathBuf> {
+        std::env::var("RERANK_SAFETENSORS_DIR")
+            .ok()
+            .map(PathBuf::from)
+    }
+
+    /// The defect: `resolve_reranker` runs inside `retrieve()`, so before the cache every search
+    /// rebuilt tokenizer, model and weights from disk.
+    #[test]
+    fn two_loads_of_one_dir_share_one_instance() {
+        let Some(dir) = staged_model_dir() else {
+            return;
+        };
+        let a = InProcessBurnReranker::load(&dir).unwrap();
+        let b = InProcessBurnReranker::load(&dir).unwrap();
+        assert!(
+            Arc::ptr_eq(&a.inner, &b.inner),
+            "a second load must reuse the cached model, not rebuild it"
+        );
+    }
+
+    /// The race the cache itself introduces: whoever loses the insert must adopt the winner's
+    /// instance rather than keep a second copy of a 1.5 GB model.
+    #[test]
+    fn concurrent_loads_converge_on_one_instance() {
+        let Some(dir) = staged_model_dir() else {
+            return;
+        };
+        let other = dir.clone();
+        let h = std::thread::spawn(move || InProcessBurnReranker::load(&other).unwrap());
+        let a = InProcessBurnReranker::load(&dir).unwrap();
+        let b = h.join().unwrap();
+        assert!(Arc::ptr_eq(&a.inner, &b.inner));
+    }
 
     /// Golden-parity + ordering (env-gated on `RERANK_SAFETENSORS_DIR`, so CI without the staged
     /// 1.5GB model stays green). Loads the real bge-reranker-v2-m3 en-ru weights, runs the burn
