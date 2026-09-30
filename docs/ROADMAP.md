@@ -179,21 +179,10 @@ traversal, not a complex graph fed to a weak model. Design captured in an intern
 
 ### Eval harness
 
-| Item | Status | Notes |
-|------|--------|-------|
-| Hotpot distractor runs | **Shipped** | Logged in [benchmarks.md](benchmarks.md) (50q slices) |
-| `prep-fullwiki` | **Shipped** | CLI + shard builder in `kb-eval prep-fullwiki` |
-| `export-tz` quad jsonl + GEPA | **Shipped** | v1.2.0 — search, grep, glob, read micro-tasks only |
-| Constraint GEPA (5 pools) | **Retired** | Was a TensorZero/`kb-eval-constraint` loop; the tooling was retired with the legacy harness and has no `kbx` equivalent yet. Reintroduce under `kbx` only if the `.csp` extraction agent needs prompt optimization again. |
-| GEPA graph micro-tasks (`glossary`, `related`) | **Open** | Extend prompt optimization to graph-first retrieval: export episodes → jsonl, TZ micro-functions, scored like search/read (symptom → chain hit, related → alternate case / gold chunk). Needed so GEPA tunes the prod prompt's graph protocol, not only flat retrieval. |
-| `--no-graph` control arm | **Shipped** | `kb-eval run --no-graph`, MCP `--no-graph` |
-| Gold join / `case_id` | **Partial** | TZ sets `case_id`; export joins by id or question; OpenAI backend has no tags; enrich sets `case_id` |
-| Whole-run timeout | **Partial** | `kb-eval run --timeout-secs`; not per-round in tool loop |
-| Fullwiki benchmark run | **Open** | Prep + run path + fullwiki recall scoring all wired (`prep`/`run`/`score`); no logged EM/F1/Recall@k series yet |
-| Graph on/off A/B series | **Open** | `--no-graph` exists; no formal logged comparison on Hotpot |
-| Per-round wall-clock budget | **Open** | OpenAI backend tool loop |
-| `MAX_ROUNDS` / read truncation CLI | **Open** | Hardcoded at 50 in backends |
-| 2WikiMultihopQA / MuSiQue | **Open** | Not wired |
+The previous eval-harness backlog table was keyed to the retired `kb-eval` binary + TensorZero
+gateway and is removed. The current, self-contained `kbx` eval/train pipeline is documented in
+[eval-and-training.md](eval-and-training.md); a fresh backlog (public benchmark series, graph
+on/off A/B, 2WikiMultihopQA / MuSiQue) will be re-based onto `kbx` here when re-prioritized.
 
 ---
 
