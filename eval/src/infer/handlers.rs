@@ -154,11 +154,7 @@ mod server {
 
     async fn metrics() -> Response {
         // Minimal Prometheus text; richer scorer series are a Phase-2 addition.
-        (
-            StatusCode::OK,
-            "# glossa inference-server\nglossa_infer_up 1\n",
-        )
-            .into_response()
+        (StatusCode::OK, "# glossa kbi\nglossa_infer_up 1\n").into_response()
     }
 
     fn overloaded() -> Response {

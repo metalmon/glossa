@@ -32,11 +32,11 @@ jobs:
       - name: cargo clippy (-D warnings)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      # The `http-scorer` client (glossa) + the `inference-server` gated server code (kb-eval) are
+      # The `http-scorer` client (glossa) + the `kbi` gated server code (kb-eval) are
       # off the default feature set, so the workspace clippy above never sees them. Lint both:
       # the light client, and the server compiled under `nli-cuda` (load-dynamic — compiles on
       # Linux with no ORT binary or GPU present).
-      - name: cargo clippy (http-scorer client + inference-server)
+      - name: cargo clippy (http-scorer client + kbi)
         run: |
           cargo clippy -p glossa --features http-scorer --all-targets --locked -- -D warnings
           cargo clippy -p kb-eval --features "http-scorer nli-cuda" --all-targets --locked -- -D warnings
@@ -89,7 +89,7 @@ jobs:
         run: cargo test -p kb-eval --release --locked
 
       # The light remote HTTP scorer clients (HttpNli/HttpReranker) + the kbx check probe. The
-      # pure inference-server units (pool/state/handlers/guard) already run in the default kb-eval
+      # pure kbi units (pool/state/handlers/guard) already run in the default kb-eval
       # test above; this adds the feature-gated client + probe tests.
       - name: cargo test (http-scorer clients)
         run: |

@@ -1,8 +1,8 @@
-//! `inference-server` — serve the NLI + reranker cross-encoders over HTTP. The real server needs an
-//! ORT engine feature (it loads `InProcessNli`/`InProcessReranker`); a build without one prints how
-//! to build it. `inference-server serve …` runs the server (foreground, or under the Windows SCM /
-//! Linux systemd via `--windows-service` / a systemd unit); `inference-server service …` installs
-//! and manages it as an OS service.
+//! `kbi` — the Glossa inference server: serve the NLI + reranker cross-encoders over HTTP. The real
+//! server needs an ORT engine feature (it loads `InProcessNli`/`InProcessReranker`); a build without
+//! one prints how to build it. Bare `kbi <flags>` runs the server (foreground, or under the Windows
+//! SCM / Linux systemd via `--windows-service` / a systemd unit); `kbi service …` installs and
+//! manages it as an OS service.
 
 #[cfg(any(
     feature = "nli-directml",
@@ -12,7 +12,9 @@
 ))]
 use kb_eval::infer::cli::ServeArgs;
 
-/// `inference-server <serve|service …>`.
+/// `kbi [serve flags] | kbi service …`. Serve is the DEFAULT — bare `kbi --bind …` serves; the only
+/// subcommand is `service`. ServeArgs has no positionals (all `--flags`), so `kbi service` is
+/// unambiguously the subcommand.
 #[cfg(any(
     feature = "nli-directml",
     feature = "nli-coreml",
@@ -20,18 +22,13 @@ use kb_eval::infer::cli::ServeArgs;
     feature = "nli-rocm"
 ))]
 #[derive(clap::Parser)]
-#[command(name = "inference-server", version = glossa::version())]
-// Parsed once at startup; the Serve/Service size gap doesn't matter, and boxing ServeArgs would
-// break clap's flatten-in-tuple-variant derive.
-#[allow(clippy::large_enum_variant)]
-enum Cli {
-    /// Serve the NLI + reranker over HTTP.
-    Serve(ServeArgs),
-    /// Install/manage the server as an OS service (Windows SCM / Linux systemd).
-    Service {
-        #[command(subcommand)]
-        action: InferServiceAction,
-    },
+#[command(name = "kbi", version = glossa::version())]
+struct Cli {
+    /// `kbi service …` — install/manage as an OS service. Absent ⇒ serve with the flags below.
+    #[command(subcommand)]
+    service: Option<InferServiceAction>,
+    #[command(flatten)]
+    serve: ServeArgs,
 }
 
 #[cfg(any(
@@ -42,7 +39,7 @@ enum Cli {
 ))]
 #[derive(clap::Subcommand)]
 enum InferServiceAction {
-    /// Install (register) a service that runs `serve` with the given flags.
+    /// Install (register) a service that runs `kbi` with the given serve flags.
     Install(InferInstallOpts),
     /// Remove a service.
     Uninstall(glossa::service_cli::NameArg),
@@ -65,8 +62,8 @@ struct InferInstallOpts {
     /// Unique service name (the SCM/systemd key).
     #[arg(long = "service-name")]
     service_name: String,
-    /// The `inference-server serve` flags to bake into the service — pass them after `--`, e.g.
-    /// `inference-server service install --service-name s -- --rerank-repo <repo> --bind <addr>`.
+    /// The `kbi` serve flags to bake into the service — pass them after `--`, e.g.
+    /// `kbi service install --service-name s -- --rerank-repo <repo> --bind <addr>`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     serve_args: Vec<String>,
 }
@@ -79,15 +76,18 @@ struct InferInstallOpts {
 ))]
 fn main() -> anyhow::Result<()> {
     use clap::Parser;
-    match Cli::parse() {
-        Cli::Serve(args) => {
+    let cli = Cli::parse();
+    match cli.service {
+        Some(action) => run_service(action),
+        None => {
+            let args = cli.serve;
             if args.windows_service {
                 // Launched by the SCM (binPath carries --windows-service): drive serve under the
                 // shared dispatcher (Stop/Shutdown → cancel; on_ready flips the service to Running).
                 let name = args
                     .service_name
                     .clone()
-                    .unwrap_or_else(|| "glossa-inference".to_string());
+                    .unwrap_or_else(|| "glossa-kbi".to_string());
                 glossa::service::run_as_service(
                     name,
                     Box::new(move |cancel, on_ready| serve_blocking(args, cancel, on_ready)),
@@ -102,11 +102,10 @@ fn main() -> anyhow::Result<()> {
                 )
             }
         }
-        Cli::Service { action } => run_service(action),
     }
 }
 
-/// Dispatch `inference-server service <action>`.
+/// Dispatch `kbi service <action>`.
 #[cfg(any(
     feature = "nli-directml",
     feature = "nli-coreml",
@@ -118,7 +117,7 @@ fn run_service(action: InferServiceAction) -> anyhow::Result<()> {
     match action {
         InferServiceAction::Install(o) => {
             let program = std::env::current_exe()
-                .map_err(|e| anyhow::anyhow!("cannot resolve the inference-server path: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("cannot resolve the kbi executable path: {e}"))?;
             glossa::service::install(&infer_service_spec(&o.service_name, program, &o.serve_args))?;
             println!("installed service {}", o.service_name);
         }
@@ -185,7 +184,7 @@ fn serve_blocking(
         // the models load rather than refusing connections (k8s-style readiness).
         let st = std::sync::Arc::new(state::build_state(&args)?);
         let listener = tokio::net::TcpListener::bind(&bind).await?;
-        println!("inference-server binding {scheme}://{bind} — loading models (health = 503 until ready)…");
+        println!("kbi binding {scheme}://{bind} — loading models (health = 503 until ready)…");
         if no_cap {
             eprintln!("note: no --max-concurrency cap; requests queue on the model session under load (no 429 shed).");
         }
@@ -231,7 +230,7 @@ fn serve_blocking(
                 Ok(()) => {
                     let nli_ep = w.nli_ep.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     let rerank_ep = w.rerank_ep.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    println!("inference-server models loaded on {scheme}://{bind_msg}  (nli_ep={nli_ep:?} rerank_ep={rerank_ep:?})");
+                    println!("kbi models loaded on {scheme}://{bind_msg}  (nli_ep={nli_ep:?} rerank_ep={rerank_ep:?})");
                     println!("  kbx nli set    --scorer http --endpoint {scheme}://{bind_msg}");
                     println!("  kbx rerank set --scorer http --endpoint {scheme}://{bind_msg}");
                 }
@@ -310,7 +309,7 @@ fn serve_blocking(
 )))]
 fn main() {
     eprintln!(
-        "inference-server needs an ORT engine feature — build with `--features nli-directml` \
+        "kbi needs an ORT engine feature — build with `--features nli-directml` \
          (self-contained) or `--features nli-cuda` (GPU)."
     );
     std::process::exit(2);

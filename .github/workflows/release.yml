@@ -80,13 +80,13 @@ jobs:
         # kbx is the file-first eval/train/build toolkit (lives in the kb-eval crate).
         run: cargo build --release --locked --target ${{ matrix.target }} -p kb-eval --bin kbx ${{ matrix.kbx_flags }}
 
-      - name: Build inference-server
+      - name: Build kbi
         # The standalone HTTP scorer (NLI + reranker over TEI/Jina). Built ONLY on rows whose feature
         # enables the server — the GPU execution providers (nli-cuda/nli-directml/nli-coreml). The
         # `none` and CPU-`nli` rows would ship the useless "needs an engine feature" stub (the server
         # is gated on a GPU EP, not plain `nli`), so `build_server` marks the rows that build a real one.
         if: matrix.build_server
-        run: cargo build --release --locked --target ${{ matrix.target }} -p kb-eval --bin inference-server ${{ matrix.kbx_flags }}
+        run: cargo build --release --locked --target ${{ matrix.target }} -p kb-eval --bin kbi ${{ matrix.kbx_flags }}
 
       - name: Fetch ONNX Runtime CUDA-13 DLLs (cuda13 only)
         # nli-cuda uses ort's `load-dynamic`: nothing is linked/downloaded at build time, so the
@@ -123,8 +123,8 @@ jobs:
           mkdir -p "dist/${stem}"
           cp "target/${{ matrix.target }}/release/kb" "dist/${stem}/"
           cp "target/${{ matrix.target }}/release/kbx" "dist/${stem}/"
-          # inference-server exists only on GPU-EP rows (build_server); the copy no-ops elsewhere.
-          cp "target/${{ matrix.target }}/release/inference-server" "dist/${stem}/" 2>/dev/null || true
+          # kbi exists only on GPU-EP rows (build_server); the copy no-ops elsewhere.
+          cp "target/${{ matrix.target }}/release/kbi" "dist/${stem}/" 2>/dev/null || true
           # ort/bundled may place a shared ONNX Runtime lib beside the binary — ship it if present
           # (no-op for the `none` variant and for static links).
           cp target/${{ matrix.target }}/release/libonnxruntime*.dylib "dist/${stem}/" 2>/dev/null || true
@@ -141,8 +141,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path "dist/$stem"
           Copy-Item "target/${{ matrix.target }}/release/kb.exe" "dist/$stem/"
           Copy-Item "target/${{ matrix.target }}/release/kbx.exe" "dist/$stem/"
-          # inference-server.exe exists only on GPU-EP rows (build_server); the copy no-ops elsewhere.
-          Get-ChildItem "target/${{ matrix.target }}/release/inference-server.exe" -ErrorAction SilentlyContinue | Copy-Item -Destination "dist/$stem/"
+          # kbi.exe exists only on GPU-EP rows (build_server); the copy no-ops elsewhere.
+          Get-ChildItem "target/${{ matrix.target }}/release/kbi.exe" -ErrorAction SilentlyContinue | Copy-Item -Destination "dist/$stem/"
           # ort/bundled may place onnxruntime*.dll beside the binary — ship it if present.
           Get-ChildItem "target/${{ matrix.target }}/release/onnxruntime*.dll" -ErrorAction SilentlyContinue | Copy-Item -Destination "dist/$stem/"
           Copy-Item README.md, LICENSE "dist/$stem/"

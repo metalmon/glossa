@@ -1,5 +1,5 @@
 //! Shared `service {install|uninstall|start|stop|status}` CLI shape, reused by `kb` and
-//! `inference-server`. The install options are a CURATED set that can only describe a valid service:
+//! `kbi`. The install options are a CURATED set that can only describe a valid service:
 //! `kb`'s transport is hardcoded to `streamable-http` (there is no `--transport` flag), so a stdio
 //! service — which has no client/stdin under the SCM/systemd — is unrepresentable by construction.
 

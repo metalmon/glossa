@@ -1,5 +1,5 @@
 //! TEI/Jina scorer wire contract — the ONE source of truth, shared by the HTTP client
-//! (`glossa`, `http-scorer` feature) and the `inference-server` (kb-eval crate). Pure serde +
+//! (`glossa`, `http-scorer` feature) and the `kbi` (kb-eval crate). Pure serde +
 //! pure functions; no network, no cargo feature.
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};

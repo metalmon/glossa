@@ -12,8 +12,8 @@ name = "convert-xlsx"
 path = "src/bin/convert-xlsx.rs"
 
 [[bin]]
-name = "inference-server"
-path = "src/bin/inference_server.rs"
+name = "kbi"
+path = "src/bin/kbi.rs"
 
 [[bin]]
 name = "kb-dump-episode"

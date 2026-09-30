@@ -1,9 +1,9 @@
-//! `inference-server serve` arguments. Pure clap struct (no ORT), so it compiles in every build.
+//! `kbi serve` arguments. Pure clap struct (no ORT), so it compiles in every build.
 use std::path::PathBuf;
 
 use clap::Args;
 
-/// Flags for `inference-server serve` (and, via the service runner, the installed service).
+/// Flags for `kbi serve` (and, via the service runner, the installed service).
 #[derive(Args, Debug, Clone)]
 pub struct ServeArgs {
     /// Local NLI model dir (skips download). If absent and `--nli-repo` is set, the variant is
@@ -150,17 +150,16 @@ pub fn resolve_key(
     }
 }
 
-/// Build the [`glossa::service::ServiceSpec`] for an `inference-server` service: `serve` + the given
-/// serve flags (repos/device/bind/…), plus the `--windows-service`/`--service-name` flags the
-/// SCM-launched process routes on (appended only if not already present). `program` is the
-/// inference-server executable path.
+/// Build the [`glossa::service::ServiceSpec`] for a `kbi` service: the given serve flags
+/// (repos/device/bind/…) — `kbi` serves by default, so there is NO `serve` prefix — plus the
+/// `--windows-service`/`--service-name` flags the SCM-launched process routes on (appended only if
+/// not already present). `program` is the `kbi` executable path.
 pub fn infer_service_spec(
     name: &str,
     program: PathBuf,
     serve_args: &[String],
 ) -> glossa::service::ServiceSpec {
-    let mut args = vec!["serve".to_string()];
-    args.extend(serve_args.iter().cloned());
+    let mut args: Vec<String> = serve_args.to_vec();
     if !args.iter().any(|a| a == "--windows-service") {
         args.push("--windows-service".to_string());
     }
@@ -170,8 +169,8 @@ pub fn infer_service_spec(
     }
     glossa::service::ServiceSpec {
         name: name.to_string(),
-        display_name: format!("Glossa inference-server ({name})"),
-        description: format!("Glossa NLI + reranker HTTP scorer ({name})"),
+        display_name: format!("Glossa kbi ({name})"),
+        description: format!("Glossa kbi — NLI + reranker HTTP scorer ({name})"),
         program,
         args,
         watchdog: true,
@@ -211,7 +210,7 @@ mod tests {
     fn infer_service_spec_bakes_serve_and_service_flags() {
         let s = infer_service_spec(
             "glossa-scorer",
-            "C:/bin/inference-server.exe".into(),
+            "C:/bin/kbi.exe".into(),
             &[
                 "--rerank-repo".into(),
                 "metalmon80/bge-reranker-v2-m3-en-ru-onnx".into(),
@@ -219,7 +218,12 @@ mod tests {
                 "127.0.0.1:8071".into(),
             ],
         );
-        assert!(s.args.starts_with(&["serve".to_string()]));
+        // kbi serves by default — NO `serve` prefix; the baked args start with the serve flags.
+        assert!(!s.args.iter().any(|a| a == "serve"));
+        assert!(s.args.starts_with(&[
+            "--rerank-repo".to_string(),
+            "metalmon80/bge-reranker-v2-m3-en-ru-onnx".to_string()
+        ]));
         assert!(s.args.iter().any(|a| a == "--windows-service"));
         assert!(s
             .args

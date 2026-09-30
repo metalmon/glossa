@@ -1,4 +1,4 @@
-//! Cross-platform service install/uninstall/start/stop/status for `kb` and `inference-server`.
+//! Cross-platform service install/uninstall/start/stop/status for `kb` and `kbi`.
 //!
 //! One shape for both binaries and both OSes: a [`ServiceSpec`] (name + program + args) is turned
 //! into a Windows SCM service (via the `windows-service` crate's `ServiceManager`) or a Linux
@@ -76,7 +76,7 @@ pub fn windows_bin_path(program: &Path, args: &[String]) -> String {
 // ---------------------------------------------------------------------------
 // Generic service run-dispatcher: run an arbitrary serve closure under a platform's service
 // supervisor (Windows SCM control handler; off Windows, a Ctrl-C bridge). Shared by `kb` and
-// `inference-server` — each passes its own serve closure.
+// `kbi` — each passes its own serve closure.
 // ---------------------------------------------------------------------------
 
 /// The serve closure a service dispatcher drives: given a cancellation token (tripped on

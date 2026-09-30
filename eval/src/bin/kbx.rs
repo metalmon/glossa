@@ -516,7 +516,7 @@ enum RerankCmd {
         /// the NLI verifier.
         #[arg(long = "gpu-mem-mb")]
         gpu_mem_mb: Option<usize>,
-        /// Probe a REMOTE reranker (inference-server / TEI) at this base URL instead of a local
+        /// Probe a REMOTE reranker (kbi / TEI) at this base URL instead of a local
         /// model dir. Reports reachability + the inversion guard.
         #[arg(long = "endpoint")]
         endpoint: Option<String>,
