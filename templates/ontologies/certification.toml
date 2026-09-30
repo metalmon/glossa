@@ -36,11 +36,109 @@ spines = [
 ]
 mentions = "MENTIONS"
 
-# ── Retrieval tuning (optional) ──────────────────────────────────────────────
-# Per-corpus retrieval weights. Uncomment to override the engine default.
+# ─────────────────────────────────────────────────────────────────────────────
+# Tunable knobs. Everything below is OPTIONAL and commented out; each line shows
+# the engine default, so an uncommented line is a deliberate override. Env vars
+# beat the file, and a CLI flag beats both.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── [retrieval] — search depth and graph-walk weights ────────────────────────
 # [retrieval]
+# How many hits a `search` with no explicit limit returns — the depth the READER
+# sees. Unset: 50 for the agent tool, 100 for `kb search` (it prints to a human).
+# Env GLOSSA_SEARCH_LIMIT.
+# search_limit = 50
+#
 # PPR transition weight of a mechanical SIMILAR edge relative to a reasoning
-# edge (which is 1.0). Default 0.1. Lower = leaner similarity mass (suits a
-# stronger reader model); higher = heavier (suits a weaker reader, e.g. a 4B).
-# The env var GLOSSA_PPR_SIM_WEIGHT overrides this for one-off sweeps.
+# edge (which is 1.0). Lower = leaner similarity mass (suits a stronger reader
+# model); higher = heavier (suits a weaker reader, e.g. a 4B).
+# Env GLOSSA_PPR_SIM_WEIGHT.
 # sim_weight = 0.1
+#
+# PPR transition weight of a reasoning-SPINE edge (a relation whose role is
+# "chaining") relative to a plain reasoning edge. 1.0 is a no-op; above 1.0
+# stops a node's load-bearing bridge edge being diluted by out-degree against
+# its grounding/descriptive edges. Env GLOSSA_PPR_SPINE_WEIGHT.
+# spine_weight = 1.0
+#
+# Dual-seed combination mode for composed PPR (query-time seeding only):
+# "off" | "geomean". Env GLOSSA_PPR_BRIDGE.
+# bridge = "off"
+
+# ── [verify] — the model-free answer-grounding gate ──────────────────────────
+# Stays withheld until it is BOTH enabled and has a calibrated threshold, so
+# enabling it alone changes nothing. Calibrate with `kbx eval calibrate`.
+# [verify]
+# enabled = false
+# How the lexical/anomaly ("AC") and NLI verdicts combine: "ac" | "nli" | "combined".
+# mode = "ac"
+# A term counts as rare below this document-frequency fraction of the corpus.
+# rare_df_frac = 0.05
+# Answers shorter than this many tokens skip the gate.
+# min_answer_tokens = 5
+#
+# Legacy single threshold table; prefer [verify.ac.threshold] below.
+# [verify.threshold]
+# single = 0.0
+# multi = 0.0
+#
+# [verify.ac.threshold]
+# single = 0.0
+# multi = 0.0
+
+# ── [verify.nli] — NLI support verifier (needs a model) ──────────────────────
+# [verify.nli]
+# "in_process" loads the ONNX model locally; "http" offloads to a `kbi` server.
+# scorer = "in_process"
+# model_dir = "/path/to/nli-model-dir"
+# Softmax index of the entailment class; export-specific.
+# entail_index = 2
+# Compute device, single value with automatic CPU fallback:
+# "cpu" | "cuda" | "directml" | "coreml" | "rocm". A GPU value only works in a
+# build that compiled that provider in.
+# device = "cpu"
+# Which GPU the provider binds to; unset = the provider's default device.
+# gpu_id = 0
+# GPU arena memory cap (MB), so this can share a card with an LLM. Effective on
+# CUDA; ROCm honours only arena growth; DirectML/CoreML expose no memory option.
+# gpu_mem_mb = 1024
+# scorer = "http" only:
+# endpoint = "http://127.0.0.1:8071"
+# timeout_ms = 5000
+# api_key = "..."
+#
+# [verify.nli.threshold]
+# single = 0.0
+# multi = 0.0
+#
+# Written by `kbx eval calibrate` for mode = "combined"; not hand-tuned.
+# [verify.combined.single]
+# mean_ac = 0.0
+# std_ac = 1.0
+# mean_nli = 0.0
+# std_nli = 1.0
+# threshold = 0.0
+# [verify.combined.multi]
+# mean_ac = 0.0
+# std_ac = 1.0
+# mean_nli = 0.0
+# std_nli = 1.0
+# threshold = 0.0
+
+# ── [rerank] — cross-encoder reranking of the search pool ────────────────────
+# Reorders the fetched pool; it never fetches deeper on its own, so set
+# pool_size ABOVE the search limit to actually pool deeper. Device knobs mirror
+# [verify.nli] exactly. Write this section with `kbx rerank set`.
+# [rerank]
+# enabled = false
+# scorer = "in_process"
+# model_dir = "/path/to/reranker-model-dir"
+# Candidates fetched and reranked before trimming to the caller's limit.
+# pool_size = 50
+# device = "cpu"
+# gpu_id = 0
+# gpu_mem_mb = 2048
+# scorer = "http" only:
+# endpoint = "http://127.0.0.1:8071"
+# timeout_ms = 5000
+# api_key = "..."
