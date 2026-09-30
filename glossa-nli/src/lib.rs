@@ -150,15 +150,22 @@ mod ort_engine {
         batch_budget_tokens: usize,
     }
 
-    /// `MODEL_CACHE`'s key: `(canonicalized model_dir, providers, device_id, mem_limit_mb)`.
-    /// Factored out to satisfy `clippy::type_complexity`.
-    type ModelCacheKey = (PathBuf, Vec<String>, Option<i32>, Option<usize>);
+    /// `MODEL_CACHE`'s key: `(canonicalized model_dir, providers, device_id, mem_limit_mb,
+    /// batch_tokens, intra_threads)`. Factored out to satisfy `clippy::type_complexity`.
+    type ModelCacheKey = (
+        PathBuf,
+        Vec<String>,
+        Option<i32>,
+        Option<usize>,
+        Option<usize>,
+        Option<usize>,
+    );
     type ModelCache = OnceLock<Mutex<HashMap<ModelCacheKey, Arc<Inner>>>>;
 
-    /// Process-global load-once cache, keyed by
-    /// `(canonicalized model_dir, providers, device_id, mem_limit_mb)`. A different EP set, GPU
-    /// device, or GPU memory limit is a different ONNX session (spec §2.1a), so all three are part of
-    /// the key.
+    /// Process-global load-once cache, keyed by [`ModelCacheKey`]. A different EP set, GPU device,
+    /// GPU memory limit, batch budget or thread count is a different ONNX session (spec §2.1a), so
+    /// every one of them is part of the key — otherwise two callers configured differently would
+    /// silently share whichever session loaded first.
     static MODEL_CACHE: ModelCache = OnceLock::new();
 
     /// An in-process NLI scorer over an ONNX 3-way NLI model. Constructed from a local `model_dir`
@@ -226,12 +233,17 @@ mod ort_engine {
         /// to same-as-requested + disables the session memory-pattern optimizer, so NLI can share a
         /// GPU with an LLM; `None` sets no memory options (byte-identical to today). Reuses a cached
         /// `Inner` for the same `(canonicalized model_dir, providers, device_id, mem_limit_mb)`.
+        /// `batch_tokens` and `intra_threads` are `None` for the engine default; both are
+        /// properties of the SESSION, so both join the cache key — two callers pointing at one
+        /// model dir with different values must not silently share whichever loaded first.
         pub fn load(
             model_dir: &Path,
             entail_index: usize,
             providers: &[String],
             device_id: Option<i32>,
             mem_limit_mb: Option<usize>,
+            batch_tokens: Option<usize>,
+            intra_threads: Option<usize>,
         ) -> anyhow::Result<Self> {
             let cache_key = (
                 model_dir
@@ -240,6 +252,8 @@ mod ort_engine {
                 providers.to_vec(),
                 device_id,
                 mem_limit_mb,
+                batch_tokens,
+                intra_threads,
             );
             let cache = MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
@@ -259,6 +273,8 @@ mod ort_engine {
                 providers,
                 device_id,
                 mem_limit_mb,
+                batch_tokens,
+                intra_threads,
             )?);
             let mut guard = cache
                 .lock()
@@ -275,6 +291,8 @@ mod ort_engine {
             providers: &[String],
             device_id: Option<i32>,
             mem_limit_mb: Option<usize>,
+            batch_tokens: Option<usize>,
+            intra_threads: Option<usize>,
         ) -> anyhow::Result<Inner> {
             let tokenizer_path = model_dir.join("tokenizer.json");
             let mut tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
@@ -295,14 +313,15 @@ mod ort_engine {
                 &model_path,
                 eps,
                 mem_limit_mb,
-                harness::DEFAULT_INTRA_THREADS,
+                intra_threads.unwrap_or(harness::DEFAULT_INTRA_THREADS),
             )?;
 
             Ok(Inner {
                 tokenizer,
                 session: Mutex::new(session),
                 max_seq_len: DEFAULT_MAX_SEQ_LEN,
-                batch_budget_tokens: harness::parse_batch_budget_tokens(),
+                batch_budget_tokens: batch_tokens
+                    .unwrap_or_else(harness::parse_batch_budget_tokens),
             })
         }
 
@@ -448,12 +467,14 @@ mod ort_engine {
         // `token_type_ids`. We feed exactly what the session declares.
         input_names: Vec<String>,
         max_seq_len: usize,
+        /// Resolved once at load, not re-read per call: a process must not change its own batching
+        /// mid-flight, and this is the one place that knows the session's configuration.
+        batch_budget_tokens: usize,
     }
 
     type RerankCache = OnceLock<Mutex<HashMap<ModelCacheKey, Arc<RerankInner>>>>;
 
-    /// Process-global load-once cache for rerankers, keyed exactly like `MODEL_CACHE`
-    /// (`(canonicalized model_dir, providers, device_id, mem_limit_mb)`).
+    /// Process-global load-once cache for rerankers, keyed exactly like `MODEL_CACHE`.
     static RERANK_CACHE: RerankCache = OnceLock::new();
 
     /// An in-process relevance scorer over an ONNX cross-encoder (e.g. bge-reranker-v2-m3). Unlike
@@ -469,11 +490,15 @@ mod ort_engine {
         /// `mem_limit_mb`) match [`InProcessNli::load`] exactly. Reuses a cached `RerankInner` for the
         /// same `(canonicalized model_dir, providers, device_id, mem_limit_mb)`. Fail-open: any load
         /// failure bubbles as `Err` (the glossa-side resolver catches it and drops to no-rerank).
+        /// `batch_tokens` / `intra_threads` are `None` for the engine default, and both join the
+        /// cache key: they describe the session, not the caller.
         pub fn load(
             model_dir: &Path,
             providers: &[String],
             device_id: Option<i32>,
             mem_limit_mb: Option<usize>,
+            batch_tokens: Option<usize>,
+            intra_threads: Option<usize>,
         ) -> anyhow::Result<Self> {
             let cache_key = (
                 model_dir
@@ -482,6 +507,8 @@ mod ort_engine {
                 providers.to_vec(),
                 device_id,
                 mem_limit_mb,
+                batch_tokens,
+                intra_threads,
             );
             let cache = RERANK_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
@@ -500,6 +527,8 @@ mod ort_engine {
                 providers,
                 device_id,
                 mem_limit_mb,
+                batch_tokens,
+                intra_threads,
             )?);
             let mut guard = cache
                 .lock()
@@ -513,6 +542,8 @@ mod ort_engine {
             providers: &[String],
             device_id: Option<i32>,
             mem_limit_mb: Option<usize>,
+            batch_tokens: Option<usize>,
+            intra_threads: Option<usize>,
         ) -> anyhow::Result<RerankInner> {
             let tokenizer_path = model_dir.join("tokenizer.json");
             let mut tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
@@ -544,7 +575,7 @@ mod ort_engine {
                 &model_path,
                 eps,
                 mem_limit_mb,
-                harness::DEFAULT_INTRA_THREADS,
+                intra_threads.unwrap_or(harness::DEFAULT_INTRA_THREADS),
             )?;
             let input_names = session
                 .inputs()
@@ -557,6 +588,8 @@ mod ort_engine {
                 session: Mutex::new(session),
                 input_names,
                 max_seq_len: DEFAULT_MAX_SEQ_LEN,
+                batch_budget_tokens: batch_tokens
+                    .unwrap_or_else(harness::parse_batch_budget_tokens),
             })
         }
 
@@ -564,11 +597,25 @@ mod ort_engine {
         /// `passages`. The pair tokenization and token-budget batching live in [`harness::rerank`];
         /// this engine only supplies the raw forward (`RerankForward` below).
         pub fn rerank(&self, query: &str, passages: &[&str]) -> anyhow::Result<Vec<f32>> {
+            self.rerank_with_budget(query, passages, self.inner.batch_budget_tokens)
+        }
+
+        /// Score `passages` at an EXPLICIT batch budget, ignoring the session's configured one.
+        ///
+        /// This is what a fit measures through: it runs the SAME planning and padding path as
+        /// [`Self::rerank`], because a separate measurement path would measure something
+        /// production does not execute.
+        pub fn rerank_with_budget(
+            &self,
+            query: &str,
+            passages: &[&str],
+            batch_tokens: usize,
+        ) -> anyhow::Result<Vec<f32>> {
             crate::harness::rerank(
                 self,
                 &self.inner.tokenizer,
                 self.inner.max_seq_len,
-                crate::harness::parse_batch_budget_tokens(),
+                batch_tokens.max(1),
                 query,
                 passages,
             )
@@ -798,6 +845,8 @@ mod ort_engine {
                 &["cpu".to_string()],
                 None,
                 None,
+                None,
+                None,
             )
             .expect("model load should succeed against a real GLOSSA_NLI_TEST_MODEL dir");
             let scores = nli
@@ -817,14 +866,67 @@ mod ort_engine {
 
         /// Real-model smoke (env-gated): a relevant passage must outscore an irrelevant one.
         /// Guards against a mis-served cross-encoder (the score inversion measured on a different
+        /// Two different budgets must be two different sessions. Sharing them is a live bug the
+        /// cache key used to have: a corpus configured for 8192 tokens would silently get 512
+        /// because another corpus on the same model dir loaded first.
+        #[test]
+        fn a_different_budget_is_a_different_session() {
+            let Ok(dir) = std::env::var("RERANK_MODEL_DIR") else {
+                return;
+            };
+            let small = InProcessReranker::load(
+                Path::new(&dir),
+                &["cpu".to_string()],
+                None,
+                None,
+                Some(512),
+                None,
+            )
+            .expect("load with a small budget");
+            let large = InProcessReranker::load(
+                Path::new(&dir),
+                &["cpu".to_string()],
+                None,
+                None,
+                Some(8192),
+                None,
+            )
+            .expect("load with a large budget");
+            assert!(
+                !Arc::ptr_eq(&small.inner, &large.inner),
+                "different budgets must not share one session"
+            );
+            assert_eq!(small.inner.batch_budget_tokens, 512);
+            assert_eq!(large.inner.batch_budget_tokens, 8192);
+
+            // And the same configuration still shares, so the key did not simply stop working.
+            let again = InProcessReranker::load(
+                Path::new(&dir),
+                &["cpu".to_string()],
+                None,
+                None,
+                Some(512),
+                None,
+            )
+            .expect("load again");
+            assert!(Arc::ptr_eq(&small.inner, &again.inner));
+        }
+
         /// serving path). Skips when `RERANK_MODEL_DIR` is unset so CI without the model is green.
         #[test]
         fn reranker_scores_relevant_above_irrelevant() {
             let Ok(dir) = std::env::var("RERANK_MODEL_DIR") else {
                 return;
             };
-            let rr = InProcessReranker::load(Path::new(&dir), &["cpu".to_string()], None, None)
-                .expect("reranker load should succeed against a real RERANK_MODEL_DIR dir");
+            let rr = InProcessReranker::load(
+                Path::new(&dir),
+                &["cpu".to_string()],
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("reranker load should succeed against a real RERANK_MODEL_DIR dir");
             let q = "What is the capital of France?";
             let scores = rr
                 .rerank(
@@ -962,6 +1064,8 @@ mod ort_engine {
                 Path::new(&model_dir),
                 ENTAIL_IDX,
                 &["cpu".to_string()],
+                None,
+                None,
                 None,
                 None,
             )

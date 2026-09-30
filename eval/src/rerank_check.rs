@@ -98,7 +98,8 @@ pub fn rerank_check(
         let relevant = "Paris is the capital and most populous city of France.";
         let irrelevant = "Bananas are a good source of potassium.";
 
-        let reranker = glossa_nli::InProcessReranker::load(&model_dir, &ep, gpu_id, gpu_mem_mb)?;
+        let reranker =
+            glossa_nli::InProcessReranker::load(&model_dir, &ep, gpu_id, gpu_mem_mb, None, None)?;
         let scores = reranker.rerank(query, &[relevant, irrelevant])?;
         match scores.as_slice() {
             [rel_score, irr_score, ..] => {

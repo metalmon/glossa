@@ -84,6 +84,8 @@ pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
         &cfg.execution_providers,
         cfg.execution_provider_device,
         cfg.execution_provider_mem_limit_mb,
+        cfg.batch_tokens,
+        cfg.intra_threads,
     ) {
         Ok(s) => Some(Box::new(s)),
         Err(e) => {

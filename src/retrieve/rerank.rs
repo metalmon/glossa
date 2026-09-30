@@ -209,6 +209,8 @@ pub fn resolve_reranker(cfg: &RerankConfig) -> Option<Box<dyn Reranker>> {
         &cfg.execution_providers,
         cfg.ep_device,
         cfg.ep_mem_limit_mb,
+        cfg.batch_tokens,
+        cfg.intra_threads,
     ) {
         Ok(r) => Some(Box::new(r)),
         Err(e) => {

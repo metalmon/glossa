@@ -160,6 +160,8 @@ mod engine {
                     &self.providers,
                     self.gpu_id,
                     self.gpu_mem_mb,
+                    None,
+                    None,
                 )?;
                 *self.nli.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(session));
                 *self.nli_ep.lock().unwrap_or_else(|e| e.into_inner()) = ep;
@@ -168,8 +170,14 @@ mod engine {
                 let ep = probe_rerank_ep(d, &self.providers, self.gpu_id, self.gpu_mem_mb)
                     .ok()
                     .flatten();
-                let session =
-                    InProcessReranker::load(d, &self.providers, self.gpu_id, self.gpu_mem_mb)?;
+                let session = InProcessReranker::load(
+                    d,
+                    &self.providers,
+                    self.gpu_id,
+                    self.gpu_mem_mb,
+                    None,
+                    None,
+                )?;
                 *self.rerank.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(session));
                 *self.rerank_ep.lock().unwrap_or_else(|e| e.into_inner()) = ep;
             }
