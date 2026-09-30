@@ -27,6 +27,19 @@ pub const NLI_BATCH_TOKENS: usize = DEFAULT_MAX_SEQ_LEN;
 /// short rows building one huge batch).
 pub const NLI_BATCH_MAX_ROWS: usize = 64;
 
+/// The largest batch budget the planner can actually spend: [`NLI_BATCH_MAX_ROWS`] full-length
+/// rows. A configured budget above this is silently equivalent to it, so a caller announces the
+/// clamp rather than leave an operator believing a number that does nothing.
+pub const MAX_USEFUL_BATCH_TOKENS: usize = NLI_BATCH_MAX_ROWS * DEFAULT_MAX_SEQ_LEN;
+
+/// `Some(effective)` when a configured budget exceeds what the planner can spend, `None` when it
+/// is within range. Pure, so the arithmetic is checked without a device.
+pub fn budget_beyond_planner(batch_tokens: Option<usize>) -> Option<usize> {
+    batch_tokens
+        .filter(|&n| n > MAX_USEFUL_BATCH_TOKENS)
+        .map(|_| MAX_USEFUL_BATCH_TOKENS)
+}
+
 /// ONNX Runtime intra-op threads per session.
 ///
 /// One is what has always shipped, and it is a policy in both directions: a single-threaded
@@ -395,6 +408,23 @@ pub fn softmax3(logits: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A budget above what the planner can spend is not an error, but it is not the number the
+    /// operator wrote either — the caller announces the effective value, and this pins when.
+    #[test]
+    fn a_budget_beyond_the_planner_reports_its_effective_value() {
+        assert_eq!(budget_beyond_planner(None), None);
+        assert_eq!(budget_beyond_planner(Some(4096)), None, "well inside range");
+        assert_eq!(
+            budget_beyond_planner(Some(MAX_USEFUL_BATCH_TOKENS)),
+            None,
+            "exactly the maximum is not beyond it"
+        );
+        assert_eq!(
+            budget_beyond_planner(Some(MAX_USEFUL_BATCH_TOKENS + 1)),
+            Some(MAX_USEFUL_BATCH_TOKENS)
+        );
+    }
 
     #[test]
     fn plan_batches_covers_every_index_exactly_once() {

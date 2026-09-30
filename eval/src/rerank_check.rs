@@ -8,6 +8,12 @@
 //! config — the reranker has no corpus-side "is it wired for THIS corpus" question the way the
 //! NLI grounding verifier does, so `--model-dir`/`--device`/`--gpu-id`/`--gpu-mem-mb` are
 //! taken directly as flags (mirroring `kbx nli set`'s flag names/shapes).
+//!
+//! `--batch-tokens`/`--intra-threads` join them for the same reason they exist at all: the budget
+//! is part of the SESSION's identity (it is in the model cache key) and a configured one is
+//! validated at load. Probing without the value the corpus sets would report READY for a session
+//! production never builds, and would skip the one check that names a budget the device cannot
+//! take.
 
 use std::path::{Path, PathBuf};
 
@@ -57,9 +63,22 @@ pub fn rerank_check(
     device: Option<String>,
     gpu_id: Option<i32>,
     gpu_mem_mb: Option<usize>,
+    batch_tokens: Option<usize>,
+    intra_threads: Option<usize>,
 ) -> Result<()> {
     println!("engine         = {}", engine_label());
     println!("model_dir      = {}", model_dir.display());
+    // Printed because the budget is part of the session's identity (it is in the model cache key):
+    // a READY verdict is only about the configuration named here, and an operator comparing this
+    // against `[rerank]` needs to see which one was probed.
+    println!(
+        "batch_tokens   = {}",
+        batch_tokens.map_or_else(|| "unset (engine default)".to_string(), |n| n.to_string())
+    );
+    println!(
+        "intra_threads  = {}",
+        intra_threads.map_or_else(|| "unset (engine default)".to_string(), |n| n.to_string())
+    );
 
     #[cfg(any(
         feature = "nli-directml",
@@ -98,8 +117,14 @@ pub fn rerank_check(
         let relevant = "Paris is the capital and most populous city of France.";
         let irrelevant = "Bananas are a good source of potassium.";
 
-        let reranker =
-            glossa_nli::InProcessReranker::load(&model_dir, &ep, gpu_id, gpu_mem_mb, None, None)?;
+        let reranker = glossa_nli::InProcessReranker::load(
+            &model_dir,
+            &ep,
+            gpu_id,
+            gpu_mem_mb,
+            batch_tokens,
+            intra_threads,
+        )?;
         let scores = reranker.rerank(query, &[relevant, irrelevant])?;
         match scores.as_slice() {
             [rel_score, irr_score, ..] => {
@@ -126,8 +151,10 @@ pub fn rerank_check(
     {
         // burn/wgpu engine: the backend selects its own device, so there is no EP to probe —
         // `engine_label()` above already reported which backend is compiled in. `device`/`gpu_id`/
-        // `gpu_mem_mb` are ORT-only knobs and are ignored here.
-        let _ = (&device, gpu_id, gpu_mem_mb);
+        // `gpu_mem_mb` are ORT-only knobs and are ignored here, as are the session budget and
+        // thread count — the burn engines take neither parameter (see the burn arms of
+        // `resolve_reranker` / `resolve_scorer`, which say so at load).
+        let _ = (&device, gpu_id, gpu_mem_mb, batch_tokens, intra_threads);
 
         // Fixed, language-neutral, generic sanity pair — no corpus/gold values (see
         // [[no-corpus-values-in-sop]]): a capital-city fact (relevant) vs. an unrelated fruit fact
@@ -168,7 +195,7 @@ pub fn rerank_check(
         feature = "nli-burn-cpu",
     )))]
     {
-        let _ = (device, gpu_id, gpu_mem_mb);
+        let _ = (device, gpu_id, gpu_mem_mb, batch_tokens, intra_threads);
         println!(
             "=> not ready: reranker not available in this kbx build (the reranker itself is \
              CPU-capable in glossa, but this binary wasn't built with a feature that pulls it \

@@ -138,6 +138,14 @@ pub fn resolve_scorer(cfg: &VerifyConfig) -> Option<Box<dyn nli::NliScorer>> {
         return None;
     }
     let dir = cfg.model_dir.as_ref()?;
+    // See `retrieve::rerank`'s burn arm: the burn engines take no budget/thread parameter, so a
+    // configured one does nothing and must not be swallowed.
+    if crate::retrieve::config::any_compute_knob_set(cfg.batch_tokens, cfg.intra_threads) {
+        eprintln!(
+            "[verify.nli] batch_tokens / intra_threads are not read by the burn engine; \
+             GLOSSA_NLI_BATCH_TOKENS is the only batch control it honours"
+        );
+    }
     match glossa_nli::InProcessBurnNli::load(dir, cfg.entail_index) {
         Ok(s) => Some(Box::new(s)),
         Err(e) => {

@@ -272,6 +272,15 @@ pub fn resolve_reranker(cfg: &RerankConfig) -> Option<Box<dyn Reranker>> {
         return None;
     }
     let dir = cfg.model_dir.as_ref()?;
+    // The burn engines take no budget/thread parameter yet, so a configured one does nothing here.
+    // Say it: the remote path is not the only place these can be set and ignored, and silence in
+    // the second place is the same trap as silence in the first.
+    if crate::retrieve::config::any_compute_knob_set(cfg.batch_tokens, cfg.intra_threads) {
+        eprintln!(
+            "[rerank] batch_tokens / intra_threads are not read by the burn engine; \
+             GLOSSA_NLI_BATCH_TOKENS is the only batch control it honours"
+        );
+    }
     match glossa_nli::InProcessBurnReranker::load(dir) {
         Ok(r) => Some(Box::new(r)),
         Err(e) => {

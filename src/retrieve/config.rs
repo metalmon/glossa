@@ -76,7 +76,16 @@ pub fn compute_knobs_inert(
     batch_tokens: Option<usize>,
     intra_threads: Option<usize>,
 ) -> bool {
-    scorer == Some("http") && (batch_tokens.is_some() || intra_threads.is_some())
+    scorer == Some("http") && any_compute_knob_set(batch_tokens, intra_threads)
+}
+
+/// Whether the operator configured either compute knob at all.
+///
+/// The remote path is not the only one that cannot honour them: the burn engines read neither yet
+/// (they take no such parameter), so an `in_process` burn build must say so too. Silence there
+/// would be the same trap in a second place.
+pub fn any_compute_knob_set(batch_tokens: Option<usize>, intra_threads: Option<usize>) -> bool {
+    batch_tokens.is_some() || intra_threads.is_some()
 }
 
 impl RerankConfig {
@@ -303,6 +312,17 @@ mod tests {
             "in_process is exactly where these work"
         );
         assert!(!compute_knobs_inert(None, Some(4096), None));
+    }
+
+    /// The burn arms need the engine-agnostic question — "did the operator set either of these" —
+    /// because burn ignores them on the `in_process` path too, where `compute_knobs_inert` is
+    /// deliberately false.
+    #[test]
+    fn any_compute_knob_set_is_independent_of_the_scorer() {
+        assert!(any_compute_knob_set(Some(4096), None));
+        assert!(any_compute_knob_set(None, Some(4)));
+        assert!(any_compute_knob_set(Some(4096), Some(4)));
+        assert!(!any_compute_knob_set(None, None));
     }
 
     #[test]

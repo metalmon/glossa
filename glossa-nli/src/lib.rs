@@ -276,16 +276,24 @@ mod ort_engine {
                 batch_tokens,
                 intra_threads,
             )?);
+            // Validate BEFORE publishing to the cache. Publishing first and validating after
+            // leaves a session that cannot run its own budget sitting in the map: this `load`
+            // returns Err and the caller fails open, but the NEXT one is a cache hit — it skips
+            // validation, returns Ok, and OOMs on real work. `resolve_scorer` runs per call, so
+            // "the next one" is the next query.
+            Self {
+                inner: Arc::clone(&built),
+                entail_index,
+            }
+            .validate_budget(batch_tokens)?;
             let mut guard = cache
                 .lock()
                 .map_err(|_| anyhow::anyhow!("nli model cache mutex poisoned"))?;
             let inner = Arc::clone(guard.entry(cache_key).or_insert(built));
-            let handle = Self {
+            Ok(Self {
                 inner,
                 entail_index,
-            };
-            handle.validate_budget(batch_tokens)?;
-            Ok(handle)
+            })
         }
 
         /// See `InProcessReranker::validate_budget` — same contract, and this engine's forward
@@ -294,6 +302,13 @@ mod ort_engine {
             let Some(requested) = batch_tokens else {
                 return Ok(());
             };
+            if let Some(effective) = harness::budget_beyond_planner(batch_tokens) {
+                eprintln!(
+                    "[verify.nli] batch_tokens = {requested} is above the largest batch the \
+                     planner can build ({} rows); it behaves as {effective}",
+                    harness::NLI_BATCH_MAX_ROWS
+                );
+            }
             let rows = (requested / DEFAULT_MAX_SEQ_LEN).clamp(1, harness::NLI_BATCH_MAX_ROWS);
             let n = rows * DEFAULT_MAX_SEQ_LEN;
             self.forward_logits(
@@ -556,13 +571,18 @@ mod ort_engine {
                 batch_tokens,
                 intra_threads,
             )?);
+            // Validate BEFORE publishing to the cache — see `InProcessNli::load`. A session left
+            // in the map after its own budget failed is one the next caller picks up as a cache
+            // hit, skips validation on, and takes into production.
+            Self {
+                inner: Arc::clone(&built),
+            }
+            .validate_budget(batch_tokens)?;
             let mut guard = cache
                 .lock()
                 .map_err(|_| anyhow::anyhow!("rerank model cache mutex poisoned"))?;
             let inner = Arc::clone(guard.entry(cache_key).or_insert(built));
-            let handle = Self { inner };
-            handle.validate_budget(batch_tokens)?;
-            Ok(handle)
+            Ok(Self { inner })
         }
 
         /// Run one synthetic batch at an explicitly CONFIGURED budget, so a size this device
@@ -572,12 +592,23 @@ mod ort_engine {
         /// Only when a budget was configured. The probe allocates a batch of that size, and an ORT
         /// arena never returns a batch's peak, so validating commits that memory for the life of
         /// the process: the right trade for a size about to be used anyway, the wrong one to
-        /// impose on the default path. A cache HIT skips it — the budget is part of the cache key,
-        /// so whoever built that session already validated this exact size.
+        /// impose on the default path. A cache HIT skips it, which is sound ONLY because a session
+        /// reaches the cache after it validates, never before: an entry published first and
+        /// validated second would hand the next caller a session that already failed.
+        ///
+        /// A budget above `NLI_BATCH_MAX_ROWS` full rows is clamped here, because that is the
+        /// largest batch the planner can build — see `warn_if_budget_exceeds_planner`.
         fn validate_budget(&self, batch_tokens: Option<usize>) -> anyhow::Result<()> {
             let Some(requested) = batch_tokens else {
                 return Ok(());
             };
+            if let Some(effective) = harness::budget_beyond_planner(batch_tokens) {
+                eprintln!(
+                    "[rerank] batch_tokens = {requested} is above the largest batch the planner \
+                     can build ({} rows); it behaves as {effective}",
+                    harness::NLI_BATCH_MAX_ROWS
+                );
+            }
             // Clamped to what the planner can actually build, so this never tests a batch shape
             // the serving path would never produce.
             let rows = (requested / DEFAULT_MAX_SEQ_LEN).clamp(1, harness::NLI_BATCH_MAX_ROWS);
@@ -920,8 +951,50 @@ mod ort_engine {
             }
         }
 
-        /// Real-model smoke (env-gated): a relevant passage must outscore an irrelevant one.
-        /// Guards against a mis-served cross-encoder (the score inversion measured on a different
+        /// A budget the device cannot take must fail at LOAD, naming the number the operator
+        /// wrote — "out of memory" without it sends them looking in the wrong file.
+        #[test]
+        fn an_impossible_budget_fails_at_load_naming_itself() {
+            let Ok(dir) = std::env::var("RERANK_MODEL_DIR") else {
+                return;
+            };
+            let huge = 64 * DEFAULT_MAX_SEQ_LEN;
+            let err = InProcessReranker::load(
+                Path::new(&dir),
+                &["cpu".to_string()],
+                None,
+                Some(1), // a 1 MB arena cannot hold a 64-row batch
+                Some(huge),
+                None,
+            )
+            .expect_err("a budget this size must not load")
+            .to_string();
+            assert!(err.contains("batch_tokens"), "{err}");
+            assert!(err.contains(&huge.to_string()), "{err}");
+        }
+
+        /// The defect this pins: publishing to the cache BEFORE validating left a session that had
+        /// already failed sitting in the map, so the second load was a cache hit that skipped
+        /// validation and returned Ok. `resolve_reranker` runs per query, so "the second load" is
+        /// the next search — the first one fails open and every one after it silently arms a
+        /// session that cannot run its own budget.
+        #[test]
+        fn a_failed_budget_does_not_poison_the_cache() {
+            let Ok(dir) = std::env::var("RERANK_MODEL_DIR") else {
+                return;
+            };
+            let args = || (Path::new(&dir), vec!["cpu".to_string()], Some(1usize));
+            let (p, eps, cap) = args();
+            let budget = Some(64 * DEFAULT_MAX_SEQ_LEN);
+            assert!(InProcessReranker::load(p, &eps, None, cap, budget, None).is_err());
+            let (p, eps, cap) = args();
+            assert!(
+                InProcessReranker::load(p, &eps, None, cap, budget, None).is_err(),
+                "a second load with the same failing budget must fail the same way, not hit a \
+                 cached session that never validated"
+            );
+        }
+
         /// Two different budgets must be two different sessions. Sharing them is a live bug the
         /// cache key used to have: a corpus configured for 8192 tokens would silently get 512
         /// because another corpus on the same model dir loaded first.
@@ -968,6 +1041,8 @@ mod ort_engine {
             assert!(Arc::ptr_eq(&small.inner, &again.inner));
         }
 
+        /// Real-model smoke (env-gated): a relevant passage must outscore an irrelevant one.
+        /// Guards against a mis-served cross-encoder (the score inversion measured on a different
         /// serving path). Skips when `RERANK_MODEL_DIR` is unset so CI without the model is green.
         #[test]
         fn reranker_scores_relevant_above_irrelevant() {

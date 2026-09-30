@@ -516,6 +516,15 @@ enum RerankCmd {
         /// the NLI verifier.
         #[arg(long = "gpu-mem-mb")]
         gpu_mem_mb: Option<usize>,
+        /// Per-batch token budget, as `[rerank].batch_tokens` would set it. Pass the value the
+        /// corpus configures: the budget is part of the session's identity, so without it this
+        /// probes a session shape production never builds — and skips the load-time check that
+        /// would name a budget the device cannot take.
+        #[arg(long = "batch-tokens")]
+        batch_tokens: Option<usize>,
+        /// ONNX Runtime intra-op threads, as `[rerank].intra_threads` would set it. Same reason.
+        #[arg(long = "intra-threads")]
+        intra_threads: Option<usize>,
         /// Probe a REMOTE reranker at this base URL instead of a local model dir. Reports
         /// reachability + the inversion guard.
         #[arg(long = "endpoint")]
@@ -960,6 +969,8 @@ fn main() -> Result<()> {
                     device,
                     gpu_id,
                     gpu_mem_mb,
+                    batch_tokens,
+                    intra_threads,
                     endpoint,
                     timeout_ms,
                     api_key,
@@ -987,7 +998,14 @@ fn main() -> Result<()> {
                     );
                 }
             } else if let Some(model_dir) = model_dir {
-                kb_eval::rerank_check::rerank_check(model_dir, device, gpu_id, gpu_mem_mb)
+                kb_eval::rerank_check::rerank_check(
+                    model_dir,
+                    device,
+                    gpu_id,
+                    gpu_mem_mb,
+                    batch_tokens,
+                    intra_threads,
+                )
             } else {
                 anyhow::bail!("pass --model-dir <dir> (local) or --endpoint <url> (remote)")
             }
