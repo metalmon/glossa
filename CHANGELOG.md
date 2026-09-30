@@ -13,6 +13,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - **`kb mcp service` config parity.** `kb mcp service install` accepts the same global `--config` / `--root` / `--state-dir` as a direct `kb mcp`, plus `--vision` / `--dedup`, and bakes them into the service command — so a service is configured exactly like a foreground run.
+- **Multi-backend remote reranker.** `[rerank] scorer = "http"` now interoperates with any of TEI, vLLM, llama.cpp, or our own `kbi` via a new `backend` key (`"tei" | "vllm" | "llamacpp" | "kbi" | "jina" | "cohere"`, default `"kbi"`). You name the server you run; the client sends the right wire shape (TEI `{texts}`+bare array vs Jina/Cohere `{documents}`+`{results}`) and tolerantly parses either response, so operators don't have to know which server speaks which protocol. A `model` key carries the served-model name for backends that need it (vLLM). An unknown backend name fails open to plain BM25 rather than mis-sending. `kbx rerank check --endpoint` gains `--backend` / `--model`. Env `GLOSSA_RERANK_HTTP_BACKEND` / `_MODEL`. (NLI grounding stays TEI/`kbi`-only.)
 
 ## [0.5.2] — 2026-09-30
 

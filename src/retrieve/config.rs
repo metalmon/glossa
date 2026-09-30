@@ -24,6 +24,14 @@ pub struct RerankConfig {
     pub timeout_ms: u64,
     /// Optional Bearer api-key for the remote reranker. Env `GLOSSA_RERANK_HTTP_API_KEY`.
     pub api_key: Option<String>,
+    /// Remote reranker backend (`scorer = "http"`): `tei` | `vllm` | `llamacpp` | `kbi` | `jina` |
+    /// `cohere`. Names the operator's server; selects the wire shape (TEI vs Jina) so they never
+    /// have to know which server speaks which protocol. Default `kbi` (our own inference server).
+    /// Env `GLOSSA_RERANK_HTTP_BACKEND`.
+    pub backend: String,
+    /// Optional served-model name sent to Jina-family backends only (vLLM requires it; llama.cpp
+    /// and kbi ignore it). Env `GLOSSA_RERANK_HTTP_MODEL`.
+    pub model: Option<String>,
 }
 
 impl RerankConfig {
@@ -74,6 +82,18 @@ impl RerankConfig {
             api_key: env_string("GLOSSA_RERANK_HTTP_API_KEY").or_else(|| {
                 ont.as_ref()
                     .and_then(|o| o.rerank_api_key())
+                    .map(str::to_string)
+            }),
+            backend: env_string("GLOSSA_RERANK_HTTP_BACKEND")
+                .or_else(|| {
+                    ont.as_ref()
+                        .and_then(|o| o.rerank_backend())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "kbi".to_string()),
+            model: env_string("GLOSSA_RERANK_HTTP_MODEL").or_else(|| {
+                ont.as_ref()
+                    .and_then(|o| o.rerank_model())
                     .map(str::to_string)
             }),
         }
@@ -136,6 +156,8 @@ mod tests {
         std::env::remove_var("GLOSSA_RERANK_HTTP_ENDPOINT");
         std::env::remove_var("GLOSSA_RERANK_HTTP_TIMEOUT_MS");
         std::env::remove_var("GLOSSA_RERANK_HTTP_API_KEY");
+        std::env::remove_var("GLOSSA_RERANK_HTTP_BACKEND");
+        std::env::remove_var("GLOSSA_RERANK_HTTP_MODEL");
         let dir = tempfile::tempdir().unwrap();
         let g = dir.path().join(".glossa");
         std::fs::create_dir_all(&g).unwrap();
@@ -148,6 +170,30 @@ mod tests {
         assert_eq!(c.scorer.as_deref(), Some("http"));
         assert_eq!(c.endpoint.as_deref(), Some("http://gpu:8080"));
         assert_eq!(c.timeout_ms, 5000);
+        // Backend defaults to our own kbi; model unset.
+        assert_eq!(c.backend, "kbi");
+        assert_eq!(c.model, None);
+    }
+
+    #[test]
+    fn rerank_backend_and_model_round_trip_from_ontology() {
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_RERANK_HTTP_BACKEND");
+        std::env::remove_var("GLOSSA_RERANK_HTTP_MODEL");
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("ontology.toml"),
+            "[rerank]\nenabled=true\nscorer=\"http\"\nendpoint=\"http://vllm:8000\"\n\
+             backend=\"vllm\"\nmodel=\"BAAI/bge-reranker-v2-m3\"\n",
+        )
+        .unwrap();
+        let c = RerankConfig::resolve(&g);
+        assert_eq!(c.backend, "vllm");
+        assert_eq!(c.model.as_deref(), Some("BAAI/bge-reranker-v2-m3"));
     }
 
     #[test]

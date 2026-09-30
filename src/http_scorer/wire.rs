@@ -11,6 +11,45 @@ pub struct RerankRequest {
     pub raw_scores: bool,
 }
 
+/// Jina/Cohere-family rerank request (`{query, documents}`), spoken by vLLM, llama.cpp, Cohere,
+/// and our own `kbi`. `model` is serialized only when set — vLLM requires the served-model name,
+/// llama.cpp and kbi ignore it. `top_n` is intentionally omitted so every input is scored.
+#[derive(Serialize)]
+pub struct JinaRerankRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub query: String,
+    pub documents: Vec<String>,
+}
+
+/// Which reranker wire shape a backend speaks. Operators name their SERVER (`backend = "vllm"`);
+/// this maps that recognizable name to one of the two on-the-wire request/response shapes, so an
+/// operator never has to know that vLLM and llama.cpp share the Jina protocol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RerankWire {
+    /// TEI: request `{query, texts, raw_scores}` → bare `[{index, score}]`.
+    Tei,
+    /// Jina/Cohere: request `{query, documents}` → `{results:[{index, relevance_score}]}`.
+    Jina,
+}
+
+impl RerankWire {
+    /// Map an operator-facing backend name to its wire shape. Known names only — an unknown value
+    /// is an error, so a typo (`"vlm"`) fails loudly instead of silently picking the wrong shape.
+    pub fn from_backend(backend: &str) -> Result<RerankWire> {
+        match backend.trim().to_ascii_lowercase().as_str() {
+            // Our own kbi mirrors the request shape; its tested default path is `texts`+bare, so
+            // `kbi` maps to TEI to keep the default a no-op against the historical client.
+            "tei" | "kbi" => Ok(RerankWire::Tei),
+            "vllm" | "llamacpp" | "jina" | "cohere" => Ok(RerankWire::Jina),
+            other => bail!(
+                "unknown rerank backend {other:?}; expected one of: \
+                 tei, vllm, llamacpp, kbi, jina, cohere"
+            ),
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct PredictRequest {
     pub inputs: Vec<Vec<String>>,
@@ -19,6 +58,8 @@ pub struct PredictRequest {
 #[derive(Deserialize)]
 struct Rank {
     index: usize,
+    /// TEI names it `score`; the Jina family names it `relevance_score`. One field, both keys.
+    #[serde(alias = "relevance_score")]
     score: Option<f32>,
 }
 
@@ -36,6 +77,25 @@ pub fn build_rerank_request(query: &str, passages: &[&str], raw_scores: bool) ->
     }
 }
 
+/// Serialize a rerank request in the shape the chosen backend speaks. `model` is used only by the
+/// Jina family (and only when set); TEI ignores it and always sends `raw_scores: true`.
+pub fn build_rerank_body(
+    wire: RerankWire,
+    query: &str,
+    passages: &[&str],
+    model: Option<&str>,
+) -> Result<String> {
+    let body = match wire {
+        RerankWire::Tei => serde_json::to_string(&build_rerank_request(query, passages, true)),
+        RerankWire::Jina => serde_json::to_string(&JinaRerankRequest {
+            model: model.map(str::to_string),
+            query: query.to_string(),
+            documents: passages.iter().map(|s| s.to_string()).collect(),
+        }),
+    };
+    body.context("serializing rerank request")
+}
+
 pub fn build_predict_request(premise: &str, hypotheses: &[&str]) -> PredictRequest {
     PredictRequest {
         inputs: hypotheses
@@ -45,9 +105,9 @@ pub fn build_predict_request(premise: &str, hypotheses: &[&str]) -> PredictReque
     }
 }
 
-/// TEI bare-array rerank response `[{index,score}]` (sorted by score) → scores in INPUT order.
-pub fn parse_rerank_bare(body: &str, n: usize) -> Result<Vec<f32>> {
-    let ranks: Vec<Rank> = serde_json::from_str(body).context("parsing rerank response")?;
+/// Remap sorted-by-score `(index, score)` ranks back into INPUT order, validating full coverage
+/// and finiteness. Shared by the TEI-only and tolerant parsers.
+fn ranks_to_input_order(ranks: Vec<Rank>, n: usize) -> Result<Vec<f32>> {
     if ranks.len() != n {
         bail!("rerank returned {} scores, expected {n}", ranks.len());
     }
@@ -66,6 +126,31 @@ pub fn parse_rerank_bare(body: &str, n: usize) -> Result<Vec<f32>> {
         bail!("rerank response did not cover every input index");
     }
     Ok(out)
+}
+
+/// TEI bare-array rerank response `[{index,score}]` (sorted by score) → scores in INPUT order.
+/// Strict about the shape; used by the `kbi` server's round-trip test.
+pub fn parse_rerank_bare(body: &str, n: usize) -> Result<Vec<f32>> {
+    let ranks: Vec<Rank> = serde_json::from_str(body).context("parsing rerank response")?;
+    ranks_to_input_order(ranks, n)
+}
+
+/// Tolerant rerank parser for the multi-backend client: accepts BOTH the TEI bare array
+/// `[{index, score}]` and the Jina/Cohere envelope `{results:[{index, relevance_score}]}`, with
+/// either score key (`score` or `relevance_score`). Remaps to INPUT order with the same validation.
+pub fn parse_rerank(body: &str, n: usize) -> Result<Vec<f32>> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum RerankResponse {
+        Wrapped { results: Vec<Rank> },
+        Bare(Vec<Rank>),
+    }
+    let ranks =
+        match serde_json::from_str::<RerankResponse>(body).context("parsing rerank response")? {
+            RerankResponse::Wrapped { results } => results,
+            RerankResponse::Bare(v) => v,
+        };
+    ranks_to_input_order(ranks, n)
 }
 
 /// TEI `/predict` untagged union: single input ⇒ `Vec<Prediction>`, batch ⇒ `Vec<Vec<Prediction>>`.
@@ -152,5 +237,62 @@ mod tests {
         assert!(r.raw_scores);
         let p = build_predict_request("prem", &["h1", "h2"]);
         assert_eq!(p.inputs, vec![vec!["prem", "h1"], vec!["prem", "h2"]]);
+    }
+
+    #[test]
+    fn backend_names_map_to_wire_shapes() {
+        // tei + our own kbi speak the TEI shape (kbi's tested default path); the rest are Jina.
+        for tei in ["tei", "TEI", "kbi"] {
+            assert_eq!(RerankWire::from_backend(tei).unwrap(), RerankWire::Tei);
+        }
+        for jina in ["vllm", "llamacpp", "jina", "cohere"] {
+            assert_eq!(RerankWire::from_backend(jina).unwrap(), RerankWire::Jina);
+        }
+        assert!(RerankWire::from_backend("vlm").is_err());
+    }
+
+    #[test]
+    fn tei_body_sends_texts_jina_body_sends_documents() {
+        let tei = build_rerank_body(RerankWire::Tei, "q", &["a", "b"], None).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&tei).unwrap();
+        assert_eq!(v["texts"], serde_json::json!(["a", "b"]));
+        assert_eq!(v["raw_scores"], serde_json::json!(true));
+        assert!(v.get("documents").is_none());
+
+        let jina = build_rerank_body(RerankWire::Jina, "q", &["a", "b"], None).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&jina).unwrap();
+        assert_eq!(v["documents"], serde_json::json!(["a", "b"]));
+        assert!(v.get("texts").is_none());
+        // model omitted when unset, so llama.cpp/kbi are not sent a bogus name.
+        assert!(v.get("model").is_none());
+    }
+
+    #[test]
+    fn jina_body_includes_model_when_set() {
+        let jina = build_rerank_body(RerankWire::Jina, "q", &["a"], Some("bge-reranker")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&jina).unwrap();
+        assert_eq!(v["model"], serde_json::json!("bge-reranker"));
+    }
+
+    #[test]
+    fn parse_rerank_accepts_jina_envelope_with_relevance_score() {
+        let body = r#"{"results":[{"index":2,"relevance_score":9.0},
+                                   {"index":0,"relevance_score":1.0},
+                                   {"index":1,"relevance_score":-3.0}]}"#;
+        let got = parse_rerank(body, 3).unwrap();
+        assert_eq!(got, vec![1.0, -3.0, 9.0]);
+    }
+
+    #[test]
+    fn parse_rerank_also_accepts_tei_bare_array() {
+        let body = r#"[{"index":1,"score":5.0},{"index":0,"score":2.0}]"#;
+        let got = parse_rerank(body, 2).unwrap();
+        assert_eq!(got, vec![2.0, 5.0]);
+    }
+
+    #[test]
+    fn parse_rerank_wrong_length_is_err() {
+        let body = r#"{"results":[{"index":0,"relevance_score":1.0}]}"#;
+        assert!(parse_rerank(body, 2).is_err());
     }
 }

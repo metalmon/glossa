@@ -516,8 +516,8 @@ enum RerankCmd {
         /// the NLI verifier.
         #[arg(long = "gpu-mem-mb")]
         gpu_mem_mb: Option<usize>,
-        /// Probe a REMOTE reranker (kbi / TEI) at this base URL instead of a local
-        /// model dir. Reports reachability + the inversion guard.
+        /// Probe a REMOTE reranker at this base URL instead of a local model dir. Reports
+        /// reachability + the inversion guard.
         #[arg(long = "endpoint")]
         endpoint: Option<String>,
         /// Remote probe timeout (ms) for `--endpoint`.
@@ -526,6 +526,13 @@ enum RerankCmd {
         /// Optional Bearer api-key for the remote endpoint.
         #[arg(long = "api-key")]
         api_key: Option<String>,
+        /// Remote backend for `--endpoint`: tei | vllm | llamacpp | kbi | jina | cohere. Names the
+        /// server so the probe sends the right wire shape; defaults to our own `kbi`.
+        #[arg(long = "backend", default_value = "kbi")]
+        backend: String,
+        /// Served-model name for a Jina-family `--backend` (e.g. vLLM); omit for kbi / llama.cpp.
+        #[arg(long = "model")]
+        model: Option<String>,
     },
     /// Download the reranker ONNX + tokenizer into a local dir (the dir `[rerank].model_dir` points
     /// at). Simple mode pulls a precision variant from the default reranker repo; `--repo`/`--file`
@@ -956,6 +963,8 @@ fn main() -> Result<()> {
                     endpoint,
                     timeout_ms,
                     api_key,
+                    backend,
+                    model,
                 },
         } => {
             if let Some(endpoint) = endpoint {
@@ -964,13 +973,15 @@ fn main() -> Result<()> {
                 {
                     println!(
                         "{}",
-                        kb_eval::rerank_check::probe_remote_rerank(&endpoint, timeout_ms, api_key)
+                        kb_eval::rerank_check::probe_remote_rerank(
+                            &endpoint, timeout_ms, api_key, &backend, model
+                        )
                     );
                     Ok(())
                 }
                 #[cfg(not(feature = "http-scorer"))]
                 {
-                    let _ = (timeout_ms, api_key);
+                    let _ = (timeout_ms, api_key, backend, model);
                     anyhow::bail!(
                         "rebuild kbx with --features http-scorer to probe a remote endpoint ({endpoint})"
                     );

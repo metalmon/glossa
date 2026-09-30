@@ -286,10 +286,24 @@ pub fn write_rerank_config(
 /// reachability + the inversion guard. Fail-open — a transport error yields an UNREACHABLE line,
 /// never a panic.
 #[cfg(feature = "http-scorer")]
-pub fn probe_remote_rerank(endpoint: &str, timeout_ms: u64, api_key: Option<String>) -> String {
+pub fn probe_remote_rerank(
+    endpoint: &str,
+    timeout_ms: u64,
+    api_key: Option<String>,
+    backend: &str,
+    model: Option<String>,
+) -> String {
     use glossa::retrieve::rerank::Reranker;
-    let r =
-        glossa::http_scorer::client::new_ureq_reranker(endpoint.to_string(), timeout_ms, api_key);
+    let r = match glossa::http_scorer::client::new_ureq_reranker(
+        endpoint.to_string(),
+        timeout_ms,
+        api_key,
+        backend,
+        model,
+    ) {
+        Ok(r) => r,
+        Err(e) => return format!("remote = {backend} @ {endpoint} MISCONFIGURED: {e}"),
+    };
     match r.rerank(
         "What is the capital of France?",
         &[
@@ -298,7 +312,7 @@ pub fn probe_remote_rerank(endpoint: &str, timeout_ms: u64, api_key: Option<Stri
         ],
     ) {
         Ok(s) if s.len() == 2 => format!(
-            "remote = tei @ {endpoint} reachable (relevant {} irrelevant)",
+            "remote = {backend} @ {endpoint} reachable (relevant {} irrelevant)",
             if rerank_check_ok(s[0], s[1]) {
                 ">"
             } else {
@@ -306,10 +320,10 @@ pub fn probe_remote_rerank(endpoint: &str, timeout_ms: u64, api_key: Option<Stri
             }
         ),
         Ok(s) => format!(
-            "remote = tei @ {endpoint} BAD RESPONSE ({} scores, expected 2)",
+            "remote = {backend} @ {endpoint} BAD RESPONSE ({} scores, expected 2)",
             s.len()
         ),
-        Err(e) => format!("remote = tei @ {endpoint} UNREACHABLE: {e}"),
+        Err(e) => format!("remote = {backend} @ {endpoint} UNREACHABLE: {e}"),
     }
 }
 
@@ -320,8 +334,15 @@ mod tests {
     #[cfg(feature = "http-scorer")]
     #[test]
     fn remote_probe_line_reports_unreachable_on_transport_error() {
-        let line = probe_remote_rerank("http://127.0.0.1:1", 200, None);
+        let line = probe_remote_rerank("http://127.0.0.1:1", 200, None, "kbi", None);
         assert!(line.contains("UNREACHABLE") || line.contains("BAD RESPONSE"));
+    }
+
+    #[cfg(feature = "http-scorer")]
+    #[test]
+    fn remote_probe_line_reports_misconfigured_on_unknown_backend() {
+        let line = probe_remote_rerank("http://127.0.0.1:1", 200, None, "vlm", None);
+        assert!(line.contains("MISCONFIGURED"), "line was: {line}");
     }
 
     #[test]

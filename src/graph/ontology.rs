@@ -188,6 +188,13 @@ struct RawRerank {
     /// Optional Bearer api-key for the remote reranker; `None`/absent when unset.
     #[serde(default)]
     api_key: Option<String>,
+    /// Remote reranker backend name (`scorer = "http"`): tei | vllm | llamacpp | kbi | jina |
+    /// cohere. `None`/absent ⇒ engine default (kbi).
+    #[serde(default)]
+    backend: Option<String>,
+    /// Served-model name for Jina-family backends (vLLM); `None`/absent when unset.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// `[verify.combined]` overlay: per-bucket z-score consensus calibration (see
@@ -497,10 +504,13 @@ pub struct Ontology {
     rerank_device: Option<String>,
     rerank_gpu_id: Option<i32>,
     rerank_gpu_mem_mb: Option<usize>,
-    /// Per-corpus `[rerank]` remote scorer keys (`scorer = "http"`): endpoint / timeout / api-key.
+    /// Per-corpus `[rerank]` remote scorer keys (`scorer = "http"`): endpoint / timeout / api-key /
+    /// backend / model.
     rerank_endpoint: Option<String>,
     rerank_timeout_ms: Option<usize>,
     rerank_api_key: Option<String>,
+    rerank_backend: Option<String>,
+    rerank_model: Option<String>,
 }
 
 fn entity_id_prefix(v: &toml::Value) -> Option<String> {
@@ -702,6 +712,8 @@ impl Ontology {
             rerank_endpoint: raw.rerank.endpoint.clone(),
             rerank_timeout_ms: raw.rerank.timeout_ms,
             rerank_api_key: raw.rerank.api_key.clone(),
+            rerank_backend: raw.rerank.backend.clone(),
+            rerank_model: raw.rerank.model.clone(),
             reasoning: raw.reasoning,
             constraint_types: raw
                 .constraint_types
@@ -1090,6 +1102,17 @@ impl Ontology {
     /// Per-corpus `[rerank].api_key` Bearer key for the remote reranker, or `None`.
     pub fn rerank_api_key(&self) -> Option<&str> {
         self.rerank_api_key.as_deref()
+    }
+
+    /// Per-corpus `[rerank].backend` remote reranker backend name (`scorer="http"`), or `None`
+    /// (engine default `kbi`).
+    pub fn rerank_backend(&self) -> Option<&str> {
+        self.rerank_backend.as_deref()
+    }
+
+    /// Per-corpus `[rerank].model` served-model name for Jina-family remote backends, or `None`.
+    pub fn rerank_model(&self) -> Option<&str> {
+        self.rerank_model.as_deref()
     }
 
     /// Per-corpus `[verify.combined.single]` z-score consensus calibration, or `None` when the

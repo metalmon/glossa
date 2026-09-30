@@ -194,7 +194,17 @@ Reorders the fetched candidate pool with a cross-encoder; off unless explicitly 
 | `model_dir` | path | Cross-encoder ONNX model dir (`in_process` only). |
 | `pool_size` | integer · default `50` | How many fetched candidates to rerank; set larger than the search limit to pool deeper. Env `GLOSSA_RERANK_POOL_SIZE`. |
 | `device` / `gpu_id` / `gpu_mem_mb` | as in `[verify.nli]` | Compute device + GPU knobs (`in_process`). Same single-value/auto-CPU-fallback semantics + the same migration from the old `execution_providers`/`ep_*` keys. |
-| `endpoint` / `timeout_ms` / `api_key` | as in `[verify.nli]` | `scorer = "http"` remote `kbi` endpoint, timeout, and optional Bearer key. Env `GLOSSA_RERANK_HTTP_ENDPOINT` / `_TIMEOUT_MS` / `_API_KEY`. |
+| `endpoint` / `timeout_ms` / `api_key` | as in `[verify.nli]` | `scorer = "http"` remote endpoint, timeout, and optional Bearer key. Env `GLOSSA_RERANK_HTTP_ENDPOINT` / `_TIMEOUT_MS` / `_API_KEY`. |
+| `backend` | `"tei"` \| `"vllm"` \| `"llamacpp"` \| `"kbi"` \| `"jina"` \| `"cohere"` · default `"kbi"` | `scorer = "http"` only: which reranker server sits behind `endpoint`. You name the **server you run**; the client picks the wire shape for you — `tei` and our own `kbi` → TEI `{query, texts}` → bare `[{index, score}]`; `vllm` / `llamacpp` / `jina` / `cohere` → Jina/Cohere `{query, documents}` → `{results:[{index, relevance_score}]}`. `jina`/`cohere` are generic aliases for any other Jina-compatible server. A typo is rejected (fail-open to plain BM25), not silently mis-sent. Env `GLOSSA_RERANK_HTTP_BACKEND`. |
+| `model` | string · default unset | `scorer = "http"` Jina-family backends only: the served-model name. **vLLM requires it** (set it to the model you served, e.g. `BAAI/bge-reranker-v2-m3`); `llamacpp`/`kbi` ignore it and it is omitted from the request when unset. Env `GLOSSA_RERANK_HTTP_MODEL`. |
+
+The reranker `/rerank` endpoint is interoperable across servers: point `endpoint` at a
+[Text Embeddings Inference](https://github.com/huggingface/text-embeddings-inference) (`backend = "tei"`),
+[vLLM](https://docs.vllm.ai) (`backend = "vllm"`, plus `model`),
+[llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server --embedding --pooling rank`
+(`backend = "llamacpp"`), or our own `kbi` (`backend = "kbi"`, the default). Response order is
+remapped back to input order regardless of backend. (NLI grounding — `[verify.nli]` — stays on the
+TEI `/predict` or `kbi` protocol; only the reranker is multi-backend.)
 
 ## Eval-harness config (`lab.toml`)
 

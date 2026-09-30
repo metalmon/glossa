@@ -40,6 +40,13 @@ jobs:
       - name: cargo clippy (-D warnings)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # The `http-scorer` clients (HttpNli/HttpReranker + the kbx remote probes) are feature-gated
+      # and off by default, so the workspace clippy above never sees them — lint them explicitly.
+      - name: cargo clippy (http-scorer feature, -D warnings)
+        run: |
+          cargo clippy -p glossa --all-targets --locked --features http-scorer -- -D warnings
+          cargo clippy -p kb-eval --all-targets --locked --features http-scorer -- -D warnings
+
       # Lean release config — NO default features (no notebook, no constraint): exactly what the
       # release binary ships, so nothing outside a feature may hard-depend on notebook/constraint.
       - name: cargo test (glossa, no default features — release config)
@@ -51,8 +58,17 @@ jobs:
       # glossa-nli `compile_error!`. This explicit set is the old `--all-features` minus `nli-burn`
       # (ORT engine + notebook + e2e + lingua + constraint + tls); the burn engine is covered by its
       # own job below. Covers the `tls` handshake/mTLS/reload tests on both matrix OSes (§3b).
+      # NOTE: `http-scorer` is deliberately NOT combined with `tls` here — ureq (http-scorer) links
+      # rustls's `ring` provider while `tls` relies on the `aws-lc-rs` default, and two linked
+      # providers make rustls's no-provider `ServerConfig::builder()` panic. http-scorer is tested
+      # in its own step below (it never ships alongside tls in a release binary today).
       - name: cargo test (glossa, all features except burn engine)
         run: cargo test -p glossa --release --locked --features "notebook e2e lingua constraint nli nli-dynamic tls"
+
+      # `http-scorer` on its own (no tls): the remote NLI/reranker clients (HttpNli/HttpReranker)
+      # and the multi-backend reranker wire. Single rustls provider (ureq's ring), so no clash.
+      - name: cargo test (glossa, http-scorer feature)
+        run: cargo test -p glossa --release --locked --no-default-features --features http-scorer
 
       - name: cargo test (kb-eval)
         run: cargo test -p kb-eval --release --locked
@@ -60,6 +76,11 @@ jobs:
       # kb-eval's opt-in `constraint` feature (CSP / marking-schema tooling + kb-eval-constraint bin).
       - name: cargo test (kb-eval, constraint feature)
         run: cargo test -p kb-eval --release --locked --features constraint
+
+      # kb-eval's `http-scorer` feature: the `kbx rerank/nli check --endpoint` remote probes and the
+      # kbi server's wire round-trip against the shared client parser.
+      - name: cargo test (kb-eval, http-scorer feature)
+        run: cargo test -p kb-eval --release --locked --features http-scorer
 
       # burn/wgpu NLI engine (Plan 4). Mutually exclusive with the ORT engine, so it gets its own
       # jobs on the NdArray CPU backend (no GPU runner — the GPU/Vulkan path is validated locally on

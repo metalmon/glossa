@@ -50,15 +50,19 @@ pub struct HttpReranker {
     pub endpoint: String,
     pub transport: Box<dyn HttpTransport + Send + Sync>,
     pub api_key: Option<String>,
+    /// Wire shape for the operator's backend (TEI vs Jina family).
+    pub wire: wire::RerankWire,
+    /// Served-model name, sent only by the Jina family and only when set (vLLM needs it).
+    pub model: Option<String>,
 }
 impl Reranker for HttpReranker {
     fn rerank(&self, query: &str, passages: &[&str]) -> Result<Vec<f32>> {
-        let body = serde_json::to_string(&wire::build_rerank_request(query, passages, true))?;
+        let body = wire::build_rerank_body(self.wire, query, passages, self.model.as_deref())?;
         let url = join(&self.endpoint, "rerank");
         let resp = self
             .transport
             .post_json(&url, &body, self.api_key.as_deref())?;
-        wire::parse_rerank_bare(&resp, passages.len())
+        wire::parse_rerank(&resp, passages.len())
     }
 }
 
@@ -80,26 +84,35 @@ pub fn new_ureq_nli(
         api_key,
     }
 }
+/// Build a remote reranker for `backend` (`tei` | `vllm` | `llamacpp` | `kbi` | `jina` | `cohere`).
+/// Errors on an unknown backend name so a misconfiguration fails loudly rather than silently
+/// sending the wrong wire shape; callers fail-open to plain BM25 on that error.
 pub fn new_ureq_reranker(
     endpoint: String,
     timeout_ms: u64,
     api_key: Option<String>,
-) -> HttpReranker {
-    HttpReranker {
+    backend: &str,
+    model: Option<String>,
+) -> Result<HttpReranker> {
+    let wire = wire::RerankWire::from_backend(backend)?;
+    Ok(HttpReranker {
         endpoint,
         transport: Box::new(UreqTransport { timeout_ms }),
         api_key,
-    }
+        wire,
+        model,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     struct Mock {
         reply: std::result::Result<String, ()>,
-        seen: Mutex<Option<String>>,
+        /// Shared with the test so it can assert on the exact request body sent.
+        seen: Arc<Mutex<Option<String>>>,
     }
     impl HttpTransport for Mock {
         fn post_json(&self, _url: &str, body: &str, _key: Option<&str>) -> anyhow::Result<String> {
@@ -111,30 +124,68 @@ mod tests {
     }
 
     #[test]
-    fn reranker_maps_scores_to_input_order() {
+    fn tei_reranker_sends_texts_and_maps_bare_array() {
+        let seen = Arc::new(Mutex::new(None));
         let m = Mock {
             reply: Ok(r#"[{"index":1,"score":5.0},{"index":0,"score":2.0}]"#.into()),
-            seen: Mutex::new(None),
+            seen: Arc::clone(&seen),
         };
         let r = HttpReranker {
             endpoint: "http://x/rerank".into(),
             transport: Box::new(m),
             api_key: None,
+            wire: wire::RerankWire::Tei,
+            model: None,
         };
         let out = r.rerank("q", &["a", "b"]).unwrap();
         assert_eq!(out, vec![2.0, 5.0]);
+        let sent: serde_json::Value =
+            serde_json::from_str(seen.lock().unwrap().as_deref().unwrap()).unwrap();
+        assert_eq!(sent["texts"], serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn jina_reranker_sends_documents_and_maps_envelope() {
+        let seen = Arc::new(Mutex::new(None));
+        let m = Mock {
+            reply: Ok(
+                r#"{"results":[{"index":1,"relevance_score":5.0},{"index":0,"relevance_score":2.0}]}"#
+                    .into(),
+            ),
+            seen: Arc::clone(&seen),
+        };
+        let r = HttpReranker {
+            endpoint: "http://x/rerank".into(),
+            transport: Box::new(m),
+            api_key: None,
+            wire: wire::RerankWire::Jina,
+            model: Some("bge-reranker".into()),
+        };
+        let out = r.rerank("q", &["a", "b"]).unwrap();
+        assert_eq!(out, vec![2.0, 5.0]);
+        let sent: serde_json::Value =
+            serde_json::from_str(seen.lock().unwrap().as_deref().unwrap()).unwrap();
+        assert_eq!(sent["documents"], serde_json::json!(["a", "b"]));
+        assert_eq!(sent["model"], serde_json::json!("bge-reranker"));
+    }
+
+    #[test]
+    fn unknown_backend_is_err_at_construction() {
+        assert!(new_ureq_reranker("http://x".into(), 100, None, "vlm", None).is_err());
     }
 
     #[test]
     fn reranker_transport_error_is_err_fail_open() {
         let m = Mock {
             reply: Err(()),
-            seen: Mutex::new(None),
+            seen: Arc::new(Mutex::new(None)),
         };
         let r = HttpReranker {
             endpoint: "http://x/rerank".into(),
             transport: Box::new(m),
             api_key: None,
+            wire: wire::RerankWire::Tei,
+            model: None,
         };
         assert!(r.rerank("q", &["a"]).is_err());
     }
@@ -143,7 +194,7 @@ mod tests {
     fn nli_takes_entail_index() {
         let m = Mock {
             reply: Ok(r#"[[{"label":"e","score":0.9},{"label":"c","score":0.1}]]"#.into()),
-            seen: Mutex::new(None),
+            seen: Arc::new(Mutex::new(None)),
         };
         let n = HttpNli {
             endpoint: "http://x/predict".into(),
