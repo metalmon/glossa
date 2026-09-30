@@ -1590,7 +1590,9 @@ fn main() -> anyhow::Result<()> {
     let Cli {
         root: root_flags,
         state_dir,
-        config: _config, // already consumed via peek_config_flag above; kept for --help/validation
+        // Already consumed via peek_config_flag above (for logging) — kept for --help/validation AND
+        // baked into a `kb mcp service install` command so a service inherits the same --config.
+        config,
         cmd,
     } = Cli::parse();
     // [retrieval]/[limits] have NO parameter path — Spec B/C read them via std::env::var at their
@@ -2095,7 +2097,12 @@ fn main() -> anyhow::Result<()> {
                 );
                 Ok(())
             }
-            Some(McpAction::Service { action }) => glossa::service_cli::run(action),
+            Some(McpAction::Service { action }) => glossa::service_cli::run(
+                action,
+                &root_flags,
+                state_dir.as_deref(),
+                config.as_deref(),
+            ),
             None => {
                 let c = &deploy_cfg;
                 // Corpus (Spec A): fall through to the file's roots/state_dir ONLY when neither

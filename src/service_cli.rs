@@ -5,7 +5,7 @@
 
 use crate::service::{self, ServiceSpec};
 use clap::{Args, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Just a service name — the key for uninstall/start/stop/status. Reused across binaries.
 #[derive(Args, Debug)]
@@ -23,8 +23,9 @@ pub struct InstallOpts {
     /// run several corpora from one `kb` executable.
     #[arg(long = "service-name")]
     pub service_name: String,
-    /// Corpus directory to serve.
-    pub corpus: PathBuf,
+    /// Corpus directory to serve (single-root shorthand). Optional: use the global `--root
+    /// label=path` (repeatable) instead for a multi-root service. Exactly one of the two is required.
+    pub corpus: Option<PathBuf>,
     /// Tool profile: reader | editor | full.
     #[arg(short = 'p', long, default_value = "editor")]
     pub profile: String,
@@ -59,19 +60,52 @@ pub enum ServiceAction {
 }
 
 /// Build the [`ServiceSpec`] for a kb MCP service: transport is ALWAYS `streamable-http`, plus the
-/// profile/bind/allowed-host/vision options and the `--windows-service`/`--service-name` flags the
-/// SCM/systemd-launched process routes on. `program` is the `kb` executable path.
-pub fn kb_service_spec(name: &str, program: PathBuf, opts: &InstallOpts) -> ServiceSpec {
-    let mut args = vec![
-        "mcp".to_string(),
-        opts.corpus.to_string_lossy().into_owned(),
+/// profile/bind/allowed-host/vision/dedup options and the `--windows-service`/`--service-name` flags
+/// the SCM/systemd-launched process routes on. `program` is the `kb` executable path.
+///
+/// `roots`/`state_dir`/`config` are the operator's already-parsed GLOBAL `kb` flags (`--root` /
+/// `--state-dir` / `--config`) — baked into the service's `kb mcp` command so a service is
+/// configured exactly like a direct `kb mcp` invocation. The corpus is supplied by EITHER the
+/// positional `opts.corpus` (single-root shorthand) OR one-or-more `roots` (`--root` outranks the
+/// positional, matching `kb mcp`); exactly one is required.
+pub fn kb_service_spec(
+    name: &str,
+    program: PathBuf,
+    opts: &InstallOpts,
+    roots: &[String],
+    state_dir: Option<&Path>,
+    config: Option<&Path>,
+) -> anyhow::Result<ServiceSpec> {
+    let mut args = vec!["mcp".to_string()];
+    // Corpus: --root entries win over the positional shorthand (mirrors `kb mcp`'s merge_corpus).
+    if !roots.is_empty() {
+        for r in roots {
+            args.push("--root".to_string());
+            args.push(r.clone());
+        }
+    } else if let Some(c) = &opts.corpus {
+        args.push(c.to_string_lossy().into_owned());
+    } else {
+        anyhow::bail!(
+            "provide a <corpus> positional or one or more `--root label=path` for the service"
+        );
+    }
+    if let Some(sd) = state_dir {
+        args.push("--state-dir".to_string());
+        args.push(sd.to_string_lossy().into_owned());
+    }
+    if let Some(cfg) = config {
+        args.push("--config".to_string());
+        args.push(cfg.to_string_lossy().into_owned());
+    }
+    args.extend([
         "--transport".to_string(),
         "streamable-http".to_string(),
         "--profile".to_string(),
         opts.profile.clone(),
         "--bind".to_string(),
         opts.bind.clone(),
-    ];
+    ]);
     for h in &opts.allowed_host {
         args.push("--allowed-host".to_string());
         args.push(h.clone());
@@ -85,24 +119,32 @@ pub fn kb_service_spec(name: &str, program: PathBuf, opts: &InstallOpts) -> Serv
     args.push("--windows-service".to_string());
     args.push("--service-name".to_string());
     args.push(name.to_string());
-    ServiceSpec {
+    Ok(ServiceSpec {
         name: name.to_string(),
         display_name: format!("Glossa MCP ({name})"),
-        description: format!("Glossa MCP server — corpus {}", opts.corpus.display()),
+        description: format!("Glossa MCP server ({name})"),
         program,
         args,
         watchdog: true,
-    }
+    })
 }
 
-/// Dispatch a `kb service` action. `install` builds the spec from the current executable; the rest
-/// act on the named service. Prints a one-line outcome; errors carry the elevation hint.
-pub fn run(action: ServiceAction) -> anyhow::Result<()> {
+/// Dispatch a `kb mcp service` action. `install` builds the spec from the current executable, baking
+/// the operator's global `--root`/`--state-dir`/`--config` (already parsed, passed in); the rest act
+/// on the named service. Prints a one-line outcome; errors carry the elevation hint.
+pub fn run(
+    action: ServiceAction,
+    roots: &[String],
+    state_dir: Option<&Path>,
+    config: Option<&Path>,
+) -> anyhow::Result<()> {
     match action {
         ServiceAction::Install(opts) => {
             let program = std::env::current_exe()
                 .map_err(|e| anyhow::anyhow!("cannot resolve the kb executable path: {e}"))?;
-            service::install(&kb_service_spec(&opts.service_name, program, &opts))?;
+            let spec =
+                kb_service_spec(&opts.service_name, program, &opts, roots, state_dir, config)?;
+            service::install(&spec)?;
             println!("installed service {}", opts.service_name);
         }
         ServiceAction::Uninstall(n) => {
@@ -128,18 +170,30 @@ pub fn run(action: ServiceAction) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn kb_service_spec_bakes_http_transport_and_service_flags() {
-        let opts = InstallOpts {
+    fn opts(corpus: Option<&str>) -> InstallOpts {
+        InstallOpts {
             service_name: "glossa-x".into(),
-            corpus: "C:/kb/base".into(),
+            corpus: corpus.map(PathBuf::from),
             profile: "editor".into(),
             bind: "127.0.0.1:8801".into(),
             allowed_host: vec!["gw.internal".into()],
             vision: true,
             dedup: true,
-        };
-        let s = kb_service_spec("glossa-x", "C:/kb/kb.exe".into(), &opts);
+        }
+    }
+
+    #[test]
+    fn kb_service_spec_bakes_http_transport_and_service_flags() {
+        // Positional corpus, no globals.
+        let s = kb_service_spec(
+            "glossa-x",
+            "C:/kb/kb.exe".into(),
+            &opts(Some("C:/kb/base")),
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(s.name, "glossa-x");
         assert!(s
             .args
@@ -157,5 +211,45 @@ mod tests {
             .args
             .windows(2)
             .any(|w| w == ["--service-name", "glossa-x"]));
+    }
+
+    #[test]
+    fn kb_service_spec_bakes_root_state_dir_and_config_globals() {
+        // No positional corpus — globals supply --root/--state-dir/--config (Change 3).
+        let s = kb_service_spec(
+            "glossa-x",
+            "C:/kb/kb.exe".into(),
+            &opts(None),
+            &["docs=/a".to_string(), "specs=/b".to_string()],
+            Some(Path::new("/var/lib/glossa/x")),
+            Some(Path::new("/etc/glossa/role.toml")),
+        )
+        .unwrap();
+        assert!(s.args.windows(2).any(|w| w == ["--root", "docs=/a"]));
+        assert!(s.args.windows(2).any(|w| w == ["--root", "specs=/b"]));
+        assert!(s
+            .args
+            .windows(2)
+            .any(|w| w == ["--state-dir", "/var/lib/glossa/x"]));
+        assert!(s
+            .args
+            .windows(2)
+            .any(|w| w == ["--config", "/etc/glossa/role.toml"]));
+        // --root supersedes the positional: no bare corpus token after `mcp`.
+        assert_eq!(s.args.first().map(String::as_str), Some("mcp"));
+        assert_eq!(s.args.get(1).map(String::as_str), Some("--root"));
+    }
+
+    #[test]
+    fn kb_service_spec_requires_corpus_or_root() {
+        let e = kb_service_spec(
+            "glossa-x",
+            "C:/kb/kb.exe".into(),
+            &opts(None),
+            &[],
+            None,
+            None,
+        );
+        assert!(e.is_err(), "neither corpus nor --root must error");
     }
 }
