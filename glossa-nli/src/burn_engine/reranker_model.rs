@@ -13,6 +13,14 @@
 //! The classification head is RoBERTa's `dense -> tanh -> out_proj` over the `<s>` (token-0) hidden
 //! state — there is NO BERT-style pooler — and the output is `[batch, num_labels]` (num_labels == 1).
 
+// For burn's `#[derive(Config)]` on `RobertaRerankerConfig`, not for anything written here: with
+// every field positional, the derive emits a `Self { vocab_size: vocab_size, … }` constructor, and
+// clippy ≥ 1.99 lints inside macro expansions and reports it against the field declarations. An
+// `#[allow]` on the struct does not reach it — the generated `impl` is a sibling item — so the
+// allow has to sit at module level. The NLI config in `model.rs` escapes only because its fields
+// carry `#[config(default = …)]` and get a builder instead of that constructor.
+#![allow(clippy::redundant_field_names)]
+
 use burn::nn::{Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig};
 use burn::prelude::*;
 use burn::tensor::activation::tanh;
@@ -26,12 +34,6 @@ use super::model::{
 /// task (Task 4) fills them straight from the model's `config.json`. Real dims for
 /// bge-reranker-v2-m3 en-ru: vocab 61696, hidden 1024, 24 layers, 16 heads, intermediate 4096,
 /// max_pos 8194, pad_token_id 1, ln_eps 1e-5, num_labels 1.
-///
-/// The `allow` is for burn's `Config` derive, not for this file: with every field positional the
-/// derive emits a `Self { vocab_size: vocab_size, … }` constructor, and clippy ≥ 1.99 lints inside
-/// macro expansions and reports it against these declarations. The NLI config next door escapes
-/// only because its fields carry `#[config(default = …)]` and get a builder instead.
-#[allow(clippy::redundant_field_names)]
 #[derive(Config, Debug)]
 pub struct RobertaRerankerConfig {
     pub vocab_size: usize,
