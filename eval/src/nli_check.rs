@@ -527,7 +527,7 @@ pub fn nli_fit(
                 hint.as_deref(),
             )
         );
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(any(
         feature = "nli-directml",

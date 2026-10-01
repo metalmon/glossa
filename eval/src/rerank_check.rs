@@ -300,7 +300,7 @@ pub fn rerank_fit(opts: &FitOpts) -> Result<()> {
                 hint.as_deref(),
             )
         );
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(any(
         feature = "nli-directml",
