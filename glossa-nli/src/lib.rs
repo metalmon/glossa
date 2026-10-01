@@ -355,11 +355,27 @@ mod ort_engine {
         /// The windowing/batching/pooling live in [`harness::entail`]; this engine only supplies
         /// the raw forward (`RawForward` below).
         pub fn entail(&self, premise: &str, hypotheses: &[&str]) -> anyhow::Result<Vec<f32>> {
+            self.entail_with_budget(premise, hypotheses, self.inner.batch_budget_tokens)
+        }
+
+        /// Score `hypotheses` at an EXPLICIT batch budget, ignoring the session's configured one.
+        ///
+        /// The NLI twin of `InProcessReranker::rerank_with_budget`, and it exists for the same two
+        /// reasons: a fit measures one size at a time through the SAME windowing, planning and
+        /// padding path production runs, and a server that fitted itself at startup serves at the
+        /// size it chose without building a second session (every extra session leaves another
+        /// arena resident for the life of the process).
+        pub fn entail_with_budget(
+            &self,
+            premise: &str,
+            hypotheses: &[&str],
+            batch_tokens: usize,
+        ) -> anyhow::Result<Vec<f32>> {
             harness::entail(
                 self,
                 &self.inner.tokenizer,
                 self.inner.max_seq_len,
-                self.inner.batch_budget_tokens,
+                batch_tokens.max(1),
                 self.entail_index,
                 premise,
                 hypotheses,

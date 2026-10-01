@@ -220,9 +220,15 @@ mod server {
             .get("top_n")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize);
+        // A `--fit` run chose a budget for this process and kept it in memory; without one the
+        // session's own configured budget applies, so the unfitted path is byte-identical.
+        let fitted = *st.rerank_fitted.lock().unwrap_or_else(|e| e.into_inner());
         let scored = tokio::task::spawn_blocking(move || {
             let refs: Vec<&str> = passages.iter().map(String::as_str).collect();
-            scorer.rerank(&query, &refs)
+            match fitted {
+                Some(b) => scorer.rerank_with_budget(&query, &refs, b),
+                None => scorer.rerank(&query, &refs),
+            }
         })
         .await;
         match scored {
@@ -291,15 +297,23 @@ mod server {
         // which sends one premise with many hypotheses).
         let premise = pairs.first().map(|(p, _)| p.clone()).unwrap_or_default();
         let same_premise = pairs.iter().all(|(p, _)| *p == premise);
+        let fitted = *st.nli_fitted.lock().unwrap_or_else(|e| e.into_inner());
         let scored = tokio::task::spawn_blocking(move || {
             if same_premise {
                 let hyps: Vec<&str> = pairs.iter().map(|(_, h)| h.as_str()).collect();
-                scorer.entail(&premise, &hyps)
+                match fitted {
+                    Some(b) => scorer.entail_with_budget(&premise, &hyps, b),
+                    None => scorer.entail(&premise, &hyps),
+                }
             } else {
                 // Mixed premises: score each pair individually, concatenate.
                 let mut all = Vec::new();
                 for (p, h) in &pairs {
-                    match scorer.entail(p, &[h.as_str()]) {
+                    let one = match fitted {
+                        Some(b) => scorer.entail_with_budget(p, &[h.as_str()], b),
+                        None => scorer.entail(p, &[h.as_str()]),
+                    };
+                    match one {
                         Ok(mut v) => all.append(&mut v),
                         Err(e) => return Err(e),
                     }

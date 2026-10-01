@@ -45,6 +45,23 @@ pub struct ServeArgs {
     /// GPU arena memory cap (MB) for the provider.
     #[arg(long = "gpu-mem-mb")]
     pub gpu_mem_mb: Option<usize>,
+    /// Per-batch token budget for the reranker session (default: one row per batch). A batch's peak
+    /// stays RESIDENT for the life of the process, so this is a memory decision, not only a speed
+    /// one; `kbi fit` measures what it buys on this device.
+    #[arg(long = "rerank-batch-tokens")]
+    pub rerank_batch_tokens: Option<usize>,
+    /// Per-batch token budget for the NLI session (default: one row per batch). Two engines on one
+    /// card cost the SUM of their batch peaks.
+    #[arg(long = "nli-batch-tokens")]
+    pub nli_batch_tokens: Option<usize>,
+    /// Measure the batch budget on this device at startup — after the socket binds, while /health is
+    /// still 503 — and serve at what it finds. Writes nothing: a server that fits itself must not
+    /// mutate anything on disk. Costs the sweep's own peak, which stays resident.
+    #[arg(long = "fit")]
+    pub fit: bool,
+    /// Ceiling on the startup sweep, in rows per batch.
+    #[arg(long = "fit-max-rows", default_value_t = 32)]
+    pub fit_max_rows: usize,
     /// Bearer api-key required on every request (except /health, /ready).
     #[arg(long = "api-key", env = "GLOSSA_INFER_API_KEY")]
     pub api_key: Option<String>,

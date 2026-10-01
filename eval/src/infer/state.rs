@@ -85,6 +85,11 @@ mod engine {
         pub allowed_host: Vec<String>,
         pub max_concurrency: Option<usize>,
         pub in_flight: AtomicUsize,
+        /// The per-batch token budget a `--fit` run chose for each engine, set once at warm. `None`
+        /// — the normal case — means requests run at the session's own configured budget, so the
+        /// unfitted path is untouched.
+        pub nli_fitted: Mutex<Option<usize>>,
+        pub rerank_fitted: Mutex<Option<usize>>,
         // Resolved dirs + load params, consumed by warm().
         nli_dir: Option<PathBuf>,
         rerank_dir: Option<PathBuf>,
@@ -92,6 +97,10 @@ mod engine {
         providers: Vec<String>,
         gpu_id: Option<i32>,
         gpu_mem_mb: Option<usize>,
+        nli_batch_tokens: Option<usize>,
+        rerank_batch_tokens: Option<usize>,
+        fit: bool,
+        fit_max_rows: usize,
     }
 
     /// Resolve model dirs (downloading a variant if only a repo is given) and return a
@@ -128,12 +137,18 @@ mod engine {
             allowed_host: args.allowed_host.clone(),
             max_concurrency: args.max_concurrency,
             in_flight: AtomicUsize::new(0),
+            nli_fitted: Mutex::new(None),
+            rerank_fitted: Mutex::new(None),
             nli_dir,
             rerank_dir,
             entail_index: args.entail_index,
             providers: glossa::config_util::expand_device(args.device.as_deref()),
             gpu_id: args.gpu_id,
             gpu_mem_mb: args.gpu_mem_mb,
+            nli_batch_tokens: args.nli_batch_tokens,
+            rerank_batch_tokens: args.rerank_batch_tokens,
+            fit: args.fit,
+            fit_max_rows: args.fit_max_rows,
         })
     }
 
@@ -160,7 +175,7 @@ mod engine {
                     &self.providers,
                     self.gpu_id,
                     self.gpu_mem_mb,
-                    None,
+                    self.nli_batch_tokens,
                     None,
                 )?;
                 *self.nli.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(session));
@@ -175,14 +190,103 @@ mod engine {
                     &self.providers,
                     self.gpu_id,
                     self.gpu_mem_mb,
-                    None,
+                    self.rerank_batch_tokens,
                     None,
                 )?;
                 *self.rerank.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(session));
                 *self.rerank_ep.lock().unwrap_or_else(|e| e.into_inner()) = ep;
             }
+            // Both models are loaded by now, which is the only state worth measuring in: residency
+            // is the hazard, so a size that fails here fails for the reason production would see.
+            if self.fit {
+                self.fit_in_place(&crate::fit::SweepOpts {
+                    max_rows: self.fit_max_rows,
+                    seq: glossa_nli::harness::DEFAULT_MAX_SEQ_LEN,
+                    repeats: 3,
+                    tolerance: crate::fit::DEFAULT_TOLERANCE,
+                });
+            }
             self.ready.store(true, Ordering::SeqCst);
             Ok(())
+        }
+
+        /// Measure the batch budget on this device and keep the answer IN MEMORY for this process.
+        /// Writes nothing — a server that fits itself must not mutate anything on disk.
+        ///
+        /// A fit that cannot measure is reported and does not stop the server: the models loaded,
+        /// so the service can serve at its configured budget. Taking a deployment down because a
+        /// diagnostic came back empty would be the worse failure.
+        pub fn fit_in_place(&self, opts: &crate::fit::SweepOpts) {
+            use crate::fit::{budget_tokens, fit_report, select, sweep, NliTarget, RerankTarget};
+
+            let seq = opts.seq;
+            let rerank = self
+                .rerank
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let nli = self.nli.lock().unwrap_or_else(|e| e.into_inner()).clone();
+
+            // Report, then keep the number only when batching actually pays: a few percent for a
+            // batch peak that never leaves the arena is the trade `PAYS_THRESHOLD` exists to refuse,
+            // and `--fit` asking for a measurement is not the operator asking to spend VRAM on noise.
+            let settle = |label: &str,
+                          flag: &str,
+                          outcome: Option<crate::fit::FitOutcome>,
+                          neighbour: Option<(&str, Option<usize>)>,
+                          slot: &Mutex<Option<usize>>| {
+                let hint = outcome.as_ref().map(|o| {
+                    format!(
+                        "kbi {flag} {} — serves at this size without re-measuring",
+                        budget_tokens(o.chosen, seq)
+                    )
+                });
+                eprint!(
+                    "{}",
+                    fit_report(label, seq, outcome.as_ref(), neighbour, hint.as_deref())
+                );
+                if let Some(o) = outcome.filter(|o| o.pays) {
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(budget_tokens(o.chosen, seq));
+                }
+            };
+
+            if let Some(engine) = rerank.as_ref() {
+                let target = RerankTarget {
+                    engine: engine.as_ref(),
+                    seq,
+                };
+                match sweep(&target, opts) {
+                    Ok(samples) => settle(
+                        "reranker",
+                        "--rerank-batch-tokens",
+                        select(&samples, opts.tolerance),
+                        nli.as_ref().map(|_| ("nli gate", self.nli_batch_tokens)),
+                        &self.rerank_fitted,
+                    ),
+                    Err(e) => {
+                        eprintln!("reranker fit failed, serving at the configured budget: {e}")
+                    }
+                }
+            }
+            if let Some(engine) = nli.as_ref() {
+                let target = NliTarget {
+                    engine: engine.as_ref(),
+                    seq,
+                };
+                match sweep(&target, opts) {
+                    Ok(samples) => settle(
+                        "nli gate",
+                        "--nli-batch-tokens",
+                        select(&samples, opts.tolerance),
+                        rerank
+                            .as_ref()
+                            .map(|_| ("reranker", self.rerank_batch_tokens)),
+                        &self.nli_fitted,
+                    ),
+                    Err(e) => eprintln!("nli fit failed, serving at the configured budget: {e}"),
+                }
+            }
         }
     }
 }

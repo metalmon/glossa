@@ -96,6 +96,108 @@ pub fn settled(series: &[f64], tolerance: f64, need: usize) -> bool {
             .all(|v| (v - median).abs() / median <= tolerance)
 }
 
+/// Why a fit must not run here, if it must not. `None` ⇒ measure.
+///
+/// Two refusals, both of them cases where measuring would produce a true number about the wrong
+/// thing: a remote scorer (the batching is the server's, and timing round-trips would describe the
+/// network), and a device that did not actually bind (loading is fail-open, so a configured `cuda`
+/// that fails to register runs on CPU — and a cross-encoder pool on CPU is a thermal hazard as well
+/// as a wrong answer).
+pub fn fit_refusal(scorer: Option<&str>, backend: Option<&str>, ep_bound: bool) -> Option<String> {
+    if scorer == Some("http") {
+        let backend = backend.unwrap_or("remote");
+        return Some(format!(
+            "scorer = \"http\" (backend {backend}): batching belongs to that server, so there is \
+             nothing measurable from this side — a client-side batch_tokens is inert here. Tune it \
+             where it lives (TEI: --max-batch-tokens; vLLM: --max-num-batched-tokens; llama.cpp: \
+             -ub/-b)."
+        ));
+    }
+    if !ep_bound {
+        return Some(
+            "no GPU execution provider is bound: the configured device did not register, and \
+             loading is fail-open, so this session is on CPU. A fit here would time a CPU session \
+             and report it as a GPU one — and a cross-encoder pool on CPU is a thermal hazard. Run \
+             `check` to see which provider actually bound."
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// The token budget that configures a chosen row count: the sweep decides in ROWS, while the knob an
+/// operator writes (`batch_tokens`) is in tokens, and the bridge between them is the row length the
+/// fit measured at. Stated in one place so the two units cannot drift apart.
+pub fn budget_tokens(chosen_rows: usize, seq: usize) -> usize {
+    chosen_rows.saturating_mul(seq).max(1)
+}
+
+/// The operator-facing report. Prints the recommendation for the engine that was fitted AND the
+/// neighbour's configured budget, because two engines on one card cost the SUM of their high-water
+/// marks and nobody should carry away one half of a sum.
+///
+/// `neighbour` is the other engine's name and its currently configured `batch_tokens` (`None` when
+/// it is configured but at the default); `None` for the pair means no neighbour on this device, which
+/// the report says out loud — a single-engine measurement is a different claim.
+pub fn fit_report(
+    engine: &str,
+    seq: usize,
+    outcome: Option<&FitOutcome>,
+    neighbour: Option<(&str, Option<usize>)>,
+    apply_hint: Option<&str>,
+) -> String {
+    let mut out = format!("{engine} fit, {seq}-token rows:\n");
+    match outcome {
+        None => {
+            out.push_str(
+                "  nothing measured — the device refused every batch size, down to a single row\n",
+            );
+            return out;
+        }
+        Some(o) => {
+            let tokens = budget_tokens(o.chosen, seq);
+            out.push_str(&format!(
+                "  best         {} rows, {:.1} rows/s\n",
+                o.best.rows, o.best.rows_per_sec
+            ));
+            out.push_str(&format!(
+                "  recommended  {} rows => batch_tokens = {tokens}\n",
+                o.chosen
+            ));
+            if o.pays {
+                out.push_str(&format!(
+                    "  gain         {:.2}x over one row per batch — batching pays here\n",
+                    o.gain_over_one
+                ));
+            } else {
+                out.push_str(&format!(
+                    "  gain         {:.2}x over one row per batch — batching does NOT pay here, \
+                     and the batch's peak stays resident for the life of the process\n",
+                    o.gain_over_one
+                ));
+            }
+        }
+    }
+    match neighbour {
+        Some((name, Some(tokens))) => out.push_str(&format!(
+            "  neighbour    {name}: batch_tokens = {tokens} — both are resident, so the device \
+             pays the SUM\n"
+        )),
+        Some((name, None)) => out.push_str(&format!(
+            "  neighbour    {name}: batch_tokens unset (one row per batch) — both are resident, so \
+             the device pays the SUM\n"
+        )),
+        None => out.push_str(
+            "  neighbour    none configured on this device — this is a single-engine measurement, \
+             and a second engine would add its own resident peak\n",
+        ),
+    }
+    if let Some(hint) = apply_hint {
+        out.push_str(&format!("  apply        {hint}\n"));
+    }
+    out
+}
+
 /// One thing the fit needs of an engine: score a pool at an exact batch size, with the same
 /// planning and padding the serving path uses. Deliberately not "give me a number" — timing
 /// belongs to the sweep, so both engines and a fake share one measurement loop.
@@ -201,6 +303,41 @@ pub fn sweep(target: &dyn FitTarget, opts: &SweepOpts) -> anyhow::Result<Vec<Sam
 pub struct RerankTarget<'a> {
     pub engine: &'a glossa_nli::InProcessReranker,
     pub seq: usize,
+}
+
+/// The NLI gate as a fit target: one synthetic premise scored against `rows` hypotheses through
+/// `entail_with_budget`, so the measured path is again the serving path.
+///
+/// The premise is sized just under `seq` so the harness keeps it in one window; if a tokenizer
+/// stretches it past the window budget anyway, the harness splits it and every size in the sweep
+/// pays the same multiple, so the shape of the curve — which is all selection reads — is unchanged.
+/// What the number then means is hypotheses per second rather than rows per second.
+#[cfg(any(
+    feature = "nli-directml",
+    feature = "nli-coreml",
+    feature = "nli-cuda",
+    feature = "nli-rocm"
+))]
+pub struct NliTarget<'a> {
+    pub engine: &'a glossa_nli::InProcessNli,
+    pub seq: usize,
+}
+
+#[cfg(any(
+    feature = "nli-directml",
+    feature = "nli-coreml",
+    feature = "nli-cuda",
+    feature = "nli-rocm"
+))]
+impl FitTarget for NliTarget<'_> {
+    fn score_pool(&self, rows: usize) -> anyhow::Result<()> {
+        let premise = "text ".repeat(self.seq.saturating_sub(16).max(1));
+        let hypothesis = "text text text text";
+        let hyps: Vec<&str> = (0..rows).map(|_| hypothesis).collect();
+        self.engine
+            .entail_with_budget(&premise, &hyps, rows * self.seq)
+            .map(|_| ())
+    }
 }
 
 #[cfg(any(
@@ -377,6 +514,77 @@ mod tests {
             }
         )
         .is_err());
+    }
+
+    /// Batching belongs to the server for every remote backend, so measuring round-trips from the
+    /// client would be a true number about the wrong thing.
+    #[test]
+    fn fit_refuses_a_remote_scorer_naming_the_backend() {
+        let why = fit_refusal(Some("http"), Some("vllm"), /*ep_bound=*/ true).unwrap();
+        assert!(why.contains("vllm"), "{why}");
+        assert!(why.contains("http"), "{why}");
+    }
+
+    /// Loading is fail-open: a configured `cuda` that cannot register runs on CPU. Measuring that
+    /// would time a CPU session while reporting a GPU one — and on this machine a cross-encoder
+    /// pool on CPU is a thermal hazard, not just a wrong number.
+    #[test]
+    fn fit_refuses_when_the_provider_did_not_bind() {
+        assert!(fit_refusal(Some("in_process"), None, false).is_some());
+        assert!(
+            fit_refusal(Some("in_process"), None, true).is_none(),
+            "bound GPU: measure"
+        );
+    }
+
+    /// Two numbers, never one: the operator must not take away half of a sum.
+    #[test]
+    fn a_paying_fit_reports_the_recommendation_and_the_neighbour() {
+        let dml = [s(1, 4.2), s(4, 14.6), s(8, 32.9), s(16, 25.9)];
+        let out = select(&dml, DEFAULT_TOLERANCE).unwrap();
+        let text = fit_report(
+            "reranker",
+            512,
+            Some(&out),
+            Some(("nli gate", Some(1024))),
+            Some("kbx rerank set --batch-tokens 4096"),
+        );
+        assert!(
+            text.contains("recommended  8 rows => batch_tokens = 4096"),
+            "{text}"
+        );
+        assert!(text.contains("batching pays here"), "{text}");
+        assert!(text.contains("nli gate: batch_tokens = 1024"), "{text}");
+        assert!(
+            text.contains("kbx rerank set --batch-tokens 4096"),
+            "{text}"
+        );
+    }
+
+    /// The honest negative outcome: a number an operator can act on either way.
+    #[test]
+    fn a_marginal_gain_is_reported_as_not_paying() {
+        let cuda = [s(1, 42.3), s(4, 49.4), s(16, 51.8)];
+        let out = select(&cuda, DEFAULT_TOLERANCE).unwrap();
+        let text = fit_report("reranker", 512, Some(&out), None, None);
+        assert!(text.contains("does NOT pay here"), "{text}");
+        assert!(
+            text.contains("single-engine measurement"),
+            "no neighbour has to be said out loud: {text}"
+        );
+    }
+
+    /// A device that refuses even one row still has to leave the operator with a sentence.
+    #[test]
+    fn nothing_measured_is_said_in_words() {
+        let text = fit_report("nli gate", 512, None, Some(("reranker", None)), None);
+        assert!(text.contains("nothing measured"), "{text}");
+    }
+
+    #[test]
+    fn rows_become_tokens_through_the_measured_row_length() {
+        assert_eq!(budget_tokens(8, 512), 4096);
+        assert_eq!(budget_tokens(0, 512), 1, "never configure a zero budget");
     }
 
     /// The refusal predicate is the whole difference between those two behaviours, and it reads

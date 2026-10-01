@@ -28,11 +28,57 @@ use kb_eval::infer::cli::ServeArgs;
 // running the wrong thing.
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
-    /// `kbi service …` — install/manage as an OS service. Absent ⇒ serve with the flags below.
+    /// `kbi service …` / `kbi fit …`. Absent ⇒ serve with the flags below.
     #[command(subcommand)]
-    service: Option<InferServiceAction>,
+    command: Option<Command>,
     #[command(flatten)]
     serve: ServeArgs,
+}
+
+/// The two things `kbi` does besides serve.
+#[cfg(any(
+    feature = "nli-directml",
+    feature = "nli-coreml",
+    feature = "nli-cuda",
+    feature = "nli-rocm"
+))]
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Install/manage `kbi` as an OS service.
+    #[command(subcommand)]
+    Service(InferServiceAction),
+    /// Measure the batch budget this device actually pays for, and print it. Writes nothing — the
+    /// number goes into `--rerank-batch-tokens` / `--nli-batch-tokens`, or into the ontology on the
+    /// `kbx` side.
+    Fit(FitOpts),
+}
+
+/// `kbi fit` — the same sweep `--fit` runs at startup, as a command that prints and exits.
+#[cfg(any(
+    feature = "nli-directml",
+    feature = "nli-coreml",
+    feature = "nli-cuda",
+    feature = "nli-rocm"
+))]
+#[derive(clap::Args)]
+struct FitOpts {
+    /// Model dirs/repos and device flags: the same ones serving takes, so a fit describes the
+    /// deployment it will run under.
+    #[command(flatten)]
+    serve: ServeArgs,
+    /// Ceiling on the sweep, in rows per batch. Load-bearing: the sweep's peak stays resident.
+    #[arg(long = "max-rows", default_value_t = 32)]
+    max_rows: usize,
+    /// Row length to measure at, in tokens (default: the model's max). Fitting at the length a
+    /// corpus actually produces is a different answer.
+    #[arg(long = "seq")]
+    seq: Option<usize>,
+    /// Passes per size; the best reading of each size is kept.
+    #[arg(long = "repeats", default_value_t = 3)]
+    repeats: usize,
+    /// How close to the best a smaller size must be to win it the recommendation.
+    #[arg(long = "tolerance", default_value_t = kb_eval::fit::DEFAULT_TOLERANCE)]
+    tolerance: f64,
 }
 
 #[cfg(any(
@@ -81,8 +127,9 @@ struct InferInstallOpts {
 fn main() -> anyhow::Result<()> {
     use clap::Parser;
     let cli = Cli::parse();
-    match cli.service {
-        Some(action) => run_service(action),
+    match cli.command {
+        Some(Command::Service(action)) => run_service(action),
+        Some(Command::Fit(o)) => run_fit(o),
         None => {
             let args = cli.serve;
             if args.windows_service {
@@ -107,6 +154,30 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
+}
+
+/// Dispatch `kbi fit`: load every configured model — the neighbour included, because residency is
+/// the hazard this measures under — sweep, and print. Binds no socket and writes nothing.
+#[cfg(any(
+    feature = "nli-directml",
+    feature = "nli-coreml",
+    feature = "nli-cuda",
+    feature = "nli-rocm"
+))]
+fn run_fit(o: FitOpts) -> anyhow::Result<()> {
+    let mut args = o.serve.clone();
+    // `warm()` would otherwise run the startup fit with the server's own knobs; here the knobs are
+    // this command's, applied once the models are up.
+    args.fit = false;
+    let state = kb_eval::infer::state::build_state(&args)?;
+    state.warm()?;
+    state.fit_in_place(&kb_eval::fit::SweepOpts {
+        max_rows: o.max_rows,
+        seq: o.seq.unwrap_or(glossa_nli::harness::DEFAULT_MAX_SEQ_LEN),
+        repeats: o.repeats,
+        tolerance: o.tolerance,
+    });
+    Ok(())
 }
 
 /// Dispatch `kbi service <action>`.
@@ -334,18 +405,73 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn bare_flags_serve_and_service_is_the_only_subcommand() {
+    fn bare_flags_serve_and_the_subcommands_are_service_and_fit() {
         // Bare flags => serve (no subcommand), proving serve is the default (decision B).
         let cli = Cli::try_parse_from(["kbi", "--bind", "0.0.0.0:9000"]).unwrap();
-        assert!(cli.service.is_none());
+        assert!(cli.command.is_none());
         assert_eq!(cli.serve.bind, "0.0.0.0:9000");
         // `kbi service status <name>` => the service subcommand.
         let cli = Cli::try_parse_from(["kbi", "service", "status", "svc"]).unwrap();
-        assert!(matches!(cli.service, Some(InferServiceAction::Status(_))));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Service(InferServiceAction::Status(_)))
+        ));
         // Mixing serve flags before the subcommand is REJECTED (args_conflicts_with_subcommands).
         assert!(
             Cli::try_parse_from(["kbi", "--bind", "0.0.0.0:9000", "service", "status", "svc"])
                 .is_err()
+        );
+    }
+
+    /// `fit` takes the serve flags AFTER the verb — before it they conflict with the subcommand —
+    /// plus its own sweep knobs, and leaves the row length unset so it resolves to the model's max
+    /// rather than to a guessed constant.
+    #[test]
+    fn fit_takes_the_serve_flags_after_the_verb_plus_its_own_knobs() {
+        let cli = Cli::try_parse_from([
+            "kbi",
+            "fit",
+            "--rerank-model-dir",
+            "m",
+            "--device",
+            "cuda",
+            "--max-rows",
+            "16",
+            "--repeats",
+            "2",
+        ])
+        .unwrap();
+        let Some(Command::Fit(o)) = cli.command else {
+            panic!("`kbi fit` did not parse as the fit subcommand");
+        };
+        assert_eq!(o.max_rows, 16);
+        assert_eq!(o.repeats, 2);
+        assert!(o.seq.is_none(), "row length resolves at run time");
+        assert_eq!(o.serve.device.as_deref(), Some("cuda"));
+        assert_eq!(o.tolerance, kb_eval::fit::DEFAULT_TOLERANCE);
+    }
+
+    /// The startup form is a serve FLAG, not the verb: `kbi --fit` serves and fits on the way up.
+    #[test]
+    fn the_startup_fit_is_a_serve_flag() {
+        let cli = Cli::try_parse_from([
+            "kbi",
+            "--rerank-model-dir",
+            "m",
+            "--fit",
+            "--fit-max-rows",
+            "8",
+        ])
+        .unwrap();
+        assert!(cli.command.is_none());
+        assert!(cli.serve.fit);
+        assert_eq!(cli.serve.fit_max_rows, 8);
+        assert!(
+            !Cli::try_parse_from(["kbi", "--rerank-model-dir", "m"])
+                .unwrap()
+                .serve
+                .fit,
+            "fitting is opt-in: it costs the sweep's own resident peak"
         );
     }
 }
