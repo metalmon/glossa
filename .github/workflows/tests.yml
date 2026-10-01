@@ -87,6 +87,20 @@ jobs:
       - name: cargo test (kb-eval, http-scorer feature)
         run: cargo test -p kb-eval --release --locked --features http-scorer
 
+      # The execution-provider-gated surface: the kbi server, its CLI, and the fit targets live
+      # behind `nli-directml|coreml|cuda|rocm`, so NOTHING above compiles them and a branch could
+      # merge code that has never been built. `nli-cuda` is ort's `load-dynamic` — nothing is linked
+      # or downloaded at build time, so it builds and its non-model tests run on a plain runner.
+      # ci.yml lints this too, but only on master/main, which is one merge too late.
+      # Linux-only: the gates are not OS-specific.
+      - name: cargo clippy (kb-eval, EP-gated server surface, -D warnings)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy -p kb-eval --features "http-scorer nli-cuda" --all-targets --locked -- -D warnings
+
+      - name: cargo test (kb-eval, EP-gated server surface)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p kb-eval --release --locked --features "http-scorer nli-cuda"
+
       # burn/wgpu NLI engine (Plan 4). Mutually exclusive with the ORT engine, so it gets its own
       # jobs on the NdArray CPU backend (no GPU runner — the GPU/Vulkan path is validated locally on
       # real hardware). Lints + tests the burn engine, then verifies the full glossa/kb-eval wiring
