@@ -16,6 +16,7 @@ pub mod episode;
 pub mod export_tz;
 pub mod fcr;
 pub mod finetune;
+pub mod fit;
 pub mod gepa;
 pub mod gepa_checkpoint;
 pub mod gepa_graph;
