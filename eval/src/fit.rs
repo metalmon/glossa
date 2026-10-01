@@ -489,7 +489,7 @@ mod tests {
             "the last size that worked is kept"
         );
         assert!(
-            t.calls.borrow().iter().any(|&r| r == 8),
+            t.calls.borrow().contains(&8),
             "the sweep has to TRY the next size to learn it is refused"
         );
     }
