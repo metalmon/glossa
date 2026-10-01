@@ -42,6 +42,11 @@ struct Cli {
     feature = "nli-cuda",
     feature = "nli-rocm"
 ))]
+// `Fit` flattens the whole serve-flag struct and `Service` holds a name or two, so the variants are
+// far apart in size. Boxing the big one is what the lint asks for and what clap cannot do — a
+// variant's payload has to implement `Args`, which `Box<FitOpts>` does not — and the cost it is
+// warning about does not exist here: exactly one of these is built, once, at process start.
+#[allow(clippy::large_enum_variant)]
 #[derive(clap::Subcommand)]
 enum Command {
     /// Install/manage `kbi` as an OS service.
