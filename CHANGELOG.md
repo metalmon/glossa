@@ -6,29 +6,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-10-01
+
 ### Added
 
 - **`fit`: measure the batch budget instead of guessing it.** `kbx rerank fit` / `kbx nli fit`, and `kbi fit` / `kbi --fit`, sweep doubling batch sizes on the device that will actually run them and recommend one. The value is not derivable: on one card, one row per batch → eight measured 7.8× on DirectML and 1.22× on CUDA, and both throughput curves are non-monotonic. The sweep settles first (a cold device is ~3× slower than one under sustained load, so an unsettled sweep reports its own ordering as a gradient), and the rule picks the **smallest** size within a tolerance of the best, because an ORT arena never returns a batch's peak — 3% more speed for twice the resident VRAM is a bad trade made silently. The report prints the recommendation **and** the other engine's configured budget, since two engines on one device cost the sum, and says "batching does not pay here" when the gain is small instead of recommending a number anyway. `fit` prints; the new `kbx rerank set --batch-tokens N` / `kbx nli set --batch-tokens N` writes. `kbi --fit` measures at startup, after the socket binds and while `/health` is still 503, and serves at what it found — writing nothing to disk. A fit refuses, naming the reason, on a remote scorer (the batching is that server's) and on a GPU provider that did not really bind (loading is fail-open, so that session is on CPU). `kbx rerank check` / `kbx nli check` now print the current budget and point at `fit`, which is how the option is discoverable without the default taking ~300 MB per engine unasked.
+- **`[retrieval].search_limit`** (env `GLOSSA_SEARCH_LIMIT`): how many hits a `search` that names no `limit` returns — the depth the reader sees, previously a hardcoded per-entry-point number with no way to configure it. An explicit `limit` still wins, and a corpus that sets nothing keeps today's numbers (50 for the agent tool, 100 for `kb search`). `kbx eval fcr` measures at the same depth, so the harness and production stay in step without anyone passing a flag.
+- **`kb mcp service` config parity.** `kb mcp service install` accepts the same global `--config` / `--root` / `--state-dir` as a direct `kb mcp`, plus `--vision` / `--dedup`, and bakes them into the service command — so a service is configured exactly like a foreground run.
+- **Multi-backend remote reranker.** `[rerank] scorer = "http"` now interoperates with any of TEI, vLLM, llama.cpp, or our own `kbi` via a new `backend` key (`"tei" | "vllm" | "llamacpp" | "kbi" | "jina" | "cohere"`, default `"kbi"`). You name the server you run; the client sends the right wire shape (TEI `{texts}`+bare array vs Jina/Cohere `{documents}`+`{results}`) and tolerantly parses either response, so operators don't have to know which server speaks which protocol. A `model` key carries the served-model name for backends that need it (vLLM). An unknown backend name fails open to plain BM25 rather than mis-sending. `kbx rerank check --endpoint` gains `--backend` / `--model`. Env `GLOSSA_RERANK_HTTP_BACKEND` / `_MODEL`. (NLI grounding stays TEI/`kbi`-only.)
 
 ### Changed
 
 - **BREAKING — CLI restructure.** The inference-server binary is renamed **`inference-server` → `kbi`**, and it now serves by default (bare `kbi <flags>`; the `serve` subcommand is gone), with `kbi service …` for install/management. The `kb` service command moves **`kb service` → `kb mcp service`** (the service is specifically the MCP service). Migration for an already-installed inference-server service: uninstall it, redeploy `~/bin` (`kbi` replaces `inference-server`), and reinstall via `kbi service install`.
+- **`kbx eval fcr --k` defaults to the production retrieval depth** (the agent `search` tool's default limit) instead of a hardcoded 20, and the report names where the depth came from. It also warns when `--k >= [rerank].pool_size`, where reranking can only reorder the returned set and therefore cannot move FCR at all.
+- **`GLOSSA_NLI_BATCH_TOKENS` is now read once per session, not per call.** It used to be consulted on every rerank, which looked live but was not: the session underneath had already been built, and the batch budget is part of what defines it. Changing the variable now takes effect on restart. The value an unconfigured deployment gets is unchanged.
 
 ### Fixed
 
 - **A reranker that dies at run time no longer reports success.** `rerank_hits` swallowed every scorer error into a silent fall-back to BM25 order while `RerankInfo.reranked` was set unconditionally, so a build whose cross-encoder cannot execute served plain BM25 and told the trace it had reranked. The fall-back stays (serving must not fail on a dead scorer), but it now carries the cause: stderr names it, the `search` trace records `applied: false` plus the reason, and `kbx eval fcr` reports the run as a rerank FAILURE rather than as "no rerank configured" — the two used to be indistinguishable in a measurement.
-
-### Changed
-
-- **`kbx eval fcr --k` defaults to the production retrieval depth** (the agent `search` tool's default limit) instead of a hardcoded 20, and the report names where the depth came from. It also warns when `--k >= [rerank].pool_size`, where reranking can only reorder the returned set and therefore cannot move FCR at all.
-
-- **`GLOSSA_NLI_BATCH_TOKENS` is now read once per session, not per call.** It used to be consulted on every rerank, which looked live but was not: the session underneath had already been built, and the batch budget is part of what defines it. Changing the variable now takes effect on restart. The value an unconfigured deployment gets is unchanged.
-
-### Added
-
-- **`[retrieval].search_limit`** (env `GLOSSA_SEARCH_LIMIT`): how many hits a `search` that names no `limit` returns — the depth the reader sees, previously a hardcoded per-entry-point number with no way to configure it. An explicit `limit` still wins, and a corpus that sets nothing keeps today's numbers (50 for the agent tool, 100 for `kb search`). `kbx eval fcr` measures at the same depth, so the harness and production stay in step without anyone passing a flag.
-- **`kb mcp service` config parity.** `kb mcp service install` accepts the same global `--config` / `--root` / `--state-dir` as a direct `kb mcp`, plus `--vision` / `--dedup`, and bakes them into the service command — so a service is configured exactly like a foreground run.
-- **Multi-backend remote reranker.** `[rerank] scorer = "http"` now interoperates with any of TEI, vLLM, llama.cpp, or our own `kbi` via a new `backend` key (`"tei" | "vllm" | "llamacpp" | "kbi" | "jina" | "cohere"`, default `"kbi"`). You name the server you run; the client sends the right wire shape (TEI `{texts}`+bare array vs Jina/Cohere `{documents}`+`{results}`) and tolerantly parses either response, so operators don't have to know which server speaks which protocol. A `model` key carries the served-model name for backends that need it (vLLM). An unknown backend name fails open to plain BM25 rather than mis-sending. `kbx rerank check --endpoint` gains `--backend` / `--model`. Env `GLOSSA_RERANK_HTTP_BACKEND` / `_MODEL`. (NLI grounding stays TEI/`kbi`-only.)
 
 ## [0.5.2] — 2026-09-30
 
