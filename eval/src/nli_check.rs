@@ -412,19 +412,27 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
         }
     }
 
+    // The budget belongs in this report for the same reason `rerank check` prints it: it is part of
+    // the session's identity, so a READY verdict is only about the configuration named here. The
+    // pointer at `fit` is the whole discoverability plan — the default stays at one row per batch,
+    // because taking ~300 MB per engine unasked was reverted once already, and the command people
+    // already run is where they learn a larger one is measurable.
+    if facts.scorer.as_deref() == Some("in_process") {
+        println!(
+            "batch_tokens   = {}",
+            cfg.batch_tokens.map_or_else(
+                || "unset (one row per batch)".to_string(),
+                |n| n.to_string()
+            )
+        );
+        println!("               (`kbx nli fit` measures what a larger batch_tokens buys here)");
+    }
+
     let (_, verdict) = nli_verdict(&facts);
     println!("=> {verdict}");
     Ok(())
 }
 
-/// `kbx nli set <path> --model-dir <dir> [--scorer ...] [--entail-index N] [--mode ...]
-/// [--device D] [--gpu-id N] [--gpu-mem-mb N]`: resolve the glossa dir the same way [`nli_check`]
-/// does, then write
-/// `[verify.nli]` into the corpus `ontology.toml` via [`write_nli_config`] and print what was
-/// written + a `kbx nli check` hint. Completes the `download` -> `set` -> `check` workflow so a user
-/// never hand-edits TOML. `device` is written only when given (mirrors
-/// `entail_index`/`mode`/`gpu_id`'s `Option` "only if given" convention).
-#[allow(clippy::too_many_arguments)]
 /// `kbx nli fit` — measure what a larger batch buys for the NLI gate on this device, in the
 /// deployment the corpus describes, and print the budget to configure.
 ///
@@ -536,6 +544,14 @@ pub fn nli_fit(
     }
 }
 
+/// `kbx nli set <path> --model-dir <dir> [--scorer ...] [--entail-index N] [--mode ...]
+/// [--device D] [--gpu-id N] [--gpu-mem-mb N]`: resolve the glossa dir the same way [`nli_check`]
+/// does, then write
+/// `[verify.nli]` into the corpus `ontology.toml` via [`write_nli_config`] and print what was
+/// written + a `kbx nli check` hint. Completes the `download` -> `set` -> `check` workflow so a user
+/// never hand-edits TOML. `device` is written only when given (mirrors
+/// `entail_index`/`mode`/`gpu_id`'s `Option` "only if given" convention).
+#[allow(clippy::too_many_arguments)]
 pub fn nli_set(
     path: Option<PathBuf>,
     model_dir: PathBuf,

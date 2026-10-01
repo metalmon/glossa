@@ -79,6 +79,10 @@ pub fn rerank_check(
         "intra_threads  = {}",
         intra_threads.map_or_else(|| "unset (engine default)".to_string(), |n| n.to_string())
     );
+    // Discoverability instead of a bigger default: taking ~300 MB per engine unasked was reverted
+    // once already, so the knob stays at one row per batch and the command people already run is
+    // where they learn a bigger one is measurable.
+    println!("               (`kbx rerank fit` measures what a larger batch_tokens buys here)");
 
     #[cfg(any(
         feature = "nli-directml",
@@ -207,11 +211,6 @@ pub fn rerank_check(
     Ok(())
 }
 
-/// `kbx rerank set`: write `[rerank]` (model_dir + scorer, + pool_size / device /
-/// gpu_id / gpu_mem_mb when given, + `enabled = true`) into the corpus `ontology.toml` via
-/// [`write_rerank_config`] and print what was written. Completes the `download` -> `set` -> `check`
-/// workflow so a user never hand-edits TOML. Mirrors [`crate::nli_check::nli_set`].
-#[allow(clippy::too_many_arguments)]
 /// Options for [`rerank_fit`] — the sweep knobs plus the four `check` already takes. One struct
 /// because a fit describes the deployment it will run under, and that is more than six parameters.
 pub struct FitOpts {
@@ -318,6 +317,11 @@ pub fn rerank_fit(opts: &FitOpts) -> Result<()> {
     }
 }
 
+/// `kbx rerank set`: write `[rerank]` (model_dir + scorer, + pool_size / device /
+/// gpu_id / gpu_mem_mb when given, + `enabled = true`) into the corpus `ontology.toml` via
+/// [`write_rerank_config`] and print what was written. Completes the `download` -> `set` -> `check`
+/// workflow so a user never hand-edits TOML. Mirrors [`crate::nli_check::nli_set`].
+#[allow(clippy::too_many_arguments)]
 pub fn rerank_set(
     path: Option<PathBuf>,
     model_dir: PathBuf,

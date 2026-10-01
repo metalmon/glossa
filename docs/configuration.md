@@ -212,6 +212,31 @@ the batching and threading belong to that server, and a value set here says so o
 than being silently ignored. `GLOSSA_NLI_BATCH_TOKENS` remains a blunt override that moves BOTH
 engines at once; the per-engine variables above are the sharp ones and win over it.
 
+**Measuring the budget: `kbx rerank fit` / `kbx nli fit`.** The right value is a property of the
+card, the driver and the model, not of glossa — on one 8 GB card, going from one row per batch to
+eight measured **7.8×** on DirectML and **1.22×** on CUDA, and both curves are non-monotonic (CUDA's
+NLI gate reads slower at 16 rows than at 8, and faster again at 32). So instead of a baked constant,
+`fit` measures it where it will run: it waits for the device to stop moving (cold it is ~3× slower
+than under sustained load, and it recovers after idling, so an unsettled sweep reports its own
+ordering as a gradient), sweeps doubling sizes up to `--max-rows`, and recommends **the smallest
+size within `--tolerance` of the best** — not the fastest one, because an arena never gives a peak
+back, so 3% more speed for twice the resident memory is a bad trade made silently. It prints two
+numbers, the recommendation and the other engine's configured budget, since the device pays their
+sum; and when the total gain is small it says batching does not pay here rather than recommending a
+number. `fit` prints, `set --batch-tokens N` writes. `kbi` has the same sweep as `kbi fit`, plus
+`kbi --fit` which measures at startup (after the socket binds, while `/health` is still 503) and
+serves at what it found without writing anything.
+
+What a fit **cannot** do, stated so the number is not over-trusted: it cannot measure its own
+memory (ORT exposes no capacity query — time is measurable in-process, footprint is not, which is
+why `--max-rows` is the operator's cap on what the measurement itself costs); it cannot measure
+contention (the neighbour model is resident but idle, which is not the state a busy deployment is
+in); and it does not transfer to another card, driver, precision or model — which is the reason it
+is a command rather than a default. It refuses rather than guesses in two cases: a remote scorer
+(batching is that server's, so tune it there) and a GPU provider that did not actually bind (loading
+is fail-open, so that session is on CPU — where the answer is known and a cross-encoder pool is a
+thermal hazard).
+
 **All three are read once, when the session loads.** Changing one afterwards does not affect a
 process that is already running — the batch budget is part of the session's identity (it is in the
 model cache key) and the session is built around it, so a value re-read per call would have

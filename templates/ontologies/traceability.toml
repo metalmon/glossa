@@ -105,7 +105,8 @@ closure = [["SATISFIED_BY", "VERIFIED_BY", "VERIFIED_BY"]]
 # rows x longest_row <= batch_tokens. Unset = engine default. Validated at load:
 # a size the device cannot take fails there, naming the number. NOTE it ADDS UP
 # with the other engine's -- an ORT arena never gives a batch's peak back.
-# Env GLOSSA_VERIFY_NLI_BATCH_TOKENS.
+# Env GLOSSA_VERIFY_NLI_BATCH_TOKENS. Measure what a bigger one actually buys on
+# this device with `kbx nli fit` -- it differs ~8x between two providers on one card.
 # batch_tokens = 4096
 # ONNX Runtime intra-op threads for this engine's session (in_process only).
 # Unset = 1. Two engines' counts oversubscribe the same cores additively.
@@ -148,7 +149,8 @@ closure = [["SATISFIED_BY", "VERIFIED_BY", "VERIFIED_BY"]]
 # rows x longest_row <= batch_tokens. Unset = engine default. Validated at load:
 # a size the device cannot take fails there, naming the number. NOTE it ADDS UP
 # with the other engine's -- an ORT arena never gives a batch's peak back.
-# Env GLOSSA_RERANK_BATCH_TOKENS.
+# Env GLOSSA_RERANK_BATCH_TOKENS. Measure what a bigger one actually buys on this
+# device with `kbx rerank fit` -- it differs ~8x between two providers on one card.
 # batch_tokens = 4096
 # ONNX Runtime intra-op threads for this engine's session (in_process only).
 # Unset = 1. Two engines' counts oversubscribe the same cores additively.
