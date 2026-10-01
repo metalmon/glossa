@@ -26,6 +26,12 @@ use super::model::{
 /// task (Task 4) fills them straight from the model's `config.json`. Real dims for
 /// bge-reranker-v2-m3 en-ru: vocab 61696, hidden 1024, 24 layers, 16 heads, intermediate 4096,
 /// max_pos 8194, pad_token_id 1, ln_eps 1e-5, num_labels 1.
+///
+/// The `allow` is for burn's `Config` derive, not for this file: with every field positional the
+/// derive emits a `Self { vocab_size: vocab_size, … }` constructor, and clippy ≥ 1.99 lints inside
+/// macro expansions and reports it against these declarations. The NLI config next door escapes
+/// only because its fields carry `#[config(default = …)]` and get a builder instead.
+#[allow(clippy::redundant_field_names)]
 #[derive(Config, Debug)]
 pub struct RobertaRerankerConfig {
     pub vocab_size: usize,
