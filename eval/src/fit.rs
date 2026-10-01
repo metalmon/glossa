@@ -125,6 +125,25 @@ pub fn fit_refusal(scorer: Option<&str>, backend: Option<&str>, ep_bound: bool) 
     None
 }
 
+/// The row length a fit may actually measure at: the request, capped by what the engine will put
+/// through a session (`engine_max`). Above that the tokenizer truncates, so a sweep "at 1024" would
+/// time 512-token rows and then recommend a budget twice what those rows need — honest about
+/// nothing. `None` ⇒ the engine's maximum.
+pub fn effective_seq(requested: Option<usize>, engine_max: usize) -> usize {
+    requested.unwrap_or(engine_max).clamp(1, engine_max.max(1))
+}
+
+/// A usable tolerance. A negative one puts the floor ABOVE the best sample, leaves the filter empty
+/// and makes `select` return `None` — which the report states as "the device refused every batch
+/// size", a false claim about the hardware produced by a typo in a flag.
+pub fn sanitize_tolerance(requested: f64) -> f64 {
+    if requested.is_finite() {
+        requested.clamp(0.0, 1.0)
+    } else {
+        DEFAULT_TOLERANCE
+    }
+}
+
 /// The token budget that configures a chosen row count: the sweep decides in ROWS, while the knob an
 /// operator writes (`batch_tokens`) is in tokens, and the bridge between them is the row length the
 /// fit measured at. Stated in one place so the two units cannot drift apart.
@@ -145,6 +164,7 @@ pub fn fit_report(
     outcome: Option<&FitOutcome>,
     neighbour: Option<(&str, Option<usize>)>,
     apply_hint: Option<&str>,
+    applied: bool,
 ) -> String {
     let mut out = format!("{engine} fit, {seq}-token rows:\n");
     match outcome {
@@ -192,17 +212,28 @@ pub fn fit_report(
              and a second engine would add its own resident peak\n",
         ),
     }
-    if let Some(hint) = apply_hint {
+    // Whether the number was TAKEN is a different fact from what the number is, and the operator
+    // needs both: a recommendation discarded as not worth the memory must not be followed by a line
+    // implying it is now in force.
+    if applied {
+        out.push_str(
+            "  applied      yes, for THIS process only — nothing written to disk
+",
+        );
+    } else if let Some(hint) = apply_hint {
         out.push_str(&format!("  apply        {hint}\n"));
     }
     out
 }
 
-/// One thing the fit needs of an engine: score a pool at an exact batch size, with the same
-/// planning and padding the serving path uses. Deliberately not "give me a number" — timing
-/// belongs to the sweep, so both engines and a fake share one measurement loop.
+/// One thing the fit needs of an engine: score a pool of `pool_rows` rows in batches of
+/// `batch_rows`, with the same planning and padding the serving path uses. Deliberately not "give me
+/// a number" — timing belongs to the sweep, so both engines and a fake share one measurement loop.
+///
+/// Both counts are passed because the pool is held FIXED across the sweep while the batch size
+/// varies: that is what makes the arms equal work and lets tokenization cancel out of the ratio.
 pub trait FitTarget {
-    fn score_pool(&self, rows: usize) -> anyhow::Result<()>;
+    fn score_pool(&self, batch_rows: usize, pool_rows: usize) -> anyhow::Result<()>;
 }
 
 pub struct SweepOpts {
@@ -222,32 +253,73 @@ pub struct SweepOpts {
 /// Lives here rather than in `glossa-nli` so the sweep — and its tests — build with no engine
 /// feature at all: `glossa-nli` is an optional dependency of this crate.
 fn is_allocation_failure(msg: &str) -> bool {
-    let m = msg.to_ascii_lowercase();
-    [
-        "out of memory",
-        "outofmemory",
-        "failed to allocate",
-        "allocation failed",
-        "memoryallocation",
-        "not enough memory",
-    ]
-    .iter()
-    .any(|needle| m.contains(needle))
+    let lowered = msg.to_ascii_lowercase();
+    // Word sequences, not substrings: providers spell these with spaces, underscores and case
+    // (`CUDA_ERROR_OUT_OF_MEMORY`), and a plain `contains("out of memory")` also fires on innocent
+    // prose like "the layout of memory", which would end a sweep that should have propagated.
+    let words: Vec<&str> = lowered
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    const PHRASES: [&[&str]; 4] = [
+        &["out", "of", "memory"],
+        &["failed", "to", "allocate"],
+        &["allocation", "failed"],
+        &["not", "enough", "memory"],
+    ];
+    if PHRASES
+        .iter()
+        .any(|p| words.windows(p.len()).any(|w| w == *p))
+    {
+        return true;
+    }
+    // Single tokens: the HRESULT by name or by code, and the CUDA enums spelled as one word.
+    words.iter().any(|w| {
+        matches!(
+            *w,
+            "outofmemory" | "cudaerroroutofmemory" | "cudaerrormemoryallocation"
+        ) || w.contains("8007000e")
+    })
 }
 
-/// Settle, then walk doubling sizes, returning one [`Sample`] per size the device accepted.
+/// The middle reading of a set, which is what the protocol specifies per size. Not the best:
+/// run-to-run spread is 0.8-5.1%, the same magnitude as [`DEFAULT_TOLERANCE`], so one lucky reading
+/// at a small size would clear the floor and take the recommendation. Not the mean either — one
+/// contaminated reading (another process took the device) should not move the answer.
+fn median(readings: &mut [f64]) -> f64 {
+    if readings.is_empty() {
+        return 0.0;
+    }
+    readings.sort_by(f64::total_cmp);
+    readings[readings.len() / 2]
+}
+
+/// Settle, then walk doubling batch sizes, returning one [`Sample`] per size the device accepted.
+///
+/// Every arm scores the SAME pool — `opts.max_rows` rows — and only the batch size changes, so each
+/// arm does equal total work. Otherwise a larger batch would generate more load during its own
+/// measurement and raise the device's clock for itself, and the per-arm tokenization cost (which
+/// scales with the pool, not the batch) would not cancel in the 1-row ratio that decides whether
+/// batching pays at all.
 ///
 /// A size the device refuses to allocate ends the sweep with what already worked — an engine that
-/// cannot batch still has to serve. Any other error is a real fault and propagates: retrying it at
-/// a smaller size would turn a broken model into a slow one.
+/// cannot batch still has to serve, including one that cannot manage a single row. Any other error
+/// is a real fault and propagates: retrying it at a smaller size would turn a broken model into a
+/// slow one.
 pub fn sweep(target: &dyn FitTarget, opts: &SweepOpts) -> anyhow::Result<Vec<Sample>> {
+    let pool = opts.max_rows.max(1);
     // Settle first. Without this the sweep measures the device ramping up and reports a gradient
     // that is an artefact of its own ordering.
     let mut series = Vec::new();
     for _ in 0..12 {
         let t0 = std::time::Instant::now();
-        target.score_pool(1)?;
-        series.push(1.0 / t0.elapsed().as_secs_f64().max(f64::EPSILON));
+        match target.score_pool(1, pool) {
+            Ok(()) => series.push(pool as f64 / t0.elapsed().as_secs_f64().max(f64::EPSILON)),
+            // A device that will not take one row at a time has nothing to measure, but it still has
+            // to serve: end the sweep with no samples and let the report say so in words.
+            Err(e) if is_allocation_failure(&e.to_string()) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        }
         if settled(&series, opts.tolerance, 3) {
             break;
         }
@@ -256,16 +328,13 @@ pub fn sweep(target: &dyn FitTarget, opts: &SweepOpts) -> anyhow::Result<Vec<Sam
     let mut out = Vec::new();
     let mut rows = 1usize;
     loop {
-        let mut best_for_size = 0.0f64;
+        let mut readings = Vec::with_capacity(opts.repeats.max(1));
         let mut refused = false;
         for _ in 0..opts.repeats.max(1) {
             let t0 = std::time::Instant::now();
-            match target.score_pool(rows) {
+            match target.score_pool(rows, pool) {
                 Ok(()) => {
-                    let rps = rows as f64 / t0.elapsed().as_secs_f64().max(f64::EPSILON);
-                    // Best of the repeats, not the mean: a slow reading is contamination (another
-                    // process took the device), a fast one cannot be.
-                    best_for_size = best_for_size.max(rps);
+                    readings.push(pool as f64 / t0.elapsed().as_secs_f64().max(f64::EPSILON));
                 }
                 Err(e) if is_allocation_failure(&e.to_string()) => {
                     refused = true;
@@ -279,7 +348,7 @@ pub fn sweep(target: &dyn FitTarget, opts: &SweepOpts) -> anyhow::Result<Vec<Sam
         }
         out.push(Sample {
             rows,
-            rows_per_sec: best_for_size,
+            rows_per_sec: median(&mut readings),
         });
         match next_size(rows, opts.max_rows) {
             Some(n) => rows = n,
@@ -330,12 +399,15 @@ pub struct NliTarget<'a> {
     feature = "nli-rocm"
 ))]
 impl FitTarget for NliTarget<'_> {
-    fn score_pool(&self, rows: usize) -> anyhow::Result<()> {
-        let premise = "text ".repeat(self.seq.saturating_sub(16).max(1));
+    fn score_pool(&self, batch_rows: usize, pool_rows: usize) -> anyhow::Result<()> {
+        // Sized UNDER `seq` so the pair tokenizes to at most `seq` ids and the harness keeps the
+        // premise in one window: a premise that overflows the window is split, and the batch would
+        // then hold a different number of rows than the one being measured.
+        let premise = "text ".repeat(self.seq.saturating_sub(24).max(1));
         let hypothesis = "text text text text";
-        let hyps: Vec<&str> = (0..rows).map(|_| hypothesis).collect();
+        let hyps: Vec<&str> = (0..pool_rows.max(1)).map(|_| hypothesis).collect();
         self.engine
-            .entail_with_budget(&premise, &hyps, rows * self.seq)
+            .entail_with_budget(&premise, &hyps, budget_tokens(batch_rows, self.seq))
             .map(|_| ())
     }
 }
@@ -347,13 +419,15 @@ impl FitTarget for NliTarget<'_> {
     feature = "nli-rocm"
 ))]
 impl FitTarget for RerankTarget<'_> {
-    fn score_pool(&self, rows: usize) -> anyhow::Result<()> {
+    fn score_pool(&self, batch_rows: usize, pool_rows: usize) -> anyhow::Result<()> {
         // A filler word repeated to length: the fit measures shapes, not relevance, and generic
-        // filler keeps corpus text out of a diagnostic.
-        let passage = "text ".repeat(self.seq);
-        let refs: Vec<&str> = (0..rows).map(|_| passage.as_str()).collect();
+        // filler keeps corpus text out of a diagnostic. Sized UNDER `seq` (query + pair overhead
+        // included) so a row never exceeds the length the budget is computed from -- a longer row
+        // silently fits fewer of them per batch than the size being measured.
+        let passage = "text ".repeat(self.seq.saturating_sub(16).max(1));
+        let refs: Vec<&str> = (0..pool_rows.max(1)).map(|_| passage.as_str()).collect();
         self.engine
-            .rerank_with_budget("query", &refs, rows * self.seq)
+            .rerank_with_budget("query", &refs, budget_tokens(batch_rows, self.seq))
             .map(|_| ())
     }
 }
@@ -449,12 +523,12 @@ mod tests {
 
     struct RefusesAbove {
         limit: usize,
-        calls: std::cell::RefCell<Vec<usize>>,
+        calls: std::cell::RefCell<Vec<(usize, usize)>>,
     }
     impl FitTarget for RefusesAbove {
-        fn score_pool(&self, rows: usize) -> anyhow::Result<()> {
-            self.calls.borrow_mut().push(rows);
-            if rows > self.limit {
+        fn score_pool(&self, batch_rows: usize, pool_rows: usize) -> anyhow::Result<()> {
+            self.calls.borrow_mut().push((batch_rows, pool_rows));
+            if batch_rows > self.limit {
                 anyhow::bail!("CUDA failure 2: out of memory");
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -489,8 +563,12 @@ mod tests {
             "the last size that worked is kept"
         );
         assert!(
-            t.calls.borrow().contains(&8),
+            t.calls.borrow().contains(&(8, 64)),
             "the sweep has to TRY the next size to learn it is refused"
+        );
+        assert!(
+            t.calls.borrow().iter().all(|&(_, pool)| pool == 64),
+            "every arm scores the SAME pool, so the arms are equal work"
         );
     }
 
@@ -500,7 +578,7 @@ mod tests {
     fn a_non_allocation_error_propagates() {
         struct Broken;
         impl FitTarget for Broken {
-            fn score_pool(&self, _: usize) -> anyhow::Result<()> {
+            fn score_pool(&self, _: usize, _: usize) -> anyhow::Result<()> {
                 anyhow::bail!("logits extraction: shape mismatch")
             }
         }
@@ -548,6 +626,7 @@ mod tests {
             Some(&out),
             Some(("nli gate", Some(1024))),
             Some("kbx rerank set --batch-tokens 4096"),
+            false,
         );
         assert!(
             text.contains("recommended  8 rows => batch_tokens = 4096"),
@@ -566,7 +645,7 @@ mod tests {
     fn a_marginal_gain_is_reported_as_not_paying() {
         let cuda = [s(1, 42.3), s(4, 49.4), s(16, 51.8)];
         let out = select(&cuda, DEFAULT_TOLERANCE).unwrap();
-        let text = fit_report("reranker", 512, Some(&out), None, None);
+        let text = fit_report("reranker", 512, Some(&out), None, None, false);
         assert!(text.contains("does NOT pay here"), "{text}");
         assert!(
             text.contains("single-engine measurement"),
@@ -577,7 +656,7 @@ mod tests {
     /// A device that refuses even one row still has to leave the operator with a sentence.
     #[test]
     fn nothing_measured_is_said_in_words() {
-        let text = fit_report("nli gate", 512, None, Some(("reranker", None)), None);
+        let text = fit_report("nli gate", 512, None, Some(("reranker", None)), None, false);
         assert!(text.contains("nothing measured"), "{text}");
     }
 
@@ -585,6 +664,100 @@ mod tests {
     fn rows_become_tokens_through_the_measured_row_length() {
         assert_eq!(budget_tokens(8, 512), 4096);
         assert_eq!(budget_tokens(0, 512), 1, "never configure a zero budget");
+    }
+
+    /// A device that will not take even ONE row must still leave a serving process behind: the sweep
+    /// ends with no samples and the report says so, instead of the command failing. Before this the
+    /// settle loop propagated the refusal, and the "nothing measured" line was all but unreachable.
+    #[test]
+    fn a_device_that_refuses_a_single_row_yields_no_samples_not_an_error() {
+        let t = RefusesAbove {
+            limit: 0,
+            calls: Default::default(),
+        };
+        let out = sweep(
+            &t,
+            &SweepOpts {
+                max_rows: 8,
+                seq: 512,
+                repeats: 1,
+                tolerance: 0.05,
+            },
+        )
+        .expect("a device that cannot batch at all is not a command failure");
+        assert!(out.is_empty(), "{out:?}");
+        assert!(
+            select(&out, DEFAULT_TOLERANCE).is_none(),
+            "and selection has nothing to choose from"
+        );
+    }
+
+    /// Per size the protocol takes the MIDDLE reading. Best-of-repeats let one lucky reading at a
+    /// small size clear the tolerance floor and take the recommendation, and the run-to-run spread
+    /// (0.8-5.1%) is the same magnitude as the tolerance itself.
+    #[test]
+    fn a_size_is_scored_by_its_median_reading_not_its_best() {
+        assert_eq!(median(&mut [10.0, 50.0, 12.0]), 12.0);
+        assert_eq!(median(&mut [10.0]), 10.0);
+        assert_eq!(median(&mut []), 0.0, "no readings is not a panic");
+    }
+
+    /// Measuring above the length the engine will actually run is measuring something else: the
+    /// tokenizer truncates, and the recommended budget would then be a multiple of what rows need.
+    #[test]
+    fn the_measured_row_length_is_capped_by_the_engine() {
+        assert_eq!(effective_seq(None, 512), 512, "default is the engine max");
+        assert_eq!(effective_seq(Some(256), 512), 256, "shorter rows are legal");
+        assert_eq!(effective_seq(Some(1024), 512), 512, "longer ones are not");
+        assert_eq!(effective_seq(Some(0), 512), 1);
+    }
+
+    /// A typo in `--tolerance` must not become a false claim about the hardware: a negative
+    /// tolerance puts the floor above every sample, which reads as "the device refused everything".
+    #[test]
+    fn a_nonsense_tolerance_cannot_become_a_claim_about_the_device() {
+        assert_eq!(sanitize_tolerance(-0.1), 0.0);
+        assert_eq!(sanitize_tolerance(2.0), 1.0);
+        assert_eq!(sanitize_tolerance(f64::NAN), DEFAULT_TOLERANCE);
+        assert_eq!(sanitize_tolerance(0.05), 0.05);
+        assert!(
+            select(&[s(1, 10.0), s(2, 20.0)], sanitize_tolerance(-0.1)).is_some(),
+            "a sanitised tolerance always selects something from a non-empty sample"
+        );
+    }
+
+    /// The report has to say whether the number was TAKEN, not only what it is: a recommendation
+    /// discarded as not worth the memory must not be followed by a line implying otherwise.
+    #[test]
+    fn the_report_says_whether_the_budget_was_applied() {
+        let out = select(&[s(1, 4.2), s(8, 32.9)], DEFAULT_TOLERANCE).unwrap();
+        let applied = fit_report(
+            "reranker",
+            512,
+            Some(&out),
+            None,
+            Some("kbi --rerank-batch-tokens 4096"),
+            true,
+        );
+        assert!(applied.contains("applied      yes"), "{applied}");
+        assert!(
+            !applied.contains("apply        kbi"),
+            "an applied budget must not also be advertised as a next step: {applied}"
+        );
+
+        let printed_only = fit_report(
+            "reranker",
+            512,
+            Some(&out),
+            None,
+            Some("kbx rerank set --batch-tokens 4096"),
+            false,
+        );
+        assert!(
+            printed_only.contains("apply        kbx rerank set"),
+            "{printed_only}"
+        );
+        assert!(!printed_only.contains("applied      yes"), "{printed_only}");
     }
 
     /// The refusal predicate is the whole difference between those two behaviours, and it reads
@@ -598,7 +771,19 @@ mod tests {
         assert!(is_allocation_failure(
             "DML allocator: E_OUTOFMEMORY (0x8007000E)"
         ));
+        assert!(
+            is_allocation_failure("CUDA_ERROR_OUT_OF_MEMORY"),
+            "the driver API spells it with underscores"
+        );
+        assert!(
+            is_allocation_failure("HRESULT 0x8007000E"),
+            "DirectML sometimes surfaces only the code"
+        );
         assert!(!is_allocation_failure("logits extraction: shape mismatch"));
+        assert!(
+            !is_allocation_failure("the layout of memory for this tensor is unsupported"),
+            "a substring match on `out of memory` fires here; word matching must not"
+        );
         assert!(
             !is_allocation_failure("no room left in the output tensor"),
             "a substring match on `oom` would fire here; it must not"

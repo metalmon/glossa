@@ -257,7 +257,11 @@ pub fn rerank_fit(opts: &FitOpts) -> Result<()> {
         if let Some(why) = fit_refusal(opts.scorer.as_deref(), opts.backend.as_deref(), ep_bound) {
             anyhow::bail!("refusing to fit: {why}");
         }
-        let seq = opts.seq.unwrap_or(glossa_nli::harness::DEFAULT_MAX_SEQ_LEN);
+        let seq = crate::fit::effective_seq(opts.seq, glossa_nli::harness::DEFAULT_MAX_SEQ_LEN);
+        let tolerance = crate::fit::sanitize_tolerance(opts.tolerance);
+        let max_rows = opts
+            .max_rows
+            .clamp(1, glossa_nli::harness::NLI_BATCH_MAX_ROWS);
         // Loaded at one row per batch: the sweep supplies each size explicitly, so the session's own
         // budget must not be the thing under measurement.
         let engine = glossa_nli::InProcessReranker::load(
@@ -274,13 +278,13 @@ pub fn rerank_fit(opts: &FitOpts) -> Result<()> {
                 seq,
             },
             &SweepOpts {
-                max_rows: opts.max_rows,
+                max_rows,
                 seq,
                 repeats: opts.repeats,
-                tolerance: opts.tolerance,
+                tolerance,
             },
         )?;
-        let outcome = select(&samples, opts.tolerance);
+        let outcome = select(&samples, tolerance);
         let hint = outcome.as_ref().map(|o| {
             format!(
                 "kbx rerank set --model-dir {} --batch-tokens {}",
@@ -298,8 +302,22 @@ pub fn rerank_fit(opts: &FitOpts) -> Result<()> {
                     .as_ref()
                     .map(|(name, tokens)| (name.as_str(), *tokens)),
                 hint.as_deref(),
+                // `kbx` never applies: it prints, and `set` writes.
+                false,
             )
         );
+        // Part 1 added this announcement for exactly this case: a budget above what the planner can
+        // spend behaves as the largest it can, so a recommendation nobody can act on gets a note
+        // rather than silence.
+        if let Some(o) = outcome.as_ref() {
+            let tokens = crate::fit::budget_tokens(o.chosen, seq);
+            if let Some(effective) = glossa_nli::harness::budget_beyond_planner(Some(tokens)) {
+                println!(
+                    "  note         {tokens} exceeds what the planner can spend; it behaves as {effective}"
+                );
+            }
+        }
+
         Ok(())
     }
     #[cfg(not(any(

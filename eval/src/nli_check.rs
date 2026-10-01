@@ -478,7 +478,9 @@ pub fn nli_fit(
         if let Some(why) = fit_refusal(cfg.scorer.as_deref(), None, ep_bound) {
             anyhow::bail!("refusing to fit: {why}");
         }
-        let seq = seq.unwrap_or(glossa_nli::harness::DEFAULT_MAX_SEQ_LEN);
+        let seq = crate::fit::effective_seq(seq, glossa_nli::harness::DEFAULT_MAX_SEQ_LEN);
+        let tolerance = crate::fit::sanitize_tolerance(tolerance);
+        let max_rows = max_rows.clamp(1, glossa_nli::harness::NLI_BATCH_MAX_ROWS);
         // One row per batch at load: the sweep hands each size in explicitly.
         let engine = glossa_nli::InProcessNli::load(
             &model_dir,
@@ -525,8 +527,22 @@ pub fn nli_fit(
                     .as_ref()
                     .map(|(name, tokens)| (name.as_str(), *tokens)),
                 hint.as_deref(),
+                // `kbx` never applies: it prints, and `set` writes.
+                false,
             )
         );
+        // Part 1 added this announcement for exactly this case: a budget above what the planner can
+        // spend behaves as the largest it can, so a recommendation nobody can act on gets a note
+        // rather than silence.
+        if let Some(o) = outcome.as_ref() {
+            let tokens = crate::fit::budget_tokens(o.chosen, seq);
+            if let Some(effective) = glossa_nli::harness::budget_beyond_planner(Some(tokens)) {
+                println!(
+                    "  note         {tokens} exceeds what the planner can spend; it behaves as {effective}"
+                );
+            }
+        }
+
         Ok(())
     }
     #[cfg(not(any(

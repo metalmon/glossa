@@ -200,8 +200,10 @@ mod engine {
             // is the hazard, so a size that fails here fails for the reason production would see.
             if self.fit {
                 self.fit_in_place(&crate::fit::SweepOpts {
-                    max_rows: self.fit_max_rows,
-                    seq: glossa_nli::harness::DEFAULT_MAX_SEQ_LEN,
+                    max_rows: self
+                        .fit_max_rows
+                        .clamp(1, glossa_nli::harness::NLI_BATCH_MAX_ROWS),
+                    seq: crate::fit::effective_seq(None, glossa_nli::harness::DEFAULT_MAX_SEQ_LEN),
                     repeats: 3,
                     tolerance: crate::fit::DEFAULT_TOLERANCE,
                 });
@@ -217,7 +219,9 @@ mod engine {
         /// so the service can serve at its configured budget. Taking a deployment down because a
         /// diagnostic came back empty would be the worse failure.
         pub fn fit_in_place(&self, opts: &crate::fit::SweepOpts) {
-            use crate::fit::{budget_tokens, fit_report, select, sweep, NliTarget, RerankTarget};
+            use crate::fit::{
+                budget_tokens, fit_refusal, fit_report, select, sweep, NliTarget, RerankTarget,
+            };
 
             let seq = opts.seq;
             let rerank = self
@@ -226,15 +230,33 @@ mod engine {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
             let nli = self.nli.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            // The same refusal the `kbx` side applies, from the strict probes `warm` already ran: a
+            // configured provider that did not register leaves `*_ep` empty, and loading is
+            // fail-open, so sweeping anyway would drive 512-token cross-encoder pools through a CPU
+            // session and print the result as a device fit. On CPU the answer is known and the pool
+            // is a thermal hazard, so this refuses in both cases — one line, and no sweep.
+            let rerank_bound = self
+                .rerank_ep
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some();
+            let nli_bound = self
+                .nli_ep
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some();
 
             // Report, then keep the number only when batching actually pays: a few percent for a
             // batch peak that never leaves the arena is the trade `PAYS_THRESHOLD` exists to refuse,
-            // and `--fit` asking for a measurement is not the operator asking to spend VRAM on noise.
+            // and asking for a measurement is not asking to spend VRAM on noise. Either way the
+            // report says which happened, because "what the number is" and "whether it was taken"
+            // are different facts and the operator needs both.
             let settle = |label: &str,
                           flag: &str,
                           outcome: Option<crate::fit::FitOutcome>,
                           neighbour: Option<(&str, Option<usize>)>,
                           slot: &Mutex<Option<usize>>| {
+                let applied = outcome.as_ref().is_some_and(|o| o.pays);
                 let hint = outcome.as_ref().map(|o| {
                     format!(
                         "kbi {flag} {} — serves at this size without re-measuring",
@@ -243,48 +265,94 @@ mod engine {
                 });
                 eprint!(
                     "{}",
-                    fit_report(label, seq, outcome.as_ref(), neighbour, hint.as_deref())
+                    fit_report(
+                        label,
+                        seq,
+                        outcome.as_ref(),
+                        neighbour,
+                        hint.as_deref(),
+                        applied
+                    )
                 );
                 if let Some(o) = outcome.filter(|o| o.pays) {
-                    *slot.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some(budget_tokens(o.chosen, seq));
+                    let tokens = budget_tokens(o.chosen, seq);
+                    // Part 1 added this announcement for exactly this case: a budget larger than the
+                    // planner can spend is silently equivalent to the largest it can, and a number
+                    // nobody can act on should not be printed as a recommendation.
+                    if let Some(effective) =
+                        glossa_nli::harness::budget_beyond_planner(Some(tokens))
+                    {
+                        eprintln!(
+                            "  note         {tokens} exceeds what the planner can spend; it behaves as {effective}"
+                        );
+                    }
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(tokens);
                 }
             };
 
-            if let Some(engine) = rerank.as_ref() {
-                let target = RerankTarget {
-                    engine: engine.as_ref(),
-                    seq,
+            // Read AFTER the reranker sweep so the NLI report names the budget this run just chose,
+            // not the configured one: printing a stale half of a sum is the exact failure the
+            // two-number rule exists to prevent.
+            let configured_or_fitted =
+                |fitted: &Mutex<Option<usize>>, configured: Option<usize>| {
+                    (*fitted.lock().unwrap_or_else(|e| e.into_inner())).or(configured)
                 };
-                match sweep(&target, opts) {
-                    Ok(samples) => settle(
-                        "reranker",
-                        "--rerank-batch-tokens",
-                        select(&samples, opts.tolerance),
-                        nli.as_ref().map(|_| ("nli gate", self.nli_batch_tokens)),
-                        &self.rerank_fitted,
-                    ),
-                    Err(e) => {
-                        eprintln!("reranker fit failed, serving at the configured budget: {e}")
+
+            if let Some(engine) = rerank.as_ref() {
+                if let Some(why) = fit_refusal(Some("in_process"), None, rerank_bound) {
+                    eprintln!("reranker fit skipped: {why}");
+                } else {
+                    let target = RerankTarget {
+                        engine: engine.as_ref(),
+                        seq,
+                    };
+                    match sweep(&target, opts) {
+                        Ok(samples) => settle(
+                            "reranker",
+                            "--rerank-batch-tokens",
+                            select(&samples, opts.tolerance),
+                            nli.as_ref().map(|_| {
+                                (
+                                    "nli gate",
+                                    configured_or_fitted(&self.nli_fitted, self.nli_batch_tokens),
+                                )
+                            }),
+                            &self.rerank_fitted,
+                        ),
+                        Err(e) => {
+                            eprintln!("reranker fit failed, serving at the configured budget: {e}")
+                        }
                     }
                 }
             }
             if let Some(engine) = nli.as_ref() {
-                let target = NliTarget {
-                    engine: engine.as_ref(),
-                    seq,
-                };
-                match sweep(&target, opts) {
-                    Ok(samples) => settle(
-                        "nli gate",
-                        "--nli-batch-tokens",
-                        select(&samples, opts.tolerance),
-                        rerank
-                            .as_ref()
-                            .map(|_| ("reranker", self.rerank_batch_tokens)),
-                        &self.nli_fitted,
-                    ),
-                    Err(e) => eprintln!("nli fit failed, serving at the configured budget: {e}"),
+                if let Some(why) = fit_refusal(Some("in_process"), None, nli_bound) {
+                    eprintln!("nli fit skipped: {why}");
+                } else {
+                    let target = NliTarget {
+                        engine: engine.as_ref(),
+                        seq,
+                    };
+                    match sweep(&target, opts) {
+                        Ok(samples) => settle(
+                            "nli gate",
+                            "--nli-batch-tokens",
+                            select(&samples, opts.tolerance),
+                            rerank.as_ref().map(|_| {
+                                (
+                                    "reranker",
+                                    configured_or_fitted(
+                                        &self.rerank_fitted,
+                                        self.rerank_batch_tokens,
+                                    ),
+                                )
+                            }),
+                            &self.nli_fitted,
+                        ),
+                        Err(e) => {
+                            eprintln!("nli fit failed, serving at the configured budget: {e}")
+                        }
+                    }
                 }
             }
         }

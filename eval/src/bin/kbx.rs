@@ -464,15 +464,19 @@ enum NliCmd {
     Fit {
         /// Corpus root (kb-style PATH resolution, like `check`).
         path: Option<PathBuf>,
-        /// Ceiling on the sweep, in rows per batch. Load-bearing: the sweep's own peak stays
-        /// resident too, so this caps what the measurement itself costs.
+        /// Ceiling on the sweep, in rows per batch (clamped to 64, the most the planner puts in one
+        /// batch). Load-bearing: the sweep's own peak stays resident too, so this caps what the
+        /// measurement itself costs.
         #[arg(long = "max-rows", default_value_t = 32)]
         max_rows: usize,
-        /// Row length to measure at, in tokens (default: the model's max). Fitting at the length a
-        /// corpus actually produces is a different answer.
+        /// Row length to measure at, in tokens. Default AND ceiling: the length the engine runs
+        /// (512) -- above it the tokenizer truncates, so the sweep would time 512-token rows and
+        /// recommend a budget for rows that do not exist. Fitting at the length a corpus actually
+        /// produces is a different, legitimate answer.
         #[arg(long = "seq")]
         seq: Option<usize>,
-        /// Passes per size; the best reading of each size is kept.
+        /// Passes per size; the MIDDLE reading of each size is kept (one lucky pass must not
+        /// take the recommendation).
         #[arg(long = "repeats", default_value_t = 3)]
         repeats: usize,
         /// How close to the best a smaller size must be to win the recommendation.
@@ -648,13 +652,14 @@ enum RerankCmd {
         /// enforces it (CUDA/ROCm; DirectML takes no memory option in this ort build).
         #[arg(long = "gpu-mem-mb")]
         gpu_mem_mb: Option<usize>,
-        /// Ceiling on the sweep, in rows per batch.
+        /// Ceiling on the sweep, in rows per batch (clamped to 64, the planner's own maximum).
         #[arg(long = "max-rows", default_value_t = 32)]
         max_rows: usize,
-        /// Row length to measure at, in tokens (default: the model's max).
+        /// Row length to measure at, in tokens. Default AND ceiling: the length the engine runs (512).
         #[arg(long = "seq")]
         seq: Option<usize>,
-        /// Passes per size; the best reading of each size is kept.
+        /// Passes per size; the MIDDLE reading of each size is kept (one lucky pass must not
+        /// take the recommendation).
         #[arg(long = "repeats", default_value_t = 3)]
         repeats: usize,
         /// How close to the best a smaller size must be to win the recommendation.

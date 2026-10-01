@@ -71,14 +71,18 @@ struct FitOpts {
     /// deployment it will run under.
     #[command(flatten)]
     serve: ServeArgs,
-    /// Ceiling on the sweep, in rows per batch. Load-bearing: the sweep's peak stays resident.
+    /// Ceiling on the sweep, in rows per batch (clamped to 64, the most the planner puts in one
+    /// batch). Load-bearing: the sweep's own peak stays resident.
     #[arg(long = "max-rows", default_value_t = 32)]
     max_rows: usize,
-    /// Row length to measure at, in tokens (default: the model's max). Fitting at the length a
+    /// Row length to measure at, in tokens. Default AND ceiling: the length the engine runs (512)
+    /// -- above it the tokenizer truncates, so a longer sweep would time 512-token rows and then
+    /// recommend a budget for rows that do not exist. Shorter is honest, and fitting at the length a
     /// corpus actually produces is a different answer.
     #[arg(long = "seq")]
     seq: Option<usize>,
-    /// Passes per size; the best reading of each size is kept.
+    /// Passes per size; the MIDDLE reading of each size is kept (one lucky pass must not
+    /// take the recommendation).
     #[arg(long = "repeats", default_value_t = 3)]
     repeats: usize,
     /// How close to the best a smaller size must be to win it the recommendation.
@@ -177,10 +181,12 @@ fn run_fit(o: FitOpts) -> anyhow::Result<()> {
     let state = kb_eval::infer::state::build_state(&args)?;
     state.warm()?;
     state.fit_in_place(&kb_eval::fit::SweepOpts {
-        max_rows: o.max_rows,
-        seq: o.seq.unwrap_or(glossa_nli::harness::DEFAULT_MAX_SEQ_LEN),
+        // Clamped to what the planner can actually build a batch from, and to the row length the
+        // engine will run: a sweep above either measures something the serving path cannot execute.
+        max_rows: o.max_rows.clamp(1, glossa_nli::harness::NLI_BATCH_MAX_ROWS),
+        seq: kb_eval::fit::effective_seq(o.seq, glossa_nli::harness::DEFAULT_MAX_SEQ_LEN),
         repeats: o.repeats,
-        tolerance: o.tolerance,
+        tolerance: kb_eval::fit::sanitize_tolerance(o.tolerance),
     });
     Ok(())
 }
