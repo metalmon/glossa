@@ -455,6 +455,30 @@ enum NliCmd {
         /// Corpus root (kb-style PATH resolution, like other kbx subcommands).
         path: Option<PathBuf>,
     },
+    /// Measure what a larger batch buys the NLI gate on THIS device, under the deployment
+    /// `[verify.nli]` describes, and print the budget to configure. Prints only — `nli set
+    /// --batch-tokens N` writes. Refuses a remote scorer (batching is that server's) and a GPU that
+    /// did not actually bind (that session is on CPU, where a cross-encoder pool is a thermal
+    /// hazard). The chosen batch's peak then stays RESIDENT for the life of every process that
+    /// serves with it, and it ADDS UP with `[rerank].batch_tokens` on one device.
+    Fit {
+        /// Corpus root (kb-style PATH resolution, like `check`).
+        path: Option<PathBuf>,
+        /// Ceiling on the sweep, in rows per batch. Load-bearing: the sweep's own peak stays
+        /// resident too, so this caps what the measurement itself costs.
+        #[arg(long = "max-rows", default_value_t = 32)]
+        max_rows: usize,
+        /// Row length to measure at, in tokens (default: the model's max). Fitting at the length a
+        /// corpus actually produces is a different answer.
+        #[arg(long = "seq")]
+        seq: Option<usize>,
+        /// Passes per size; the best reading of each size is kept.
+        #[arg(long = "repeats", default_value_t = 3)]
+        repeats: usize,
+        /// How close to the best a smaller size must be to win the recommendation.
+        #[arg(long = "tolerance", default_value_t = kb_eval::fit::DEFAULT_TOLERANCE)]
+        tolerance: f64,
+    },
     /// Write `[verify.nli]` (model_dir + scorer, optional entail_index/mode) into the corpus
     /// `ontology.toml`, preserving all other tables/comments. Pairs with `download` + `check`.
     Set {
@@ -487,6 +511,11 @@ enum NliCmd {
         /// ROCm honors only arena growth; DirectML/CoreML expose no memory option in this ort build.
         #[arg(long = "gpu-mem-mb")]
         gpu_mem_mb: Option<usize>,
+        /// Per-batch token budget, written to `[verify.nli].batch_tokens` only if given. This is
+        /// what `nli fit` recommends; the batch's peak stays RESIDENT, and it adds up with
+        /// `[rerank].batch_tokens` on a shared device. Inert under `scorer = "http"`.
+        #[arg(long = "batch-tokens")]
+        batch_tokens: Option<usize>,
     },
 }
 
@@ -593,6 +622,44 @@ enum RerankCmd {
         /// only if given.
         #[arg(long = "gpu-mem-mb")]
         gpu_mem_mb: Option<usize>,
+        /// Per-batch token budget, written to `[rerank].batch_tokens` only if given. This is what
+        /// `rerank fit` recommends; the batch's peak stays RESIDENT, and it adds up with
+        /// `[verify.nli].batch_tokens` on a shared device. Inert under `scorer = "http"`.
+        #[arg(long = "batch-tokens")]
+        batch_tokens: Option<usize>,
+    },
+    /// Measure what a larger batch buys the reranker on THIS device, under the deployment `[rerank]`
+    /// describes, and print the budget to configure. Prints only — `rerank set --batch-tokens N`
+    /// writes. Refuses a remote scorer and a GPU that did not actually bind; see `nli fit`.
+    Fit {
+        /// Corpus root (kb-style PATH resolution, like `set`). Its `[rerank]` supplies the model dir,
+        /// device and scorer unless the flags below override them.
+        path: Option<PathBuf>,
+        /// Local model dir, overriding `[rerank].model_dir`.
+        #[arg(long = "model-dir")]
+        model_dir: Option<PathBuf>,
+        /// Compute device, overriding `[rerank].device`.
+        #[arg(long = "device")]
+        device: Option<String>,
+        /// GPU device id, overriding `[rerank].gpu_id`.
+        #[arg(long = "gpu-id")]
+        gpu_id: Option<i32>,
+        /// GPU arena memory cap in MB, overriding `[rerank].gpu_mem_mb`. Bounds the sweep where ORT
+        /// enforces it (CUDA/ROCm; DirectML takes no memory option in this ort build).
+        #[arg(long = "gpu-mem-mb")]
+        gpu_mem_mb: Option<usize>,
+        /// Ceiling on the sweep, in rows per batch.
+        #[arg(long = "max-rows", default_value_t = 32)]
+        max_rows: usize,
+        /// Row length to measure at, in tokens (default: the model's max).
+        #[arg(long = "seq")]
+        seq: Option<usize>,
+        /// Passes per size; the best reading of each size is kept.
+        #[arg(long = "repeats", default_value_t = 3)]
+        repeats: usize,
+        /// How close to the best a smaller size must be to win the recommendation.
+        #[arg(long = "tolerance", default_value_t = kb_eval::fit::DEFAULT_TOLERANCE)]
+        tolerance: f64,
     },
 }
 
@@ -951,6 +1018,7 @@ fn main() -> Result<()> {
                     device,
                     gpu_id,
                     gpu_mem_mb,
+                    batch_tokens,
                 },
         } => kb_eval::nli_check::nli_set(
             path,
@@ -961,7 +1029,18 @@ fn main() -> Result<()> {
             device,
             gpu_id,
             gpu_mem_mb,
+            batch_tokens,
         ),
+        Cmd::Nli {
+            cmd:
+                NliCmd::Fit {
+                    path,
+                    max_rows,
+                    seq,
+                    repeats,
+                    tolerance,
+                },
+        } => kb_eval::nli_check::nli_fit(path, max_rows, seq, repeats, tolerance),
         Cmd::Rerank {
             cmd:
                 RerankCmd::Check {
@@ -1031,11 +1110,82 @@ fn main() -> Result<()> {
                     device,
                     gpu_id,
                     gpu_mem_mb,
+                    batch_tokens,
                 },
         } => kb_eval::rerank_check::rerank_set(
-            path, model_dir, scorer, pool_size, device, gpu_id, gpu_mem_mb,
+            path,
+            model_dir,
+            scorer,
+            pool_size,
+            device,
+            gpu_id,
+            gpu_mem_mb,
+            batch_tokens,
+        ),
+        Cmd::Rerank {
+            cmd:
+                RerankCmd::Fit {
+                    path,
+                    model_dir,
+                    device,
+                    gpu_id,
+                    gpu_mem_mb,
+                    max_rows,
+                    seq,
+                    repeats,
+                    tolerance,
+                },
+        } => run_rerank_fit(
+            path, model_dir, device, gpu_id, gpu_mem_mb, max_rows, seq, repeats, tolerance,
         ),
     }
+}
+
+/// `kbx rerank fit` — resolve the deployment from `[rerank]` (flags override), hand the neighbour's
+/// configured budget along so the report can print both halves of the sum, and sweep.
+#[allow(clippy::too_many_arguments)]
+fn run_rerank_fit(
+    path: Option<PathBuf>,
+    model_dir: Option<PathBuf>,
+    device: Option<String>,
+    gpu_id: Option<i32>,
+    gpu_mem_mb: Option<usize>,
+    max_rows: usize,
+    seq: Option<usize>,
+    repeats: usize,
+    tolerance: f64,
+) -> anyhow::Result<()> {
+    let kbx_paths = kb_eval::workspace::resolve(path);
+    let glossa_dir = kb_eval::workspace::glossa_dir(&kbx_paths.root);
+    let cfg = glossa::retrieve::config::RerankConfig::resolve(&glossa_dir);
+    let nli = glossa::gate::config::VerifyConfig::resolve(&glossa_dir);
+    let Some(model_dir) = model_dir.or_else(|| cfg.model_dir.clone()) else {
+        anyhow::bail!(
+            "no reranker model dir: pass --model-dir, or run `kbx rerank set` so [rerank].model_dir \
+             names one"
+        );
+    };
+    // The NLI gate is only a neighbour when it takes memory on this device: a remote one does not.
+    let neighbour = (nli.model_dir.is_some() && nli.scorer.as_deref() != Some("http"))
+        .then(|| ("nli gate".to_string(), nli.batch_tokens));
+    kb_eval::rerank_check::rerank_fit(&kb_eval::rerank_check::FitOpts {
+        model_dir,
+        device: device.or_else(|| {
+            cfg.execution_providers
+                .iter()
+                .find(|p| *p != "cpu")
+                .cloned()
+        }),
+        gpu_id: gpu_id.or(cfg.ep_device),
+        gpu_mem_mb: gpu_mem_mb.or(cfg.ep_mem_limit_mb),
+        max_rows,
+        seq,
+        repeats,
+        tolerance,
+        scorer: cfg.scorer.clone(),
+        backend: Some(cfg.backend.clone()),
+        neighbour,
+    })
 }
 
 #[derive(clap::Args)]
@@ -2653,6 +2803,93 @@ mod tests {
                 assert!(pool_size.is_none());
             }
             _ => panic!("expected rerank set"),
+        }
+    }
+
+    /// The fourth verb in each group, and the flag that makes a fit's recommendation writable. Both
+    /// groups get `fit` because both engines take a batch budget and share one device.
+    #[test]
+    fn fit_is_a_verb_in_both_groups_and_set_takes_the_budget() {
+        let cli = Cli::try_parse_from([
+            "kbx",
+            "rerank",
+            "fit",
+            "--model-dir",
+            "m",
+            "--max-rows",
+            "8",
+            "--seq",
+            "256",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Rerank {
+                cmd:
+                    RerankCmd::Fit {
+                        model_dir,
+                        max_rows,
+                        seq,
+                        repeats,
+                        tolerance,
+                        ..
+                    },
+            } => {
+                assert_eq!(model_dir, Some(PathBuf::from("m")));
+                assert_eq!(max_rows, 8);
+                assert_eq!(seq, Some(256));
+                assert_eq!(repeats, 3, "three passes unless asked otherwise");
+                assert_eq!(tolerance, kb_eval::fit::DEFAULT_TOLERANCE);
+            }
+            _ => panic!("expected rerank fit"),
+        }
+
+        // The NLI side is corpus-resolved, so it takes a PATH rather than a model dir.
+        let cli =
+            Cli::try_parse_from(["kbx", "nli", "fit", "corpus", "--tolerance", "0.1"]).unwrap();
+        match cli.cmd {
+            Cmd::Nli {
+                cmd: NliCmd::Fit {
+                    path, tolerance, ..
+                },
+            } => {
+                assert_eq!(path, Some(PathBuf::from("corpus")));
+                assert_eq!(tolerance, 0.1);
+            }
+            _ => panic!("expected nli fit"),
+        }
+
+        // What `fit` recommends, `set` can write — on both sides.
+        let cli = Cli::try_parse_from([
+            "kbx",
+            "rerank",
+            "set",
+            "--model-dir",
+            "m",
+            "--batch-tokens",
+            "4096",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Rerank {
+                cmd: RerankCmd::Set { batch_tokens, .. },
+            } => assert_eq!(batch_tokens, Some(4096)),
+            _ => panic!("expected rerank set"),
+        }
+        let cli = Cli::try_parse_from([
+            "kbx",
+            "nli",
+            "set",
+            "--model-dir",
+            "m",
+            "--batch-tokens",
+            "2048",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Nli {
+                cmd: NliCmd::Set { batch_tokens, .. },
+            } => assert_eq!(batch_tokens, Some(2048)),
+            _ => panic!("expected nli set"),
         }
     }
 

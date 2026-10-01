@@ -425,6 +425,117 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
 /// never hand-edits TOML. `device` is written only when given (mirrors
 /// `entail_index`/`mode`/`gpu_id`'s `Option` "only if given" convention).
 #[allow(clippy::too_many_arguments)]
+/// `kbx nli fit` — measure what a larger batch buys for the NLI gate on this device, in the
+/// deployment the corpus describes, and print the budget to configure.
+///
+/// Resolves `[verify.nli]` rather than taking a model dir, because the gate is a corpus-level
+/// decision and the neighbour whose memory it shares (`[rerank]`) is configured there too. Refuses a
+/// remote scorer and a provider that did not bind, for the reasons in `fit_refusal`.
+pub fn nli_fit(
+    path: Option<PathBuf>,
+    max_rows: usize,
+    seq: Option<usize>,
+    repeats: usize,
+    tolerance: f64,
+) -> Result<()> {
+    let kbx_paths = crate::workspace::resolve(path);
+    let glossa_dir = crate::workspace::glossa_dir(&kbx_paths.root);
+    let cfg = VerifyConfig::resolve(&glossa_dir);
+    let rerank = glossa::retrieve::config::RerankConfig::resolve(&glossa_dir);
+
+    #[cfg(any(
+        feature = "nli-directml",
+        feature = "nli-coreml",
+        feature = "nli-cuda",
+        feature = "nli-rocm",
+    ))]
+    {
+        use crate::fit::{fit_refusal, fit_report, select, sweep, NliTarget, SweepOpts};
+
+        let Some(model_dir) = cfg.model_dir.clone() else {
+            anyhow::bail!(
+                "no [verify.nli].model_dir in this corpus: run `kbx nli download` and `kbx nli set` first"
+            );
+        };
+        let ep_bound = matches!(
+            glossa_nli::probe_gpu_ep(
+                &model_dir,
+                cfg.entail_index,
+                &cfg.execution_providers,
+                cfg.execution_provider_device,
+                cfg.execution_provider_mem_limit_mb,
+            ),
+            Ok(Some(_))
+        );
+        if let Some(why) = fit_refusal(cfg.scorer.as_deref(), None, ep_bound) {
+            anyhow::bail!("refusing to fit: {why}");
+        }
+        let seq = seq.unwrap_or(glossa_nli::harness::DEFAULT_MAX_SEQ_LEN);
+        // One row per batch at load: the sweep hands each size in explicitly.
+        let engine = glossa_nli::InProcessNli::load(
+            &model_dir,
+            cfg.entail_index,
+            &cfg.execution_providers,
+            cfg.execution_provider_device,
+            cfg.execution_provider_mem_limit_mb,
+            None,
+            None,
+        )?;
+        let samples = sweep(
+            &NliTarget {
+                engine: &engine,
+                seq,
+            },
+            &SweepOpts {
+                max_rows,
+                seq,
+                repeats,
+                tolerance,
+            },
+        )?;
+        let outcome = select(&samples, tolerance);
+        let hint = outcome.as_ref().map(|o| {
+            format!(
+                "kbx nli set --model-dir {} --batch-tokens {}",
+                model_dir.display(),
+                crate::fit::budget_tokens(o.chosen, seq)
+            )
+        });
+        // The reranker is the neighbour whether or not it is in process: if it is remote it takes no
+        // VRAM here, which is why an unset budget and an absent engine print differently.
+        let neighbour = rerank
+            .enabled
+            .then(|| ("reranker".to_string(), rerank.batch_tokens))
+            .filter(|_| rerank.scorer.as_deref() != Some("http"));
+        print!(
+            "{}",
+            fit_report(
+                "nli gate",
+                seq,
+                outcome.as_ref(),
+                neighbour
+                    .as_ref()
+                    .map(|(name, tokens)| (name.as_str(), *tokens)),
+                hint.as_deref(),
+            )
+        );
+        return Ok(());
+    }
+    #[cfg(not(any(
+        feature = "nli-directml",
+        feature = "nli-coreml",
+        feature = "nli-cuda",
+        feature = "nli-rocm",
+    )))]
+    {
+        let _ = (cfg, rerank, max_rows, seq, repeats, tolerance);
+        anyhow::bail!(
+            "this build has no GPU execution provider compiled in, and a fit on CPU is refused \
+             (known answer, and a thermal hazard): rebuild with --features nli-cuda / nli-directml"
+        )
+    }
+}
+
 pub fn nli_set(
     path: Option<PathBuf>,
     model_dir: PathBuf,
@@ -434,6 +545,7 @@ pub fn nli_set(
     device: Option<String>,
     gpu_id: Option<i32>,
     gpu_mem_mb: Option<usize>,
+    batch_tokens: Option<usize>,
 ) -> Result<()> {
     let kbx_paths = crate::workspace::resolve(path);
     let glossa_dir = crate::workspace::glossa_dir(&kbx_paths.root);
@@ -446,6 +558,7 @@ pub fn nli_set(
         device.as_deref(),
         gpu_id,
         gpu_mem_mb,
+        batch_tokens,
     )?;
 
     let ontology_path = glossa_dir.join("ontology.toml");
@@ -491,6 +604,7 @@ pub fn write_nli_config(
     device: Option<&str>,
     gpu_id: Option<i32>,
     gpu_mem_mb: Option<usize>,
+    batch_tokens: Option<usize>,
 ) -> Result<()> {
     use toml_edit::{value, DocumentMut, Item, Table};
 
@@ -532,6 +646,11 @@ pub fn write_nli_config(
     }
     if let Some(mb) = gpu_mem_mb {
         nli["gpu_mem_mb"] = value(mb as i64);
+    }
+    // Written only when given, like every other optional key here: an unset budget means one row
+    // per batch, which is the conservative default a fit exists to challenge, not to assume.
+    if let Some(bt) = batch_tokens {
+        nli["batch_tokens"] = value(bt as i64);
     }
 
     std::fs::create_dir_all(glossa_dir)?;
@@ -704,6 +823,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
@@ -741,6 +861,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -757,6 +878,7 @@ mod tests {
             &glossa,
             Path::new("/models/x"),
             "in_process",
+            None,
             None,
             None,
             None,
@@ -794,6 +916,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
@@ -826,6 +949,7 @@ mod tests {
             Some("cuda"),
             None,
             None,
+            None,
         )
         .unwrap();
         let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
@@ -853,6 +977,7 @@ mod tests {
             None,
             Some(1),
             None,
+            None,
         )
         .unwrap();
         let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
@@ -860,6 +985,46 @@ mod tests {
 
         let cfg = VerifyConfig::resolve(&glossa);
         assert_eq!(cfg.execution_provider_device, Some(1));
+    }
+
+    /// What `nli fit` recommends has to be writable, and by the same `set` that writes everything
+    /// else: the key round-trips through the resolver the gate itself reads, and an unset budget
+    /// writes no key at all (one row per batch stays the default).
+    #[test]
+    fn write_nli_config_batch_tokens_roundtrips_into_ontology() {
+        let dir = tempfile::tempdir().unwrap();
+        let glossa = dir.path().join(".glossa");
+        write_nli_config(
+            &glossa,
+            Path::new("/models/rubert-nli"),
+            "in_process",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(4096),
+        )
+        .unwrap();
+        let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();
+        assert!(o.contains("batch_tokens = 4096"), "{o}");
+        assert_eq!(VerifyConfig::resolve(&glossa).batch_tokens, Some(4096));
+
+        let bare = dir.path().join("bare");
+        write_nli_config(
+            &bare,
+            Path::new("/models/rubert-nli"),
+            "in_process",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let o = std::fs::read_to_string(bare.join("ontology.toml")).unwrap();
+        assert!(!o.contains("batch_tokens"), "unset writes no key: {o}");
     }
 
     /// `write_nli_config`'s `gpu_mem_mb` param writes `[verify.nli].gpu_mem_mb` and
@@ -877,6 +1042,7 @@ mod tests {
             None,
             None,
             Some(512),
+            None,
         )
         .unwrap();
         let o = std::fs::read_to_string(glossa.join("ontology.toml")).unwrap();

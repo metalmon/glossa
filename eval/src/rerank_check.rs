@@ -212,6 +212,112 @@ pub fn rerank_check(
 /// [`write_rerank_config`] and print what was written. Completes the `download` -> `set` -> `check`
 /// workflow so a user never hand-edits TOML. Mirrors [`crate::nli_check::nli_set`].
 #[allow(clippy::too_many_arguments)]
+/// Options for [`rerank_fit`] — the sweep knobs plus the four `check` already takes. One struct
+/// because a fit describes the deployment it will run under, and that is more than six parameters.
+pub struct FitOpts {
+    pub model_dir: PathBuf,
+    pub device: Option<String>,
+    pub gpu_id: Option<i32>,
+    pub gpu_mem_mb: Option<usize>,
+    pub max_rows: usize,
+    pub seq: Option<usize>,
+    pub repeats: usize,
+    pub tolerance: f64,
+    /// The scorer this corpus configures, so a remote one is refused by name rather than measured.
+    pub scorer: Option<String>,
+    /// The remote backend, when the scorer is `http`.
+    pub backend: Option<String>,
+    /// The neighbour engine's configured budget, printed beside the recommendation: two engines on
+    /// one device cost the SUM of their batch peaks.
+    pub neighbour: Option<(String, Option<usize>)>,
+}
+
+/// Measure what a larger batch buys on THIS device, and print the budget to configure.
+///
+/// Refuses rather than measures when the number would be about the wrong thing — a remote scorer, or
+/// a GPU provider that did not actually bind (loading is fail-open, so that session is on CPU, where
+/// a cross-encoder pool is a thermal hazard). Prints; writing is `rerank set --batch-tokens`'s job,
+/// which keeps the `download → set → check` split intact.
+pub fn rerank_fit(opts: &FitOpts) -> Result<()> {
+    #[cfg(any(
+        feature = "nli-directml",
+        feature = "nli-coreml",
+        feature = "nli-cuda",
+        feature = "nli-rocm",
+    ))]
+    {
+        use crate::fit::{fit_refusal, fit_report, select, sweep, RerankTarget, SweepOpts};
+
+        let ep = glossa::config_util::expand_device(opts.device.as_deref());
+        // The same STRICT probe `check` runs, and for the same reason: `load` is fail-open, so a
+        // configured GPU that failed to register would otherwise be measured as if it were a GPU.
+        let ep_bound = matches!(
+            glossa_nli::probe_rerank_ep(&opts.model_dir, &ep, opts.gpu_id, opts.gpu_mem_mb),
+            Ok(Some(_))
+        );
+        if let Some(why) = fit_refusal(opts.scorer.as_deref(), opts.backend.as_deref(), ep_bound) {
+            anyhow::bail!("refusing to fit: {why}");
+        }
+        let seq = opts.seq.unwrap_or(glossa_nli::harness::DEFAULT_MAX_SEQ_LEN);
+        // Loaded at one row per batch: the sweep supplies each size explicitly, so the session's own
+        // budget must not be the thing under measurement.
+        let engine = glossa_nli::InProcessReranker::load(
+            &opts.model_dir,
+            &ep,
+            opts.gpu_id,
+            opts.gpu_mem_mb,
+            None,
+            None,
+        )?;
+        let samples = sweep(
+            &RerankTarget {
+                engine: &engine,
+                seq,
+            },
+            &SweepOpts {
+                max_rows: opts.max_rows,
+                seq,
+                repeats: opts.repeats,
+                tolerance: opts.tolerance,
+            },
+        )?;
+        let outcome = select(&samples, opts.tolerance);
+        let hint = outcome.as_ref().map(|o| {
+            format!(
+                "kbx rerank set --model-dir {} --batch-tokens {}",
+                opts.model_dir.display(),
+                crate::fit::budget_tokens(o.chosen, seq)
+            )
+        });
+        print!(
+            "{}",
+            fit_report(
+                "reranker",
+                seq,
+                outcome.as_ref(),
+                opts.neighbour
+                    .as_ref()
+                    .map(|(name, tokens)| (name.as_str(), *tokens)),
+                hint.as_deref(),
+            )
+        );
+        return Ok(());
+    }
+    #[cfg(not(any(
+        feature = "nli-directml",
+        feature = "nli-coreml",
+        feature = "nli-cuda",
+        feature = "nli-rocm",
+    )))]
+    {
+        let _ = opts;
+        anyhow::bail!(
+            "this build has no GPU execution provider compiled in, and a fit on CPU is refused \
+             (known answer, and a thermal hazard): rebuild with --features nli-cuda / nli-directml"
+        )
+    }
+}
+
 pub fn rerank_set(
     path: Option<PathBuf>,
     model_dir: PathBuf,
@@ -220,6 +326,7 @@ pub fn rerank_set(
     device: Option<String>,
     gpu_id: Option<i32>,
     gpu_mem_mb: Option<usize>,
+    batch_tokens: Option<usize>,
 ) -> Result<()> {
     let kbx_paths = crate::workspace::resolve(path);
     let glossa_dir = crate::workspace::glossa_dir(&kbx_paths.root);
@@ -231,6 +338,7 @@ pub fn rerank_set(
         device.as_deref(),
         gpu_id,
         gpu_mem_mb,
+        batch_tokens,
     )?;
 
     let ontology_path = glossa_dir.join("ontology.toml");
@@ -272,6 +380,7 @@ pub fn write_rerank_config(
     device: Option<&str>,
     gpu_id: Option<i32>,
     gpu_mem_mb: Option<usize>,
+    batch_tokens: Option<usize>,
 ) -> Result<()> {
     use toml_edit::{value, DocumentMut, Item, Table};
 
@@ -302,6 +411,11 @@ pub fn write_rerank_config(
     }
     if let Some(mb) = gpu_mem_mb {
         rr["gpu_mem_mb"] = value(mb as i64);
+    }
+    // Written only when given: an unset budget is one row per batch, and `rerank fit` is what
+    // decides whether a bigger one is worth the resident memory on this device.
+    if let Some(bt) = batch_tokens {
+        rr["batch_tokens"] = value(bt as i64);
     }
 
     std::fs::create_dir_all(glossa_dir)?;
@@ -383,6 +497,47 @@ mod tests {
         assert!(!rerank_check_ok(0.1, 0.9));
     }
 
+    /// `rerank fit` prints a number and names the `set` that writes it; this is that write. The key
+    /// round-trips through the resolver `resolve_reranker` reads, and an unset budget writes nothing
+    /// — one row per batch stays the default nobody paid for.
+    #[test]
+    fn rerank_set_writes_the_batch_budget_only_when_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join(".glossa");
+        write_rerank_config(
+            &g,
+            std::path::Path::new("/m"),
+            "in_process",
+            None,
+            None,
+            None,
+            None,
+            Some(4096),
+        )
+        .unwrap();
+        let s = std::fs::read_to_string(g.join("ontology.toml")).unwrap();
+        assert!(s.contains("batch_tokens = 4096"), "{s}");
+        assert_eq!(
+            glossa::retrieve::config::RerankConfig::resolve(&g).batch_tokens,
+            Some(4096)
+        );
+
+        let bare = dir.path().join("bare");
+        write_rerank_config(
+            &bare,
+            std::path::Path::new("/m"),
+            "in_process",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let s = std::fs::read_to_string(bare.join("ontology.toml")).unwrap();
+        assert!(!s.contains("batch_tokens"), "unset writes no key: {s}");
+    }
+
     #[test]
     fn rerank_set_writes_table_preserving_siblings() {
         let dir = tempfile::tempdir().unwrap();
@@ -401,6 +556,7 @@ mod tests {
             Some("cuda"),
             None,
             Some(1024),
+            None,
         )
         .unwrap();
         let s = std::fs::read_to_string(g.join("ontology.toml")).unwrap();
