@@ -7,12 +7,14 @@
 //! Execution against a real engine lives beside it; the decision lives here so CI can check it.
 
 /// One measured point: a batch size and the throughput observed at it.
+#[derive(Debug, Clone)]
 pub struct Sample {
     pub rows: usize,
     pub rows_per_sec: f64,
 }
 
 /// What the fit decided, and the evidence for it.
+#[derive(Debug, Clone)]
 pub struct FitOutcome {
     /// The size to configure: the SMALLEST within `tolerance` of the best.
     pub chosen: usize,
@@ -92,6 +94,131 @@ pub fn settled(series: &[f64], tolerance: f64, need: usize) -> bool {
         && tail
             .iter()
             .all(|v| (v - median).abs() / median <= tolerance)
+}
+
+/// One thing the fit needs of an engine: score a pool at an exact batch size, with the same
+/// planning and padding the serving path uses. Deliberately not "give me a number" — timing
+/// belongs to the sweep, so both engines and a fake share one measurement loop.
+pub trait FitTarget {
+    fn score_pool(&self, rows: usize) -> anyhow::Result<()>;
+}
+
+pub struct SweepOpts {
+    /// Ceiling on the sweep. Load-bearing, not cosmetic: the sweep's own peak stays RESIDENT, so
+    /// this is the operator's cap on what the measurement itself costs.
+    pub max_rows: usize,
+    pub seq: usize,
+    pub repeats: usize,
+    pub tolerance: f64,
+}
+
+/// Whether an engine error is the device declining to allocate, rather than a fault in the model or
+/// the call. Matched on the message because neither ORT nor burn gives allocation failures a type
+/// of their own, and the strings differ per provider: CUDA reports `CUDA failure 2: out of
+/// memory`, ORT's own arena reports a failed allocation, DirectML surfaces `E_OUTOFMEMORY`.
+///
+/// Lives here rather than in `glossa-nli` so the sweep — and its tests — build with no engine
+/// feature at all: `glossa-nli` is an optional dependency of this crate.
+fn is_allocation_failure(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    [
+        "out of memory",
+        "outofmemory",
+        "failed to allocate",
+        "allocation failed",
+        "memoryallocation",
+        "not enough memory",
+    ]
+    .iter()
+    .any(|needle| m.contains(needle))
+}
+
+/// Settle, then walk doubling sizes, returning one [`Sample`] per size the device accepted.
+///
+/// A size the device refuses to allocate ends the sweep with what already worked — an engine that
+/// cannot batch still has to serve. Any other error is a real fault and propagates: retrying it at
+/// a smaller size would turn a broken model into a slow one.
+pub fn sweep(target: &dyn FitTarget, opts: &SweepOpts) -> anyhow::Result<Vec<Sample>> {
+    // Settle first. Without this the sweep measures the device ramping up and reports a gradient
+    // that is an artefact of its own ordering.
+    let mut series = Vec::new();
+    for _ in 0..12 {
+        let t0 = std::time::Instant::now();
+        target.score_pool(1)?;
+        series.push(1.0 / t0.elapsed().as_secs_f64().max(f64::EPSILON));
+        if settled(&series, opts.tolerance, 3) {
+            break;
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut rows = 1usize;
+    loop {
+        let mut best_for_size = 0.0f64;
+        let mut refused = false;
+        for _ in 0..opts.repeats.max(1) {
+            let t0 = std::time::Instant::now();
+            match target.score_pool(rows) {
+                Ok(()) => {
+                    let rps = rows as f64 / t0.elapsed().as_secs_f64().max(f64::EPSILON);
+                    // Best of the repeats, not the mean: a slow reading is contamination (another
+                    // process took the device), a fast one cannot be.
+                    best_for_size = best_for_size.max(rps);
+                }
+                Err(e) if is_allocation_failure(&e.to_string()) => {
+                    refused = true;
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if refused {
+            break;
+        }
+        out.push(Sample {
+            rows,
+            rows_per_sec: best_for_size,
+        });
+        match next_size(rows, opts.max_rows) {
+            Some(n) => rows = n,
+            None => break,
+        }
+    }
+    Ok(out)
+}
+
+/// The reranker as a fit target: a synthetic pool of `rows` passages at `seq` tokens, scored
+/// through `rerank_with_budget` so the measured path is the serving path.
+///
+/// Gated on the execution-provider features, which are what make `glossa-nli` a dependency of this
+/// crate at all (see `eval/Cargo.toml`).
+#[cfg(any(
+    feature = "nli-directml",
+    feature = "nli-coreml",
+    feature = "nli-cuda",
+    feature = "nli-rocm"
+))]
+pub struct RerankTarget<'a> {
+    pub engine: &'a glossa_nli::InProcessReranker,
+    pub seq: usize,
+}
+
+#[cfg(any(
+    feature = "nli-directml",
+    feature = "nli-coreml",
+    feature = "nli-cuda",
+    feature = "nli-rocm"
+))]
+impl FitTarget for RerankTarget<'_> {
+    fn score_pool(&self, rows: usize) -> anyhow::Result<()> {
+        // A filler word repeated to length: the fit measures shapes, not relevance, and generic
+        // filler keeps corpus text out of a diagnostic.
+        let passage = "text ".repeat(self.seq);
+        let refs: Vec<&str> = (0..rows).map(|_| passage.as_str()).collect();
+        self.engine
+            .rerank_with_budget("query", &refs, rows * self.seq)
+            .map(|_| ())
+    }
 }
 
 #[cfg(test)]
@@ -181,5 +308,92 @@ mod tests {
         );
         assert!(!settled(&[33.0], 0.05, 3), "too few readings to tell");
         assert!(!settled(&[], 0.05, 3));
+    }
+
+    struct RefusesAbove {
+        limit: usize,
+        calls: std::cell::RefCell<Vec<usize>>,
+    }
+    impl FitTarget for RefusesAbove {
+        fn score_pool(&self, rows: usize) -> anyhow::Result<()> {
+            self.calls.borrow_mut().push(rows);
+            if rows > self.limit {
+                anyhow::bail!("CUDA failure 2: out of memory");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            Ok(())
+        }
+    }
+
+    /// A device that cannot take a larger batch must end the sweep with what worked, not fail the
+    /// command: an unprobe-able device still has to serve, at one row per batch.
+    #[test]
+    fn a_refused_size_ends_the_sweep_without_failing() {
+        let t = RefusesAbove {
+            limit: 4,
+            calls: Default::default(),
+        };
+        let out = sweep(
+            &t,
+            &SweepOpts {
+                max_rows: 64,
+                seq: 512,
+                repeats: 1,
+                tolerance: 0.05,
+            },
+        )
+        .expect("a refusal is not a command failure");
+        assert!(
+            out.iter().all(|s| s.rows <= 4),
+            "no sample above the refusal: {out:?}"
+        );
+        assert!(
+            out.iter().any(|s| s.rows == 4),
+            "the last size that worked is kept"
+        );
+        assert!(
+            t.calls.borrow().iter().any(|&r| r == 8),
+            "the sweep has to TRY the next size to learn it is refused"
+        );
+    }
+
+    /// An error that is NOT an allocation failure is a real fault and must propagate — retrying it
+    /// at a smaller size would turn a broken model into a slow one.
+    #[test]
+    fn a_non_allocation_error_propagates() {
+        struct Broken;
+        impl FitTarget for Broken {
+            fn score_pool(&self, _: usize) -> anyhow::Result<()> {
+                anyhow::bail!("logits extraction: shape mismatch")
+            }
+        }
+        assert!(sweep(
+            &Broken,
+            &SweepOpts {
+                max_rows: 8,
+                seq: 512,
+                repeats: 1,
+                tolerance: 0.05
+            }
+        )
+        .is_err());
+    }
+
+    /// The refusal predicate is the whole difference between those two behaviours, and it reads
+    /// provider prose. Strings are the real ones each provider emits.
+    #[test]
+    fn allocation_failures_are_told_apart_from_faults() {
+        assert!(is_allocation_failure("CUDA failure 2: out of memory"));
+        assert!(is_allocation_failure(
+            "Failed to allocate memory for requested buffer of size 1342177280"
+        ));
+        assert!(is_allocation_failure(
+            "DML allocator: E_OUTOFMEMORY (0x8007000E)"
+        ));
+        assert!(!is_allocation_failure("logits extraction: shape mismatch"));
+        assert!(
+            !is_allocation_failure("no room left in the output tensor"),
+            "a substring match on `oom` would fire here; it must not"
+        );
     }
 }
