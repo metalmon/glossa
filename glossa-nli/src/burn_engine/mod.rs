@@ -55,6 +55,10 @@ pub struct InProcessBurnNli {
     /// Per-CALLER, not per-file: two callers may load one dir with different entailment indices,
     /// so this lives on the handle and stays out of the cache key — exactly as `InProcessNli` does.
     entail_index: usize,
+    /// Overrides the cached model's env-derived budget for THIS handle, same per-caller reasoning
+    /// as `entail_index`: a server told to serve at a measured budget must not have it silently
+    /// dropped because another handle loaded the same directory first. `None` = use the cached one.
+    batch_budget: Option<usize>,
 }
 
 /// Keyed by canonicalized model dir alone; the burn backend selects its own device.
@@ -115,7 +119,22 @@ impl InProcessBurnNli {
         Ok(Self {
             inner,
             entail_index,
+            batch_budget: None,
         })
+    }
+
+    /// Serve this handle at `batch_tokens` instead of the cached model's env-derived budget. The
+    /// budget is a per-caller decision (a `--fit` run measures one and the server serves at it),
+    /// and the model cache is keyed by directory alone, so it cannot live in the cache.
+    #[must_use]
+    pub fn with_batch_budget(mut self, batch_tokens: usize) -> Self {
+        self.batch_budget = Some(batch_tokens);
+        self
+    }
+
+    /// The budget this handle scores at: its own override, else the cached model's.
+    fn budget(&self) -> usize {
+        self.batch_budget.unwrap_or(self.inner.batch_budget_tokens)
     }
 
     fn build_inner(model_dir: &Path) -> Result<BurnNliInner> {
@@ -168,7 +187,7 @@ impl InProcessBurnNli {
             self,
             &self.inner.tokenizer,
             self.inner.max_seq_len,
-            self.inner.batch_budget_tokens,
+            self.budget(),
             self.entail_index,
             premise,
             hypotheses,

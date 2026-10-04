@@ -54,20 +54,10 @@ pub fn auth_ok(path: &str, auth_header: Option<&str>, key: Option<&str>) -> bool
     }
 }
 
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 pub use layer::{auth_layer, host_layer};
 
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 mod layer {
     use std::sync::Arc;
 

@@ -19,6 +19,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`[features] nli-burn-vulkan` on the `glossa` crate.** `nli-burn` is engine code without a
   backend, mirroring how the ORT features separate code from linking strategy, so a `kb` built with
   it alone did not compile. This is the feature a `kb` build names to get the Vulkan backend.
+- **`kbi` is built for every engine, not only the ONNX Runtime GPU ones.** The inference server now
+  ships in eight of the twelve archives — everything except the four `none` rows, which have no
+  engine to serve. It used to exist only where one of four execution-provider features was enabled,
+  so a Vulkan or CPU build produced a stub that printed "needs an ORT engine feature" and exited.
+  Underneath: the server holds `glossa_nli::Nli`/`Reranker`, type aliases that resolve to whichever
+  engine the build compiled (the two engines are mutually exclusive, so no dynamic dispatch is
+  needed), and the ~20 `cfg` sites that spelled out a four-name feature list now gate on one
+  `engine` marker — which is how the burn engine came to be missing from that list in the first
+  place. The burn reranker gained `rerank_with_budget`, and both burn handles gained a per-handle
+  batch-budget override, so a measured budget reaches the engine instead of being dropped when
+  another handle loaded the same model directory first.
 
 ### Changed
 

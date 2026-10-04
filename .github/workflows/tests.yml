@@ -87,11 +87,13 @@ jobs:
       - name: cargo test (kb-eval, http-scorer feature)
         run: cargo test -p kb-eval --release --locked --features http-scorer
 
-      # The execution-provider-gated surface: the kbi server, its CLI, and the fit targets live
-      # behind `nli-directml|coreml|cuda|rocm`, so NOTHING above compiles them and a branch could
-      # merge code that has never been built. `nli-cuda` is ort's `load-dynamic` — nothing is linked
-      # or downloaded at build time, so it builds and its non-model tests run on a plain runner.
-      # ci.yml lints this too, but only on master/main, which is one merge too late.
+      # The engine-gated surface: the kbi server, its CLI and the fit targets are compiled only when
+      # an engine is, so NOTHING above reaches them and a branch could merge code that has never
+      # been built. `nli-cuda` is ort's `load-dynamic` — nothing is linked or downloaded at build
+      # time, so it builds and its non-model tests run on a plain runner. The burn/Vulkan side of
+      # the same surface is covered by the burn step below, which builds the whole `kb-eval`
+      # package and therefore `kbi` with it — the server is engine-neutral now, so BOTH engines
+      # have to compile it. ci.yml lints this too, but only on master/main, one merge too late.
       # Linux-only: the gates are not OS-specific.
       - name: cargo clippy (kb-eval, EP-gated server surface, -D warnings)
         if: matrix.os == 'ubuntu-latest'
@@ -104,7 +106,8 @@ jobs:
       # burn/wgpu NLI engine (Plan 4). Mutually exclusive with the ORT engine, so it gets its own
       # jobs on the NdArray CPU backend (no GPU runner — the GPU/Vulkan path is validated locally on
       # real hardware). Lints + tests the burn engine, then verifies the full glossa/kb-eval wiring
-      # (adapter + resolve_scorer + eval passthrough) compiles under the burn engine.
+      # (adapter + resolve_scorer + eval passthrough) compiles under the burn engine — including
+      # the `kbi` binary, which is why the build below is package-wide rather than `--bin kbx`.
       - name: cargo clippy (burn engine, CPU backend)
         run: cargo clippy -p glossa-nli --no-default-features --features nli-burn-cpu --all-targets --locked -- -D warnings
 

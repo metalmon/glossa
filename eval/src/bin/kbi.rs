@@ -1,26 +1,16 @@
 //! `kbi` — the Glossa inference server: serve the NLI + reranker cross-encoders over HTTP. The real
-//! server needs an ORT engine feature (it loads `InProcessNli`/`InProcessReranker`); a build without
-//! one prints how to build it. Bare `kbi <flags>` runs the server (foreground, or under the Windows
-//! SCM / Linux systemd via `--windows-service` / a systemd unit); `kbi service …` installs and
-//! manages it as an OS service.
+//! server needs SOME in-process engine compiled in (it holds `glossa_nli::Nli`/`Reranker`, which
+//! resolve to whichever engine the build has); a build with none prints how to build it. Bare
+//! `kbi <flags>` runs the server (foreground, or under the Windows SCM / Linux systemd via
+//! `--windows-service` / a systemd unit); `kbi service …` installs and manages it as an OS service.
 
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 use kb_eval::infer::cli::ServeArgs;
 
 /// `kbi [serve flags] | kbi service …`. Serve is the DEFAULT — bare `kbi --bind …` serves; the only
 /// subcommand is `service`. ServeArgs has no positionals (all `--flags`), so `kbi service` is
 /// unambiguously the subcommand.
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 #[derive(clap::Parser)]
 #[command(name = "kbi", version = glossa::version())]
 // The serve flags and the `service` subcommand are mutually exclusive: reject `kbi --bind X service …`
@@ -36,12 +26,7 @@ struct Cli {
 }
 
 /// The two things `kbi` does besides serve.
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 // `Fit` flattens the whole serve-flag struct and `Service` holds a name or two, so the variants are
 // far apart in size. Boxing the big one is what the lint asks for and what clap cannot do — a
 // variant's payload has to implement `Args`, which `Box<FitOpts>` does not — and the cost it is
@@ -59,12 +44,7 @@ enum Command {
 }
 
 /// `kbi fit` — the same sweep `--fit` runs at startup, as a command that prints and exits.
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 #[derive(clap::Args)]
 struct FitOpts {
     /// Model dirs/repos and device flags: the same ones serving takes, so a fit describes the
@@ -90,12 +70,7 @@ struct FitOpts {
     tolerance: f64,
 }
 
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 #[derive(clap::Subcommand)]
 enum InferServiceAction {
     /// Install (register) a service that runs `kbi` with the given serve flags.
@@ -110,12 +85,7 @@ enum InferServiceAction {
     Status(glossa::service_cli::NameArg),
 }
 
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 #[derive(clap::Args)]
 struct InferInstallOpts {
     /// Unique service name (the SCM/systemd key).
@@ -127,12 +97,7 @@ struct InferInstallOpts {
     serve_args: Vec<String>,
 }
 
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 fn main() -> anyhow::Result<()> {
     use clap::Parser;
     let cli = Cli::parse();
@@ -167,12 +132,7 @@ fn main() -> anyhow::Result<()> {
 
 /// Dispatch `kbi fit`: load every configured model — the neighbour included, because residency is
 /// the hazard this measures under — sweep, and print. Binds no socket and writes nothing.
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 fn run_fit(o: FitOpts) -> anyhow::Result<()> {
     let mut args = o.serve.clone();
     // `warm()` would otherwise run the startup fit with the server's own knobs; here the knobs are
@@ -192,12 +152,7 @@ fn run_fit(o: FitOpts) -> anyhow::Result<()> {
 }
 
 /// Dispatch `kbi service <action>`.
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 fn run_service(action: InferServiceAction) -> anyhow::Result<()> {
     use kb_eval::infer::cli::infer_service_spec;
     match action {
@@ -229,12 +184,7 @@ fn run_service(action: InferServiceAction) -> anyhow::Result<()> {
 /// Serve until `cancel` is tripped, calling `on_ready` once the socket is bound and the models are
 /// warm. `cancel` is driven by the caller: the Windows SCM control handler under a service, or the
 /// Ctrl-C / SIGTERM bridges this function installs for the foreground / systemd path.
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 fn serve_blocking(
     args: ServeArgs,
     cancel: tokio_util::sync::CancellationToken,
@@ -387,16 +337,13 @@ fn serve_blocking(
     })
 }
 
-#[cfg(not(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-)))]
+#[cfg(not(feature = "engine"))]
 fn main() {
     eprintln!(
-        "kbi needs an ORT engine feature — build with `--features nli-directml` \
-         (self-contained) or `--features nli-cuda` (GPU)."
+        "kbi needs an in-process engine — build with one of: `--features nli-directml` \
+         (Windows, self-contained), `--features nli-coreml` (macOS), `--features nli-cuda` \
+         (NVIDIA), `--features nli-rocm` (AMD via ONNX Runtime), `--features nli-burn` (any \
+         vendor, Vulkan, no ONNX Runtime), or `--features nli` (CPU)."
     );
     std::process::exit(2);
 }

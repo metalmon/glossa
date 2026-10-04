@@ -41,6 +41,10 @@ struct BurnRerankInner {
 /// onto a [`BurnRerankInner`] shared with every other handle for the same model dir.
 pub struct InProcessBurnReranker {
     inner: Arc<BurnRerankInner>,
+    /// Per-CALLER override of the cached model's env-derived budget. The cache is keyed by model
+    /// directory alone, so a caller serving at a measured budget (`kbi --fit`) would otherwise have
+    /// it dropped whenever another handle loaded the same directory first. `None` = use the cached.
+    batch_budget: Option<usize>,
 }
 
 /// Keyed by canonicalized model dir alone: the burn backend selects its own device, so the ORT
@@ -62,7 +66,10 @@ impl InProcessBurnReranker {
         let inner = BURN_RERANK_CACHE.get_or_try_init(key, "burn rerank", || {
             Ok(Arc::new(Self::build_inner(model_dir)?))
         })?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            batch_budget: None,
+        })
     }
 
     fn build_inner(model_dir: &Path) -> Result<BurnRerankInner> {
@@ -153,14 +160,37 @@ impl InProcessBurnReranker {
     /// tokenization/truncation/batching to the shared [`harness::rerank`]; this engine only supplies
     /// the raw forward ([`RerankForward`] below).
     pub fn rerank(&self, query: &str, passages: &[&str]) -> Result<Vec<f32>> {
+        self.rerank_with_budget(
+            query,
+            passages,
+            self.batch_budget.unwrap_or(self.inner.batch_budget_tokens),
+        )
+    }
+
+    /// [`Self::rerank`] at an explicit per-call budget. The ORT reranker carries the same method,
+    /// and that symmetry is what lets a consumer hold one engine-neutral handle
+    /// (`glossa_nli::Reranker`) without caring which engine it got.
+    pub fn rerank_with_budget(
+        &self,
+        query: &str,
+        passages: &[&str],
+        batch_tokens: usize,
+    ) -> Result<Vec<f32>> {
         harness::rerank(
             self,
             &self.inner.tokenizer,
             self.inner.max_seq_len,
-            self.inner.batch_budget_tokens,
+            batch_tokens,
             query,
             passages,
         )
+    }
+
+    /// Serve this handle at `batch_tokens` instead of the cached model's budget; see the field.
+    #[must_use]
+    pub fn with_batch_budget(mut self, batch_tokens: usize) -> Self {
+        self.batch_budget = Some(batch_tokens);
+        self
     }
 }
 

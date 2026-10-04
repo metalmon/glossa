@@ -41,27 +41,20 @@ pub fn resolve_model_dir(
 }
 
 // The running server holds one loaded session per model, so it needs an ORT engine.
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 pub use engine::{build_state, ServerState};
 
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 mod engine {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use anyhow::{bail, Result};
-    use glossa_nli::{probe_gpu_ep, probe_rerank_ep, InProcessNli, InProcessReranker};
+    // Engine-neutral: `Nli`/`Reranker` resolve to whichever engine this build compiled, and
+    // the two loaders take the full ORT argument list with the burn bodies ignoring what has
+    // no analogue. The server has no business knowing which engine it is serving.
+    use glossa_nli::{load_nli, load_reranker, probe_gpu_ep, probe_rerank_ep, Nli, Reranker};
 
     use super::{parse_variant, resolve_model_dir};
     use crate::infer::cli::ServeArgs;
@@ -74,8 +67,8 @@ mod engine {
     /// readiness). Each slot sits behind a `Mutex<Option<..>>` set once at warm; reads clone the
     /// `Arc` under a brief, uncontended lock.
     pub struct ServerState {
-        pub nli: Mutex<Option<Arc<InProcessNli>>>,
-        pub rerank: Mutex<Option<Arc<InProcessReranker>>>,
+        pub nli: Mutex<Option<Arc<Nli>>>,
+        pub rerank: Mutex<Option<Arc<Reranker>>>,
         pub nli_ep: Mutex<Option<String>>,
         pub rerank_ep: Mutex<Option<String>>,
         pub nli_variant: Option<String>,
@@ -169,7 +162,7 @@ mod engine {
                 )
                 .ok()
                 .flatten();
-                let session = InProcessNli::load(
+                let session = load_nli(
                     d,
                     self.entail_index,
                     &self.providers,
@@ -185,7 +178,7 @@ mod engine {
                 let ep = probe_rerank_ep(d, &self.providers, self.gpu_id, self.gpu_mem_mb)
                     .ok()
                     .flatten();
-                let session = InProcessReranker::load(
+                let session = load_reranker(
                     d,
                     &self.providers,
                     self.gpu_id,

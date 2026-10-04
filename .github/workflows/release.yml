@@ -71,7 +71,7 @@ jobs:
           # NOTE: no x86_64-apple-darwin engine row — ort-sys ships no `download-binaries` ONNX
           # Runtime for Intel Mac ("no prebuilt binaries available for target x86_64-apple-darwin"),
           # so a self-contained build is impossible there. Intel Mac gets the `none` variant only.
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: cpu,      kb_flags: "--features nli",          kbx_flags: "--features nli" }
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: cpu,      kb_flags: "--features nli",          kbx_flags: "--features nli", build_server: true }
           # ONNX Runtime, LOAD-DYNAMIC: nothing is linked at build time, so the GPU-capable runtime
           # travels with the archive (cuda13, fetched below) or is supplied by the operator (rocm).
           - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: cuda13, kb_flags: "--features nli-cuda", kbx_flags: "--features nli-cuda", build_server: true }
@@ -87,8 +87,8 @@ jobs:
           # through glossa's own `nli-burn-vulkan` (its `nli-burn` is code-only); `kbx` gets it from
           # kb-eval's `nli-burn`. No `build_server` yet: `kbi` still holds concrete ORT types, so it
           # joins these rows with the change that makes the server engine-agnostic.
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: vulkan, kb_flags: "--features nli-burn-vulkan", kbx_flags: "--features nli-burn" }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: vulkan, kb_flags: "--features nli-burn-vulkan", kbx_flags: "--features nli-burn" }
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: vulkan, kb_flags: "--features nli-burn-vulkan", kbx_flags: "--features nli-burn", build_server: true }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: vulkan, kb_flags: "--features nli-burn-vulkan", kbx_flags: "--features nli-burn", build_server: true }
     steps:
       - uses: actions/checkout@v4
 
@@ -108,11 +108,10 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }} -p kb-eval --bin kbx ${{ matrix.kbx_flags }}
 
       - name: Build kbi
-        # The standalone HTTP scorer (NLI + reranker over TEI/Jina). `build_server` marks the rows
-        # that can build a REAL one: the server's CLI is gated on an ORT execution-provider feature
-        # (nli-directml/nli-coreml/nli-cuda/nli-rocm), so a `none`, `cpu` or `vulkan` row would ship
-        # the "needs an ORT engine feature" stub that exits 2. The `cpu` and `vulkan` rows join once
-        # the server stops holding concrete ORT types; `none` never can, having no engine at all.
+        # The standalone HTTP scorer (NLI + reranker over TEI/Jina). `build_server` now marks every
+        # row that HAS an engine, which is every row but `none`: the server gates on the `engine`
+        # marker feature and holds `glossa_nli::Nli`/`Reranker`, which resolve to whichever engine
+        # the build compiled. A `none` row still cannot have it — there is nothing to serve.
         if: matrix.build_server
         run: cargo build --release --locked --target ${{ matrix.target }} -p kb-eval --bin kbi ${{ matrix.kbx_flags }}
 

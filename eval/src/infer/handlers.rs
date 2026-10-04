@@ -76,20 +76,10 @@ pub fn extract_passages(arr: &[serde_json::Value]) -> Vec<String> {
         .collect()
 }
 
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 pub use server::router;
 
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 mod server {
     use std::sync::atomic::Ordering;
     use std::sync::Arc;

@@ -95,6 +95,129 @@ pub use burn_engine::InProcessBurnReranker;
 #[cfg(feature = "nli-ort")]
 pub use ort_engine::{probe_gpu_ep, probe_rerank_ep, InProcessNli, InProcessReranker};
 
+// ── Engine-neutral surface ───────────────────────────────────────────────────────────────────────
+//
+// `nli-ort` and `nli-burn-wgpu` are mutually exclusive (the `compile_error!` below), so EXACTLY ONE
+// engine exists in any build. That makes a type alias enough: a consumer that does not care which
+// engine it got — the `kbi` inference server — names `Nli`/`Reranker` and compiles on either, with
+// no trait object and no dynamic dispatch.
+//
+// The two engines' constructors differ, and the difference is real rather than cosmetic: ORT needs
+// an execution provider, a device id and a memory cap, while the burn backend selects its own
+// device and has nothing to cap. `load_nli`/`load_reranker` take the full ORT argument list and the
+// burn bodies ignore what does not apply, so the asymmetry lives HERE, in one documented place,
+// instead of either polluting the burn engine's own API with four inert parameters or being
+// rediscovered at every call site.
+
+/// The NLI scorer this build compiles, whichever engine that is.
+#[cfg(feature = "nli-ort")]
+pub type Nli = InProcessNli;
+/// The NLI scorer this build compiles, whichever engine that is.
+#[cfg(all(feature = "nli-burn-wgpu", not(feature = "nli-ort")))]
+pub type Nli = InProcessBurnNli;
+
+/// The cross-encoder reranker this build compiles, whichever engine that is.
+#[cfg(feature = "nli-ort")]
+pub type Reranker = InProcessReranker;
+/// The cross-encoder reranker this build compiles, whichever engine that is.
+#[cfg(all(feature = "nli-burn-wgpu", not(feature = "nli-ort")))]
+pub type Reranker = InProcessBurnReranker;
+
+/// Load [`Nli`] without caring which engine it is. See the module note above for why the burn
+/// engine ignores `providers` / `device_id` / `mem_limit_mb` / `intra_threads`.
+#[cfg(feature = "nli-ort")]
+#[allow(clippy::too_many_arguments)]
+pub fn load_nli(
+    model_dir: &std::path::Path,
+    entail_index: usize,
+    providers: &[String],
+    device_id: Option<i32>,
+    mem_limit_mb: Option<usize>,
+    batch_tokens: Option<usize>,
+    intra_threads: Option<usize>,
+) -> anyhow::Result<Nli> {
+    InProcessNli::load(
+        model_dir,
+        entail_index,
+        providers,
+        device_id,
+        mem_limit_mb,
+        batch_tokens,
+        intra_threads,
+    )
+}
+
+/// Load [`Nli`] without caring which engine it is. The burn backend picks its own device, so
+/// `providers`, `device_id`, `mem_limit_mb` and `intra_threads` have no analogue and are ignored;
+/// `batch_tokens` DOES apply, and overrides what the environment set.
+#[cfg(all(feature = "nli-burn-wgpu", not(feature = "nli-ort")))]
+#[allow(clippy::too_many_arguments)]
+pub fn load_nli(
+    model_dir: &std::path::Path,
+    entail_index: usize,
+    _providers: &[String],
+    _device_id: Option<i32>,
+    _mem_limit_mb: Option<usize>,
+    batch_tokens: Option<usize>,
+    _intra_threads: Option<usize>,
+) -> anyhow::Result<Nli> {
+    let nli = InProcessBurnNli::load(model_dir, entail_index)?;
+    Ok(match batch_tokens {
+        Some(b) => nli.with_batch_budget(b),
+        None => nli,
+    })
+}
+
+/// Load [`Reranker`] without caring which engine it is.
+#[cfg(feature = "nli-ort")]
+pub fn load_reranker(
+    model_dir: &std::path::Path,
+    providers: &[String],
+    device_id: Option<i32>,
+    mem_limit_mb: Option<usize>,
+    batch_tokens: Option<usize>,
+    intra_threads: Option<usize>,
+) -> anyhow::Result<Reranker> {
+    InProcessReranker::load(
+        model_dir,
+        providers,
+        device_id,
+        mem_limit_mb,
+        batch_tokens,
+        intra_threads,
+    )
+}
+
+/// Load [`Reranker`] without caring which engine it is. Same ignored arguments as [`load_nli`].
+#[cfg(all(feature = "nli-burn-wgpu", not(feature = "nli-ort")))]
+pub fn load_reranker(
+    model_dir: &std::path::Path,
+    _providers: &[String],
+    _device_id: Option<i32>,
+    _mem_limit_mb: Option<usize>,
+    batch_tokens: Option<usize>,
+    _intra_threads: Option<usize>,
+) -> anyhow::Result<Reranker> {
+    let rr = InProcessBurnReranker::load(model_dir)?;
+    Ok(match batch_tokens {
+        Some(b) => rr.with_batch_budget(b),
+        None => rr,
+    })
+}
+
+/// There is no ORT execution provider to probe on a burn build, so report "nothing to probe"
+/// rather than fail. Mirrors `ort_engine::probe_rerank_ep`'s signature exactly; the NLI counterpart
+/// is above.
+#[cfg(all(feature = "nli-burn-wgpu", not(feature = "nli-ort")))]
+pub fn probe_rerank_ep(
+    _model_dir: &std::path::Path,
+    _providers: &[String],
+    _device_id: Option<i32>,
+    _mem_limit_mb: Option<usize>,
+) -> anyhow::Result<Option<String>> {
+    Ok(None)
+}
+
 /// Stub for engine builds WITHOUT ORT (the burn/wgpu engine): there is no ORT execution-provider to
 /// probe, so report "nothing to probe" (`Ok(None)`) rather than fail. Keeps `kbx nli check`
 /// compiling on every feature set; mirrors `ort_engine::probe_gpu_ep`'s signature exactly.
