@@ -18,7 +18,12 @@ use tantivy::{doc, Index, IndexReader, TantivyDocument, TantivyError};
 /// Bump when the tantivy schema changes (triggers index-only rebuild via manifest migration).
 // 4: Markdown chunks keep the heading line that opens them (it used to live in `location` only),
 //    so every stored body changes and a stale index would keep headings unsearchable.
-pub const INDEX_SCHEMA_VERSION: u32 = 4;
+// 5: office_oxide 0.1.8 → 0.1.13 changes what `to_ir()` yields — `.doc` files gain tables at all,
+//    docx rows inside `w:ins`/`w:moveTo`/`w:customXml` are no longer dropped, sparse xlsx cells are
+//    placed by reference, PPTX SmartArt text is read. `file_sig` is mtime+size, so an extractor
+//    upgrade alone never makes a file stale: without this bump an existing index would serve the
+//    old, under-extracted bodies forever.
+pub const INDEX_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Clone, Copy)]
 pub struct Fields {

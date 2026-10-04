@@ -19,8 +19,10 @@ ignore = "0.4"
 regex = "1"
 regex-syntax = "0.8"
 globset = "0.4"
-office_oxide = "0.1"
-pdf_oxide = { version = "0.3", default-features = false, features = ["rendering", "legacy-crypto", "parallel"] }
+# Floors, not decoration: `.xlsb` extraction needs office_oxide >= 0.1.12, and pdf_oxide 0.3.78 is
+# where rendering gained an output-pixel budget and five aborts-on-valid-file became errors.
+office_oxide = "0.1.13"
+pdf_oxide = { version = "0.3.78", default-features = false, features = ["rendering", "legacy-crypto", "parallel"] }
 rdocx = "0.1"
 tantivy = { version = "0.26", default-features = false, features = ["mmap", "lz4-compression", "stemmer", "stopwords"] }
 serde = { version = "1", features = ["derive"] }

@@ -13,7 +13,9 @@ fn format_for(ext: &str) -> Option<DocumentFormat> {
     match ext {
         "docx" => Some(DocumentFormat::Docx),
         "doc" => Some(DocumentFormat::Doc),
-        "xlsx" => Some(DocumentFormat::Xlsx),
+        // BIFF12 is a different encoding of the same model, so it rides the Xlsx format — which is
+        // how office_oxide's own `from_extension` maps it.
+        "xlsx" | "xlsb" => Some(DocumentFormat::Xlsx),
         "xls" => Some(DocumentFormat::Xls),
         "pptx" => Some(DocumentFormat::Pptx),
         "ppt" => Some(DocumentFormat::Ppt),
@@ -23,7 +25,7 @@ fn format_for(ext: &str) -> Option<DocumentFormat> {
 
 impl Extractor for OfficeExtractor {
     fn file_types(&self) -> &'static [&'static str] {
-        &["docx", "doc", "xlsx", "xls", "pptx", "ppt"]
+        &["docx", "doc", "xlsx", "xlsb", "xls", "pptx", "ppt"]
     }
 
     fn extract(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<Vec<Chunk>> {
