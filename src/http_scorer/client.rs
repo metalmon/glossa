@@ -54,15 +54,27 @@ pub struct HttpReranker {
     pub wire: wire::RerankWire,
     /// Served-model name, sent only by the Jina family and only when set (vLLM needs it).
     pub model: Option<String>,
+    /// The operator's backend name, kept because two decisions hang on it beyond the wire shape:
+    /// whether its scores are logits, and whether to ask it for raw scores (vLLM).
+    pub backend: String,
 }
 impl Reranker for HttpReranker {
     fn rerank(&self, query: &str, passages: &[&str]) -> Result<Vec<f32>> {
-        let body = wire::build_rerank_body(self.wire, query, passages, self.model.as_deref())?;
+        let body = wire::build_rerank_body(
+            self.wire,
+            query,
+            passages,
+            self.model.as_deref(),
+            self.backend == "vllm",
+        )?;
         let url = join(&self.endpoint, "rerank");
         let resp = self
             .transport
             .post_json(&url, &body, self.api_key.as_deref())?;
         wire::parse_rerank(&resp, passages.len())
+    }
+    fn emits_logits(&self) -> bool {
+        wire::backend_emits_logits(&self.backend)
     }
 }
 
@@ -101,6 +113,7 @@ pub fn new_ureq_reranker(
         api_key,
         wire,
         model,
+        backend: backend.to_string(),
     })
 }
 
@@ -136,6 +149,7 @@ mod tests {
             api_key: None,
             wire: wire::RerankWire::Tei,
             model: None,
+            backend: "tei".into(),
         };
         let out = r.rerank("q", &["a", "b"]).unwrap();
         assert_eq!(out, vec![2.0, 5.0]);
@@ -160,6 +174,7 @@ mod tests {
             api_key: None,
             wire: wire::RerankWire::Jina,
             model: Some("bge-reranker".into()),
+            backend: "jina".into(),
         };
         let out = r.rerank("q", &["a", "b"]).unwrap();
         assert_eq!(out, vec![2.0, 5.0]);
@@ -186,6 +201,7 @@ mod tests {
             api_key: None,
             wire: wire::RerankWire::Tei,
             model: None,
+            backend: "tei".into(),
         };
         assert!(r.rerank("q", &["a"]).is_err());
     }
@@ -203,5 +219,16 @@ mod tests {
             api_key: None,
         };
         assert_eq!(n.entail("prem", &["h"]).unwrap(), vec![0.9]);
+    }
+
+    #[test]
+    fn http_reranker_reports_logits_per_backend() {
+        let mk = |b: &str| new_ureq_reranker("http://x".into(), 10, None, b, None).unwrap();
+        assert!(mk("tei").emits_logits());
+        assert!(mk("kbi").emits_logits());
+        assert!(mk("vllm").emits_logits());
+        assert!(mk("llamacpp").emits_logits());
+        assert!(!mk("cohere").emits_logits());
+        assert!(!mk("jina").emits_logits());
     }
 }

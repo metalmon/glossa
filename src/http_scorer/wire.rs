@@ -20,6 +20,11 @@ pub struct JinaRerankRequest {
     pub model: Option<String>,
     pub query: String,
     pub documents: Vec<String>,
+    /// vLLM only: `false` asks for the raw logit instead of its default sigmoid, so the probability
+    /// on our hits is computed by our own `sigmoid` like every other logit source. Absent for the
+    /// other Jina-wire backends -- the hosted APIs reject unknown fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_activation: Option<bool>,
 }
 
 /// Which reranker wire shape a backend speaks. Operators name their SERVER (`backend = "vllm"`);
@@ -84,6 +89,7 @@ pub fn build_rerank_body(
     query: &str,
     passages: &[&str],
     model: Option<&str>,
+    ask_vllm_for_logits: bool,
 ) -> Result<String> {
     let body = match wire {
         RerankWire::Tei => serde_json::to_string(&build_rerank_request(query, passages, true)),
@@ -91,9 +97,20 @@ pub fn build_rerank_body(
             model: model.map(str::to_string),
             query: query.to_string(),
             documents: passages.iter().map(|s| s.to_string()).collect(),
+            use_activation: ask_vllm_for_logits.then_some(false),
         }),
     };
     body.context("serializing rerank request")
+}
+
+/// Whether a backend's rerank scores are raw logits. Each row is something we did, or something we
+/// read, never something we assume: `tei`/`kbi` because our request sets `raw_scores: true`;
+/// `vllm` because our request sets `use_activation: false`; `llamacpp` because its server writes
+/// `res->score = embd[0]` straight from a classification head that has no sigmoid
+/// (`tools/server/server-context.cpp`, `src/llama-graph.cpp`, read at 0be8468). `cohere` and `jina`
+/// return a score they normalized and offer no raw option.
+pub fn backend_emits_logits(backend: &str) -> bool {
+    matches!(backend, "tei" | "kbi" | "vllm" | "llamacpp")
 }
 
 pub fn build_predict_request(premise: &str, hypotheses: &[&str]) -> PredictRequest {
@@ -253,13 +270,13 @@ mod tests {
 
     #[test]
     fn tei_body_sends_texts_jina_body_sends_documents() {
-        let tei = build_rerank_body(RerankWire::Tei, "q", &["a", "b"], None).unwrap();
+        let tei = build_rerank_body(RerankWire::Tei, "q", &["a", "b"], None, false).unwrap();
         let v: serde_json::Value = serde_json::from_str(&tei).unwrap();
         assert_eq!(v["texts"], serde_json::json!(["a", "b"]));
         assert_eq!(v["raw_scores"], serde_json::json!(true));
         assert!(v.get("documents").is_none());
 
-        let jina = build_rerank_body(RerankWire::Jina, "q", &["a", "b"], None).unwrap();
+        let jina = build_rerank_body(RerankWire::Jina, "q", &["a", "b"], None, false).unwrap();
         let v: serde_json::Value = serde_json::from_str(&jina).unwrap();
         assert_eq!(v["documents"], serde_json::json!(["a", "b"]));
         assert!(v.get("texts").is_none());
@@ -269,7 +286,8 @@ mod tests {
 
     #[test]
     fn jina_body_includes_model_when_set() {
-        let jina = build_rerank_body(RerankWire::Jina, "q", &["a"], Some("bge-reranker")).unwrap();
+        let jina =
+            build_rerank_body(RerankWire::Jina, "q", &["a"], Some("bge-reranker"), false).unwrap();
         let v: serde_json::Value = serde_json::from_str(&jina).unwrap();
         assert_eq!(v["model"], serde_json::json!("bge-reranker"));
     }
@@ -294,5 +312,39 @@ mod tests {
     fn parse_rerank_wrong_length_is_err() {
         let body = r#"{"results":[{"index":0,"relevance_score":1.0}]}"#;
         assert!(parse_rerank(body, 2).is_err());
+    }
+
+    /// vLLM applies sigmoid by default; we ask for the raw logit so our own sigmoid is the one
+    /// scale. The flag is sent ONLY to vLLM: the hosted Jina/Cohere APIs reject unknown fields.
+    #[test]
+    fn vllm_request_asks_for_raw_logits_and_other_jina_backends_do_not() {
+        let vllm = build_rerank_body(RerankWire::Jina, "q", &["a", "b"], Some("m"), true).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&vllm).unwrap();
+        assert_eq!(v["use_activation"], serde_json::json!(false));
+
+        let other = build_rerank_body(RerankWire::Jina, "q", &["a", "b"], None, false).unwrap();
+        let o: serde_json::Value = serde_json::from_str(&other).unwrap();
+        assert!(o.get("use_activation").is_none(), "{other}");
+
+        let tei = build_rerank_body(RerankWire::Tei, "q", &["a"], None, false).unwrap();
+        let t: serde_json::Value = serde_json::from_str(&tei).unwrap();
+        assert_eq!(
+            t["raw_scores"],
+            serde_json::json!(true),
+            "TEI path unchanged"
+        );
+    }
+
+    /// Which backends hand us a raw logit -- by our own request (tei, kbi, vllm) or by their source
+    /// (llama.cpp: `res->score = embd[0]`, head without sigmoid). Cohere and Jina return a
+    /// normalized score we did not compute.
+    #[test]
+    fn logit_backends_are_the_ones_we_control_or_read() {
+        for b in ["tei", "kbi", "vllm", "llamacpp"] {
+            assert!(backend_emits_logits(b), "{b}");
+        }
+        for b in ["cohere", "jina"] {
+            assert!(!backend_emits_logits(b), "{b}");
+        }
     }
 }
