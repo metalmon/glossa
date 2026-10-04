@@ -7,6 +7,19 @@ use std::path::Path;
 /// over HTTP.
 pub trait Reranker {
     fn rerank(&self, query: &str, passages: &[&str]) -> anyhow::Result<Vec<f32>>;
+    /// Whether `rerank`'s numbers are raw logits. In-process engines are, and keep the default; the
+    /// HTTP reranker answers from its backend (`tei|kbi|vllm|llamacpp` yes, `cohere|jina` no), see
+    /// `http_scorer::client`. Only a logit source gets a `rel_rerank`: a probability we did not
+    /// compute is not one we can vouch for.
+    fn emits_logits(&self) -> bool {
+        true
+    }
+}
+
+/// `1 / (1 + e^-x)` in f32. Saturates to exactly 0.0 / 1.0 for |x| >~ 17, which is the intended
+/// reading of a logit that far from zero.
+pub fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
 }
 
 /// Test double: returns `scores` positionally. A length mismatch with `passages` is what exercises
@@ -69,7 +82,8 @@ pub fn rerank_hits(
         .collect();
     let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
     let reason = match rr.rerank(query, &refs) {
-        Ok(scores) if scores.len() == pool.len() => {
+        Ok(scores) if scores.len() == pool.len() && scores.iter().all(|s| s.is_finite()) => {
+            let logits = rr.emits_logits();
             let mut order: Vec<usize> = (0..pool.len()).collect();
             // Descending by score; stable so equal scores keep BM25 order.
             order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
@@ -79,10 +93,25 @@ pub fn rerank_hits(
                 .map(|i| {
                     let mut h = pool[i].clone();
                     h.score = scores[i]; // rerank logit becomes the reported score
+                                         // rel_bm25 is NOT touched: it is the pool's reading and stays so.
+                    h.rel_rerank = logits.then(|| sigmoid(scores[i]));
                     h
                 })
                 .collect();
             return (hits, RerankOutcome::Applied);
+        }
+        // A non-finite score would sort unpredictably (`total_cmp` orders NaN, but not usefully)
+        // and would become a NaN probability. Fail open instead, naming the value.
+        Ok(scores) if scores.len() == pool.len() => {
+            let bad = scores
+                .iter()
+                .find(|s| !s.is_finite())
+                .copied()
+                .unwrap_or(f32::NAN);
+            format!(
+                "scorer returned a non-finite score ({bad}) for a pool of {}",
+                pool.len()
+            )
         }
         Ok(scores) => format!(
             "scorer returned {} score(s) for a pool of {}",
@@ -126,6 +155,16 @@ pub fn retrieve_with(
                     Some(reason)
                 }
             };
+            if fallback.is_none() && !rr.emits_logits() {
+                // Once per process: the list IS in rerank order, but no probability travels with
+                // it, so a consumer looking for `rel_rerank` knows why it is absent.
+                static SAID: std::sync::Once = std::sync::Once::new();
+                SAID.call_once(|| {
+                    eprintln!(
+                        "rerank: this backend returns a normalized score, not a logit, so hits                          carry no rel_rerank (order is unaffected)"
+                    );
+                });
+            }
             Ok((
                 hits,
                 RerankInfo {
@@ -582,5 +621,107 @@ mod tests {
         .unwrap();
         let cfg = crate::retrieve::config::RerankConfig::resolve(&g);
         assert!(resolve_reranker(&cfg).is_none());
+    }
+
+    /// The reranker's probability rides on every reranked hit; the native score and the order are
+    /// untouched, and the BM25 reading the pool carried in survives the rerank unchanged.
+    #[test]
+    fn rerank_sets_rel_rerank_and_keeps_rel_bm25_from_the_pool() {
+        let (_d, idx) = idx_with_pages();
+        let pool = idx.search_filtered("swap", 10, None, None, None).unwrap();
+        let bm25_by_ord: std::collections::HashMap<u64, f32> =
+            pool.iter().map(|h| (h.ord, h.rel_bm25)).collect();
+        let (out, outcome) = rerank_hits(&idx, "swap", pool, &ByPath, 10);
+        assert_eq!(outcome, RerankOutcome::Applied);
+        for h in &out {
+            let p = h.rel_rerank.expect("reranked by a logit scorer");
+            assert!((0.0..=1.0).contains(&p), "{p}");
+            assert_eq!(
+                p,
+                sigmoid(h.score),
+                "rel_rerank is sigmoid of the native logit"
+            );
+            assert_eq!(
+                h.rel_bm25, bm25_by_ord[&h.ord],
+                "pool value kept, not recomputed"
+            );
+        }
+        // Same order as sorting by the native score (sigmoid is monotone).
+        let scores: Vec<f32> = out.iter().map(|h| h.score).collect();
+        assert!(scores.windows(2).all(|w| w[0] >= w[1]), "{scores:?}");
+    }
+
+    #[test]
+    fn sigmoid_is_a_probability_that_preserves_order() {
+        assert_eq!(sigmoid(0.0), 0.5);
+        assert!((sigmoid(7.35) - 0.9994).abs() < 1e-3, "{}", sigmoid(7.35));
+        assert!(sigmoid(-11.04) < 2e-5, "{}", sigmoid(-11.04));
+        assert_eq!(sigmoid(20.0), 1.0, "f32 saturates to exactly 1");
+        assert_eq!(sigmoid(-20.0), 0.0, "f32 saturates to exactly 0");
+        assert!(sigmoid(1.0) > sigmoid(0.9));
+    }
+
+    /// A scorer whose numbers are not logits (the hosted Cohere/Jina APIs) still orders the pool,
+    /// but no probability is invented for it.
+    struct NoLogits;
+    impl Reranker for NoLogits {
+        fn rerank(&self, _q: &str, p: &[&str]) -> anyhow::Result<Vec<f32>> {
+            Ok((0..p.len()).map(|i| 0.9 - 0.1 * i as f32).collect())
+        }
+        fn emits_logits(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn a_non_logit_scorer_orders_but_leaves_rel_rerank_none() {
+        let (_d, idx) = idx_with_pages();
+        let pool = idx.search_filtered("swap", 10, None, None, None).unwrap();
+        let (out, outcome) = rerank_hits(&idx, "swap", pool, &NoLogits, 10);
+        assert_eq!(outcome, RerankOutcome::Applied);
+        assert!(out.iter().all(|h| h.rel_rerank.is_none()), "{out:?}");
+        assert!(out.iter().all(|h| h.rel_bm25 > 0.0));
+    }
+
+    /// Fail-open keeps the BM25 pool's readings and sets nothing.
+    #[test]
+    fn fail_open_keeps_rel_bm25_and_sets_no_rel_rerank() {
+        let (_d, idx) = idx_with_pages();
+        let pool = idx.search_filtered("swap", 10, None, None, None).unwrap();
+        let expected: Vec<(u64, f32)> = pool.iter().map(|h| (h.ord, h.rel_bm25)).collect();
+        let short = MockReranker { scores: vec![1.0] }; // wrong count -> fail-open
+        let (out, outcome) = rerank_hits(&idx, "swap", pool, &short, 10);
+        assert!(matches!(outcome, RerankOutcome::FailedOpen(_)));
+        assert_eq!(
+            out.iter().map(|h| (h.ord, h.rel_bm25)).collect::<Vec<_>>(),
+            expected
+        );
+        assert!(out.iter().all(|h| h.rel_rerank.is_none()));
+    }
+
+    /// A NaN must never reach the sort or become a probability.
+    #[test]
+    fn a_non_finite_score_fails_the_rerank_open() {
+        let (_d, idx) = idx_with_pages();
+        let pool = idx.search_filtered("swap", 10, None, None, None).unwrap();
+        let n = pool.len();
+        assert!(n >= 2, "fixture must give a pool to corrupt");
+        let mut scores = vec![1.0; n];
+        scores[0] = f32::NAN;
+        let bad = MockReranker { scores };
+        let expected_ords: Vec<u64> = pool.iter().map(|h| h.ord).collect();
+        let (out, outcome) = rerank_hits(&idx, "swap", pool, &bad, 10);
+        match outcome {
+            RerankOutcome::FailedOpen(reason) => {
+                assert!(reason.contains("non-finite"), "{reason}")
+            }
+            other => panic!("expected fail-open, got {other:?}"),
+        }
+        assert_eq!(
+            out.iter().map(|h| h.ord).collect::<Vec<_>>(),
+            expected_ords,
+            "BM25 order kept"
+        );
+        assert!(out.iter().all(|h| h.rel_rerank.is_none()));
     }
 }
