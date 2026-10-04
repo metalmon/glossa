@@ -247,7 +247,29 @@ pub struct RankedHit {
     pub file_type: String,
     pub ord: u64,
     pub snippet: String,
+    /// Engine-native score: BM25 from [`DocIndex::search`], the reranker's raw logit after a rerank.
     pub score: f32,
+    /// BM25 relevance relative to the list BM25 produced this hit in: `score / max_score_in_list`,
+    /// so the best BM25 hit of that list reads 1.0. Always present, in (0, 1]. RELATIVE — it orders
+    /// hits within one list and says nothing about absolute relevance or about another query's
+    /// list. Filled once by [`DocIndex::search`] and never recomputed: a filtered or trimmed list
+    /// keeps the pool's values and may therefore contain no 1.0, which is the point — the value
+    /// means "fraction of the best score this query produced", not "rank within what came back".
+    pub rel_bm25: f32,
+    /// The reranker's relevance as a probability in [0, 1] — `sigmoid(logit)`. Present iff this list
+    /// was reranked by a scorer that emits logits (see `retrieve::rerank`). ABSOLUTE: comparable
+    /// across queries, and what a threshold is calibrated against.
+    pub rel_rerank: Option<f32>,
+}
+
+/// Fill `rel_bm25` over one BM25 list: each score divided by the list's maximum. A list whose
+/// maximum is not positive (one hit, all equal at zero, empty) reads 1.0 throughout — there is no
+/// information to spread, and 1.0 is the honest "best available" rather than a NaN.
+pub fn fill_rel_bm25(hits: &mut [RankedHit]) {
+    let max = hits.iter().map(|h| h.score).fold(0.0f32, f32::max);
+    for h in hits.iter_mut() {
+        h.rel_bm25 = if max > 0.0 { h.score / max } else { 1.0 };
+    }
 }
 
 impl RankedHit {
@@ -369,8 +391,11 @@ impl DocIndex {
                 ord,
                 snippet,
                 score,
+                rel_bm25: 0.0, // filled below, once the whole list is known
+                rel_rerank: None,
             });
         }
+        fill_rel_bm25(&mut hits);
         Ok(hits)
     }
 
@@ -454,8 +479,11 @@ impl DocIndex {
                 ord,
                 snippet,
                 score,
+                rel_bm25: 0.0, // filled below, once the whole list is known
+                rel_rerank: None,
             });
         }
+        fill_rel_bm25(&mut hits);
         Ok(hits)
     }
 
@@ -4567,6 +4595,8 @@ mod search_tests {
             ord: 350,
             snippet: "hot swap".into(),
             score: 17.7,
+            rel_bm25: 1.0,
+            rel_rerank: None,
         };
         let line = pdf.display_line();
         assert!(line.starts_with("d.pdf#350"), "copy-ready key: {line}");
@@ -4580,10 +4610,100 @@ mod search_tests {
             ord: 2,
             snippet: "text".into(),
             score: 3.0,
+            rel_bm25: 1.0,
+            rel_rerank: None,
         };
         assert!(
             md.display_line().contains("Introduction"),
             "heading label kept"
+        );
+    }
+
+    fn bare_hit(score: f32) -> RankedHit {
+        RankedHit {
+            path: "d.md".into(),
+            location: String::new(),
+            file_type: "md".into(),
+            ord: 1,
+            snippet: String::new(),
+            score,
+            rel_bm25: 0.0,
+            rel_rerank: None,
+        }
+    }
+
+    /// `rel_bm25` is the fraction of the best BM25 score in the list: the best hit reads 1.0, the
+    /// rest are proportional and never 0 (BM25 is non-negative), so a consumer that multiplies by
+    /// relevance can still pick the last hit.
+    #[test]
+    fn rel_bm25_is_the_fraction_of_the_lists_best_score() {
+        let mut hits = vec![bare_hit(8.0), bare_hit(4.0), bare_hit(2.0)];
+        fill_rel_bm25(&mut hits);
+        assert_eq!(hits[0].rel_bm25, 1.0);
+        assert_eq!(hits[1].rel_bm25, 0.5);
+        assert_eq!(hits[2].rel_bm25, 0.25);
+        assert!(
+            hits.iter().all(|h| h.rel_rerank.is_none()),
+            "BM25 alone never sets rel_rerank"
+        );
+    }
+
+    /// One hit, equal hits, or a zero maximum: all 1.0, never NaN.
+    #[test]
+    fn rel_bm25_degenerate_lists_read_one() {
+        let mut one = vec![bare_hit(3.3)];
+        fill_rel_bm25(&mut one);
+        assert_eq!(one[0].rel_bm25, 1.0);
+
+        let mut equal = vec![bare_hit(2.0), bare_hit(2.0)];
+        fill_rel_bm25(&mut equal);
+        assert!(equal.iter().all(|h| h.rel_bm25 == 1.0));
+
+        let mut zero = vec![bare_hit(0.0), bare_hit(0.0)];
+        fill_rel_bm25(&mut zero);
+        assert!(zero.iter().all(|h| h.rel_bm25 == 1.0), "{zero:?}");
+
+        let mut none: Vec<RankedHit> = vec![];
+        fill_rel_bm25(&mut none); // must not panic
+    }
+
+    /// `search` fills the field; `search_filtered` reuses `search`'s pool and only filters, so a
+    /// filter that drops the best BM25 hit leaves a list with no 1.0 in it — pool-relative by design.
+    #[test]
+    fn search_fills_rel_bm25_and_filtering_keeps_the_pool_basis() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let sec = |path: &str, ft: &str, text: &str| Chunk {
+            doc_path: PathBuf::from(path),
+            location: String::new(),
+            file_type: ft.into(),
+            text: text.into(),
+        };
+        // "alpha" appears 3x in the .md doc and once in the .txt doc, so the .md hit is BM25's best.
+        idx.write_chunks(&[
+            sec("a.md", "md", "alpha alpha alpha"),
+            sec("b.txt", "txt", "alpha beta"),
+        ])
+        .unwrap();
+
+        let all = idx.search("alpha", 10).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].path, "a.md");
+        assert_eq!(all[0].rel_bm25, 1.0, "best BM25 hit of the list");
+        assert!(
+            all[1].rel_bm25 > 0.0 && all[1].rel_bm25 < 1.0,
+            "{}",
+            all[1].rel_bm25
+        );
+
+        let txt_only = idx
+            .search_filtered("alpha", 10, None, Some("txt"), None)
+            .unwrap();
+        assert_eq!(txt_only.len(), 1);
+        assert_eq!(txt_only[0].path, "b.txt");
+        assert_eq!(
+            txt_only[0].rel_bm25, all[1].rel_bm25,
+            "filtering keeps the value the pool gave; the list has no 1.0 and that is correct"
         );
     }
 

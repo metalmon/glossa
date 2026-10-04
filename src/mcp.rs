@@ -4652,6 +4652,8 @@ mod tests {
                 ord: 1,
                 snippet: String::new(),
                 score: 1.0,
+                rel_bm25: 1.0,
+                rel_rerank: None,
             },
             RankedHit {
                 path: "d.pdf".into(),
@@ -4660,6 +4662,8 @@ mod tests {
                 ord: 2,
                 snippet: String::new(),
                 score: 1.0,
+                rel_bm25: 1.0,
+                rel_rerank: None,
             },
         ];
         let ids = search_signal_ids(&hits);

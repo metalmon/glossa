@@ -2258,6 +2258,8 @@ mod tests {
             ord: 14,
             snippet: "x".into(),
             score: 1.0,
+            rel_bm25: 1.0,
+            rel_rerank: None,
         };
         let office = glossa::index::store::RankedHit {
             path: "d.md".into(),
@@ -2266,6 +2268,8 @@ mod tests {
             ord: 3,
             snippet: "y".into(),
             score: 1.0,
+            rel_bm25: 1.0,
+            rel_rerank: None,
         };
         assert!(search_hit_hits(&[pdf], &gold));
         assert!(search_hit_hits(&[office], &gold));
