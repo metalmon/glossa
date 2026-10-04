@@ -18,6 +18,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Extractor upgrade: `office_oxide` 0.1.8 → 0.1.11, `pdf_oxide` 0.3.77 → 0.3.78.** This changes
+  extracted text, so **`INDEX_SCHEMA_VERSION` 4 → 5: existing indexes rebuild on the next
+  `kb index`** — a file's signature is its mtime and size, so an extractor upgrade alone would never
+  re-read it, and a stale index would keep serving the old text. The visible gain is on legacy
+  Office: a `.doc` now yields tables at all (their structure was silently dropped, while `.docx`
+  emitted tables from the same call), document metadata is read instead of coming back empty, and
+  embedded pictures in `.doc`/`.xls`/`.ppt` include formats that used to be skipped. On the PDF
+  side, rendering gained a 16-megapixel output budget — nothing in a PDF bounds page size times
+  scale, so a huge page is now scaled to fit rather than exhausting memory — and five aborts on
+  valid files became catchable errors instead of killing the process.
+  **`office_oxide` is pinned at `<0.1.12` on purpose:** 0.1.12 added a field to a public IR struct
+  that `pdf_oxide` builds with an exhaustive literal, so the two cannot be in one dependency tree
+  until `pdf_oxide` default-fills it. That also holds `.xlsb` support, which arrived in 0.1.12.
+
 - **`kbx eval` fuses `ranked_sources` by best rank, not by raw score across queries.** BM25 values
   from different searches are not comparable (and a reranked hit's score is a logit), so a path now
   takes the best position it reached in any single `search`. **Retrieval@k numbers from before this

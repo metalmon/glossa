@@ -19,8 +19,13 @@ ignore = "0.4"
 regex = "1"
 regex-syntax = "0.8"
 globset = "0.4"
-office_oxide = "0.1"
-pdf_oxide = { version = "0.3", default-features = false, features = ["rendering", "legacy-crypto", "parallel"] }
+# office_oxide is CEILINGED at 0.1.11, not merely floored. 0.1.12 added a field to
+# `ir::DocumentIR`, and `pdf_oxide` (which depends on office_oxide and builds that struct with a
+# literal that names every field) therefore stops compiling at 0.1.12+. Cargo unifies both of us
+# onto one 0.1.x, so until pdf_oxide default-fills that literal, 0.1.11 is the newest we can take —
+# which also keeps `.xlsb` (0.1.12) out of reach. Raise the ceiling, do not just bump the floor.
+office_oxide = ">=0.1.11, <0.1.12"
+pdf_oxide = { version = "0.3.78", default-features = false, features = ["rendering", "legacy-crypto", "parallel"] }
 rdocx = "0.1"
 tantivy = { version = "0.26", default-features = false, features = ["mmap", "lz4-compression", "stemmer", "stopwords"] }
 serde = { version = "1", features = ["derive"] }

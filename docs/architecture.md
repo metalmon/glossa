@@ -46,8 +46,8 @@ Provenance on graph nodes records `source_path`, optional range, file signature,
 
 | Format | Library | Notes |
 |--------|---------|-------|
-| PDF | [pdf_oxide](https://github.com/pdf-oxide/pdf-oxide) | Per-page text; blank pages indexed empty; page raster for vision agents; embedded image extraction; scans indexed by filename if no text |
-| Office (OOXML + legacy) | [office_oxide](https://github.com/anthonyjoeseph/office_oxide) | doc/docx, xls/xlsx, ppt/pptx; `DocumentIR` → merge-cell densify → IR-level chunking (not whole-doc markdown) |
+| PDF | [pdf_oxide](https://github.com/yfedoseev/pdf_oxide) | Per-page text; blank pages indexed empty; page raster for vision agents (bounded at 16 megapixels, scaled to fit); embedded image extraction; scans indexed by filename if no text |
+| Office (OOXML + legacy) | [office_oxide](https://github.com/yfedoseev/office_oxide) | doc/docx, xls/xlsx, ppt/pptx; `DocumentIR` → merge-cell densify → IR-level chunking (not whole-doc markdown) |
 | OpenDocument | built-in | odt/ods/odp; `content.xml` parsed to `DocumentIR` (headings, tables with merged cells / repeats / clamps, section-per-sheet/slide), reusing the office chunker |
 | Charts | built-in | OOXML (`charts/chartN.xml` cache) and ODF (embedded local `<table:table>`, or cell-range refs resolved against the sheet) → chart **data** as a searchable GFM table, one chunk per chart |
 | Text-like | built-in | md, txt, json, yaml, xml, html, csv, source code; charset detection |
