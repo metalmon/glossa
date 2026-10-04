@@ -24,7 +24,7 @@ pub struct CaseResult {
     pub answer: String,
     pub transcript: String,
     pub judge_raw: String,
-    /// Reasoning shape the case exercises (`lexical|multihop|mixed`), carried from `Question` for
+    /// Reasoning shape the case exercises (`lexical` | `multihop` | empty), carried from `Question` for
     /// the "By question type" report breakdown. `#[serde(default)]` so cases persisted by an
     /// older binary (before this field existed) still deserialize under `--resume`.
     #[serde(default)]

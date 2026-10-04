@@ -1,3 +1,43 @@
-# kbx dataset — one [[case]] per question. `answer` is the gold reference; `aliases` are
-# alternative acceptable surface forms (optional); `tags` let `kbx eval --tag-filter` run a subset.
-# Empty by default — add your own [[case]] blocks before running `kbx eval`.
+# kbx dataset — one `[[case]]` per question. Add your own blocks; this file ships empty.
+#
+# Every field the parser accepts is below, with the values it accepts. `kbx dataset validate`
+# is the authority: it rejects an empty `id`, `question` or `answer`, a duplicate `id`, and an
+# out-of-range `hop_type` / `needs_graph`.
+#
+# [[case]]
+# # REQUIRED. Stable and unique — report rows, GEPA and `--tag-filter` all key on it, so renaming
+# # an id loses its history.
+# id = "pump-pressure-limit"
+#
+# # REQUIRED. What the reader is asked. Keep it as a user would phrase it.
+# question = "What is the inlet pressure limit for the booster pump?"
+#
+# # REQUIRED. The gold reference answer. TOML's `"""` multi-line form works for long ones.
+# answer = "4.2 MPa"
+#
+# # Optional. Other acceptable surface forms of the SAME answer — the judge accepts any of them.
+# # For a question with several genuinely different valid answers, this is the field to use;
+# # `source` is not (it is an AND of required evidence, see below).
+# aliases = ["4,2 МПа", "4.2 megapascals"]
+#
+# # Optional. Free-form labels; `kbx eval --tag-filter` runs a subset by them.
+# tags = ["pressure", "smoke"]
+#
+# # Optional. Reasoning shape, used to slice the report. Exactly one of "lexical" or "multihop",
+# # or omitted (reported as "(untyped)"). No other value passes validation.
+# hop_type = "multihop"
+#
+# # Optional. Whether answering needs the reasoning graph. Exactly one of "yes", "no" or "maybe",
+# # or omitted (reported as "(untyped)").
+# needs_graph = "no"
+#
+# # Optional. The chunk refs that together ground this gold, in `<path>#<location>` form exactly
+# # as `kb search` prints them. Treated as an AND: retrieval metrics expect the WHOLE set, and the
+# # judge loads them as evidence, crediting a correct answer that exceeds the terse gold. Use
+# # `aliases` for alternatives — a second ref here means "both are required", not "either".
+# source = ["manual.pdf#12", "spec.docx#3"]
+#
+# # Optional, defaults to true. Set false for a gold whose answer is NOT in the corpus: the case is
+# # then excluded from scoring and from GEPA rather than counted as a miss, which is how abstention
+# # is measured honestly.
+# answerable = true

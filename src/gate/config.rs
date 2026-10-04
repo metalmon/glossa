@@ -367,10 +367,14 @@ mod tests {
             c.is_nli_ready(),
             "the whole point: the configured mode now actually engages"
         );
-        assert!(
-            DEFAULT_NLI_THRESHOLD_MULTI > DEFAULT_NLI_THRESHOLD_SINGLE,
-            "multi-hop entailment measured near chance, so its default must be the stricter one"
-        );
+        // A const block, so the ordering is checked when this compiles rather than when the test
+        // runs — and clippy is right that comparing two constants at run time proves nothing.
+        const {
+            assert!(
+                DEFAULT_NLI_THRESHOLD_MULTI > DEFAULT_NLI_THRESHOLD_SINGLE,
+                "multi-hop entailment measured near chance, so its default must be the stricter one"
+            )
+        };
         std::env::remove_var("GLOSSA_VERIFY_MODE");
     }
 

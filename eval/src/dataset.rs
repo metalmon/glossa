@@ -20,7 +20,7 @@ pub struct Question {
     /// Free-form case tags carried by `dataset.toml` (e.g. filtering a run to a subset);
     /// empty for formats that don't carry them (hotpot/musique/questions).
     pub tags: Vec<String>,
-    /// Reasoning shape the case exercises (`lexical|multihop|mixed`), eval metadata carried by
+    /// Reasoning shape the case exercises (`lexical` | `multihop` | empty), eval metadata carried by
     /// `dataset.toml`; empty (via `Default`) for formats that don't carry it
     /// (hotpot/musique/questions). Not itself a serde attribute target -- `Question` is always
     /// hand-built from a format-specific `Raw*` type; those carry the real `#[serde(default)]`.

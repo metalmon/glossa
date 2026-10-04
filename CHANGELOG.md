@@ -33,6 +33,25 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The dataset schema's docs promised a value its validator rejects.** Three field docstrings
+  described `hop_type` as `lexical|multihop|mixed`, while `kbx dataset validate` accepts only
+  `""`, `lexical` or `multihop` — so a dataset written from the documentation failed validation on
+  a value nothing in the code implements (no counter, no bucket, no report slice). The docs now
+  state what the validator enforces; `mixed` is not added, because a third class with no consumer
+  would pass validation and then vanish into the "(untyped)" bucket. Reported by agents working
+  from the docstrings.
+- **`needs_graph` was documented as `yes|no|maybe` and never validated.** A typo passed validation
+  and then disappeared into the report's `(unset)` bucket, so a by-type slice silently lost the
+  case. It is checked now, the same way `hop_type` is, and the validator's doc comment is the
+  single authority both the template and the field docs point at.
+- **The `dataset.toml` template listed three fields out of nine.** `kbx init` shipped 273 bytes of
+  prose mentioning `answer`, `aliases` and `tags`, with no example block — so the load-bearing
+  fields (`id`, `question`, `answerable`, `source`, `hop_type`, `needs_graph`) had to be discovered
+  by trial. The template now carries one commented-out `[[case]]` with every field the parser
+  reads, the exact value sets the validator enforces, and the two distinctions that actually cost
+  people time: `source` is an AND of required evidence while `aliases` is the alternatives field,
+  and `answerable = false` excludes a case from scoring rather than counting it as a miss.
+
 - **`mode = "nli"` without calibration ran plain AC and reported itself configured.** The gate
   consulted NLI only when BOTH per-bucket thresholds were set, and thresholds come from
   `kbx eval calibrate`, which needs a graded run. So a corpus that had never been calibrated — any

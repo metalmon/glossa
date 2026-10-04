@@ -220,8 +220,13 @@ pub struct ValidationIssue {
 }
 
 /// Structural checks over a parsed dataset: non-empty question AND answer (after trim), `hop_type`
-/// in {"", "lexical", "multihop"}, and unique ids. Returns every issue found (empty = clean).
-/// A TOML/parse error is caught earlier, when the file is loaded.
+/// in {"", "lexical", "multihop"}, `needs_graph` in {"", "yes", "no", "maybe"}, and unique ids.
+/// Returns every issue found (empty = clean). A TOML/parse error is caught earlier, when the file
+/// is loaded.
+///
+/// These two value sets are the authority for the template and the field docs: an out-of-range
+/// value used to pass validation and then vanish into the report's "(untyped)"/"(unset)" bucket,
+/// so a typo cost a slice silently.
 pub fn validate_cases(cases: &[Case]) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
     let mut seen_ids: HashSet<&str> = HashSet::new();
@@ -244,6 +249,18 @@ pub fn validate_cases(cases: &[Case]) -> Vec<ValidationIssue> {
                 problem: format!(
                     "invalid hop_type {:?} (want \"\"|lexical|multihop)",
                     c.hop_type
+                ),
+            });
+        }
+        // `needs_graph` was documented as `yes|no|maybe` and never checked, so a typo became
+        // "(unset)" in the report's by-type section — the slice silently lost a case instead of
+        // naming the problem. Same shape as `hop_type` above, and the same reason for checking.
+        if !matches!(c.needs_graph.as_str(), "" | "yes" | "no" | "maybe") {
+            issues.push(ValidationIssue {
+                id: c.id.clone(),
+                problem: format!(
+                    "invalid needs_graph {:?} (want \"\"|yes|no|maybe)",
+                    c.needs_graph
                 ),
             });
         }
@@ -547,6 +564,14 @@ mod tests {
                 c.hop_type = "triple".into(); // bad hop_type
                 c
             },
+            {
+                // Documented as yes|no|maybe and never checked, so a typo passed validation and
+                // then disappeared into the report's "(unset)" bucket — the slice lost a case
+                // without saying so.
+                let mut c = case("w", "Q?", "A");
+                c.needs_graph = "probably".into();
+                c
+            },
             case("x", "Dup id?", "A"), // duplicate id
         ];
         let issues = validate_cases(&dirty);
@@ -559,6 +584,9 @@ mod tests {
         assert!(probs
             .iter()
             .any(|(id, p)| *id == "z" && p.contains("invalid hop_type")));
+        assert!(probs
+            .iter()
+            .any(|(id, p)| *id == "w" && p.contains("invalid needs_graph")));
         assert!(probs.contains(&("x", "duplicate id")));
     }
 

@@ -17,7 +17,7 @@ struct RawCase {
     aliases: Vec<String>,
     #[serde(default)]
     tags: Vec<String>,
-    /// Reasoning shape the case exercises (`lexical|multihop|mixed`); eval metadata used to slice
+    /// Reasoning shape the case exercises (`lexical` | `multihop` | empty); eval metadata used to slice
     /// the report by question type. Optional -- defaults to empty ("(untyped)" in the report).
     #[serde(default)]
     hop_type: String,
