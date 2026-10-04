@@ -2194,12 +2194,13 @@ fn parse_trace_file(path: &Path) -> (Vec<String>, Vec<String>, Vec<String>, Stri
     let mut seen = HashSet::new();
     let mut chunk_paths = Vec::new();
     let mut seen_paths = HashSet::new();
-    // ranked_sources: `search` hits are ranked by their best (max) score across all search calls
-    // in the trace, first-seen order broken ties; `grep`/`glob` hits have no score, so they're
-    // appended after the scored set (coverage, not ranking) in first-seen order, skipping any
-    // path the scored set already carries.
-    let mut best_score: HashMap<String, f64> = HashMap::new();
-    let mut scored_order: Vec<String> = Vec::new();
+    // ranked_sources: a `search` hit's rank is the best (lowest) 1-based position it reached in
+    // any single `search` result; ties keep first-seen order. Positions, not scores: BM25 values
+    // from different queries are not comparable, and after a rerank the score is a logit on
+    // another scale again. `grep`/`glob` hits have no rank, so they're appended after the ranked
+    // set (coverage, not ranking) in first-seen order, skipping any path the ranked set carries.
+    let mut best_rank: HashMap<String, usize> = HashMap::new();
+    let mut ranked_order: Vec<String> = Vec::new();
     let mut coverage: Vec<String> = Vec::new();
     let mut coverage_seen = HashSet::new();
     for line in text.lines() {
@@ -2231,15 +2232,15 @@ fn parse_trace_file(path: &Path) -> (Vec<String>, Vec<String>, Vec<String>, Stri
                 }
                 if t == "search" {
                     if let Some(arr) = v.get("result").and_then(|r| r.as_array()) {
-                        for item in arr {
+                        for (pos, item) in arr.iter().enumerate() {
                             if let Some(p) = item.get("path").and_then(|p| p.as_str()) {
-                                let sc = item.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0);
-                                let e = best_score.entry(p.to_string()).or_insert(f64::MIN);
-                                if *e == f64::MIN {
-                                    scored_order.push(p.to_string());
+                                let rank = pos + 1;
+                                let e = best_rank.entry(p.to_string()).or_insert(usize::MAX);
+                                if *e == usize::MAX {
+                                    ranked_order.push(p.to_string());
                                 }
-                                if sc > *e {
-                                    *e = sc;
+                                if rank < *e {
+                                    *e = rank;
                                 }
                             }
                         }
@@ -2263,16 +2264,12 @@ fn parse_trace_file(path: &Path) -> (Vec<String>, Vec<String>, Vec<String>, Stri
             }
         }
     }
-    let mut scored = scored_order.clone();
-    scored.sort_by(|a, b| {
-        best_score[b]
-            .partial_cmp(&best_score[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let scored_set: HashSet<String> = scored.iter().cloned().collect();
-    let mut ranked_sources = scored;
+    let mut ranked = ranked_order.clone();
+    ranked.sort_by_key(|p| best_rank[p]); // stable: equal ranks keep first-seen order
+    let ranked_set: HashSet<String> = ranked.iter().cloned().collect();
+    let mut ranked_sources = ranked;
     for p in coverage {
-        if !scored_set.contains(&p) {
+        if !ranked_set.contains(&p) {
             ranked_sources.push(p);
         }
     }
@@ -3054,5 +3051,57 @@ mod tests {
             }
             _ => panic!("expected Cmd::ExportDataset"),
         }
+    }
+
+    /// Two searches: path A is rank 3 with a huge BM25 score in one, path B is rank 1 with a tiny
+    /// score in the other. BM25 scores are not comparable across queries, so rank decides: B first.
+    /// A trace with no `score` keys at all ranks the same way.
+    #[test]
+    fn ranked_sources_fuse_by_best_rank_not_by_score() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("trace.jsonl");
+        std::fs::write(
+            &p,
+            concat!(
+                r#"{"tool":"search","args":{"query":"one"},"result":[{"path":"x.md","score":9.0},{"path":"y.md","score":8.0},{"path":"a.md","score":99.0}]}"#,
+                "\n",
+                r#"{"tool":"search","args":{"query":"two"},"result":[{"path":"b.md","score":0.01},{"path":"a.md","score":0.009}]}"#,
+                "\n",
+                r#"{"tool":"grep","args":{"pattern":"z"},"result":{"paths":["g.md","a.md"]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let (_tools, _chunks, ranked, _text) = parse_trace_file(&p);
+        assert_eq!(
+            ranked[0], "b.md",
+            "rank 1 in a search beats rank 3 anywhere: {ranked:?}"
+        );
+        assert_eq!(ranked[1], "x.md", "also rank 1, seen later -> second");
+        assert_eq!(ranked[2], "y.md");
+        assert_eq!(
+            ranked[3], "a.md",
+            "best rank 2 (second search), not its 99.0 score"
+        );
+        assert_eq!(
+            ranked.last().unwrap(),
+            "g.md",
+            "coverage after the ranked set, deduped"
+        );
+        assert_eq!(ranked.iter().filter(|s| *s == "a.md").count(), 1);
+
+        // No score keys at all: identical ranking.
+        std::fs::write(
+            &p,
+            concat!(
+                r#"{"tool":"search","args":{"query":"one"},"result":[{"path":"x.md"},{"path":"a.md"}]}"#,
+                "\n",
+                r#"{"tool":"search","args":{"query":"two"},"result":[{"path":"b.md"}]}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let (_t, _c, ranked, _x) = parse_trace_file(&p);
+        assert_eq!(ranked, vec!["x.md", "b.md", "a.md"]);
     }
 }

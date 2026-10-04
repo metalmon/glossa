@@ -57,7 +57,10 @@ pub struct CaseResult {
     /// supported by what was read. `#[serde(default)]` keeps pre-existing persisted cases loadable.
     #[serde(default)]
     pub chunk_paths: Vec<String>,
-    /// Deduped retrieved source docs, score-ranked (search) then coverage (grep/glob).
+    /// Deduped retrieved source docs: `search` hits ordered by the best rank each reached in any
+    /// single search (positions, never scores — BM25 is not comparable across queries), then
+    /// `grep`/`glob` coverage in first-seen order. Before 2026-10 this was max-score fusion; the
+    /// two orderings are not comparable, and neither are retrieval@k numbers across that boundary.
     #[serde(default)]
     pub ranked_sources: Vec<String>,
     /// The captured reader<->`user_sim` dialogue as `(role, text)` turns, in order. Under a
