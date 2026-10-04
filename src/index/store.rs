@@ -97,19 +97,30 @@ fn index_dir_path(dir: &Path) -> PathBuf {
     dir.join(".glossa").join("index")
 }
 
+/// Undo the verbatim prefix Windows' canonicalization adds, so `root.join(rel)` stays a clean path.
+///
+/// There are TWO forms and they are not interchangeable. A drive path canonicalizes to
+/// `\\?\C:\dir`, where dropping the four-character prefix leaves `C:\dir`. A **UNC** path
+/// canonicalizes to `\\?\UNC\server\share\dir`, where dropping the same four characters leaves
+/// `UNC\server\share\dir` — a RELATIVE path whose first component is a directory literally named
+/// "UNC". Every `root.join(rel)` after that points nowhere, which is a corpus on a network share
+/// failing to resolve at all. The UNC form must become `\\server\share\dir`.
+///
+/// A no-op on paths without the prefix, and on every non-Windows platform, where canonicalization
+/// produces none.
+fn strip_verbatim_prefix(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    s.strip_prefix(r"\\?\").unwrap_or(s).to_string()
+}
+
 /// The absolute corpus root — the single anchor for relative doc keys. Canonicalized so that `.`,
-/// `kb-test` and `E:\…\kb-test` all resolve to the same root (the `\\?\` verbatim prefix Windows
-/// adds is stripped so `root.join(rel)` stays a clean path).
+/// `kb-test` and `E:\…\kb-test` all resolve to the same root, with the verbatim prefix undone by
+/// [`strip_verbatim_prefix`] (see there for why a UNC share needs its own case).
 pub fn abs_root(dir: &Path) -> PathBuf {
     match std::fs::canonicalize(dir) {
-        Ok(p) => {
-            let s = p.to_string_lossy();
-            PathBuf::from(
-                s.strip_prefix(r"\\?\")
-                    .map(str::to_string)
-                    .unwrap_or_else(|| s.into_owned()),
-            )
-        }
+        Ok(p) => PathBuf::from(strip_verbatim_prefix(&p.to_string_lossy())),
         Err(_) => dir.to_path_buf(),
     }
 }
@@ -119,12 +130,7 @@ pub fn abs_root(dir: &Path) -> PathBuf {
 /// resolve, not receive an un-canonicalized stand-in it could accidentally match against.
 fn canonicalize_stripped(path: &Path) -> Option<PathBuf> {
     let p = std::fs::canonicalize(path).ok()?;
-    let s = p.to_string_lossy();
-    Some(PathBuf::from(
-        s.strip_prefix(r"\\?\")
-            .map(str::to_string)
-            .unwrap_or_else(|| s.into_owned()),
-    ))
+    Some(PathBuf::from(strip_verbatim_prefix(&p.to_string_lossy())))
 }
 
 /// A document's canonical key: its path RELATIVE to the corpus root. This is the ONE form stored in
@@ -6948,6 +6954,50 @@ mod store_root_tests {
         let (dir_abs2, label2) = resolve_dir_key(&dir_key2, &roots).expect("bare key resolves");
         assert_eq!(label2, "");
         assert_eq!(dir_abs2, abs_root(b.path()));
+    }
+
+    /// A corpus on a network share is the deployment this guards. Windows canonicalizes a UNC path
+    /// to `\\?\UNC\server\share\dir`, so stripping only the four-character verbatim prefix — which
+    /// is what this code did — yields `UNC\server\share\dir`: a RELATIVE path whose first component
+    /// is a directory named "UNC". Every `root.join(rel)` built from it points nowhere, and the
+    /// corpus silently resolves to nothing. Verified against `GetFinalPathNameByHandleW` on a real
+    /// share before fixing; these cases are the string halves of that, so they run everywhere.
+    #[test]
+    fn strip_verbatim_prefix_handles_unc_and_drive_forms() {
+        // The drive form: dropping the prefix leaves an absolute path, as it always did.
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\C:\corpus\docs"),
+            r"C:\corpus\docs"
+        );
+
+        // The UNC form: the prefix must become `\\`, not disappear.
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\UNC\fileserver\kb\docs"),
+            r"\\fileserver\kb\docs"
+        );
+        // The share root itself, with nothing below it.
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\UNC\fileserver\kb"),
+            r"\\fileserver\kb"
+        );
+
+        // No prefix: untouched. Covers every non-Windows path, which never carries one.
+        assert_eq!(
+            strip_verbatim_prefix("/srv/corpus/docs"),
+            "/srv/corpus/docs"
+        );
+        assert_eq!(strip_verbatim_prefix(r"C:\corpus"), r"C:\corpus");
+        assert_eq!(
+            strip_verbatim_prefix(r"\\fileserver\kb\docs"),
+            r"\\fileserver\kb\docs"
+        );
+
+        // A directory genuinely called "UNC" is not a prefix and must survive as a component.
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\C:\UNC\notes"),
+            r"C:\UNC\notes",
+            "only the prefix form is special, not the word"
+        );
     }
 
     #[test]

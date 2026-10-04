@@ -31,6 +31,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   batch-budget override, so a measured budget reaches the engine instead of being dropped when
   another handle loaded the same model directory first.
 
+### Fixed
+
+- **A corpus on a network share indexed nothing, and said it succeeded.** Two defects, both on the
+  path a pilot deployment takes. Windows canonicalizes a UNC root to `\\?\UNC\server\share\dir`,
+  and the engine stripped only the four-character `\\?\` prefix — leaving `UNC\server\share\dir`, a
+  **relative** path whose first component is a directory named "UNC". Every document path built
+  from it pointed nowhere. Reproduced on the shipped 0.5.4 binary against a real share: the walk
+  error named `UNC\localhost\…` verbatim, and `kb index` then printed `added: 0` and exited 0, so a
+  mis-resolved share was indistinguishable from an empty corpus. The prefix handling now covers
+  both forms, and **an unreadable corpus ROOT is an error rather than a skip** — a single
+  unreadable file deeper in the tree stays a skip, as before. The error names the share case
+  explicitly, including that a service runs as its own account and may not see a mapped drive.
+  Covered by unit tests for both path forms and the root-failure path, plus an opt-in end-to-end
+  spec (`GLOSSA_TEST_SHARE_ROOT`) that indexes, searches and reads a share-hosted corpus with state
+  on local disk and proves the share is never written to.
+
 ### Changed
 
 - **`kbx rerank check` reads the corpus, like every sibling command already did.** It took

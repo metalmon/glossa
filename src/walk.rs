@@ -48,6 +48,19 @@ pub fn walk_files(
         let entry = match result {
             Ok(e) => e,
             Err(e) => {
+                // An error ON THE ROOT means nothing below it was ever readable, so continuing
+                // produces an empty pass that reports success. That is how a corpus on an
+                // unreachable network share indexed zero documents and still exited 0 — the
+                // operator saw "added: 0" and had no reason to look further. A per-entry error
+                // deeper in the tree stays a skip: one unreadable file is not a failed corpus.
+                if e.path() == Some(root) {
+                    anyhow::bail!(
+                        "corpus root is not readable: {} ({e}) — check the path, and for a network \
+                         share that it is mounted and reachable by this user (a service runs as \
+                         its own account, which may not see your mapped drives)",
+                        root.display()
+                    );
+                }
                 eprintln!("skip (walk error): {e}");
                 continue;
             }
@@ -104,6 +117,35 @@ mod cover_tests {
         assert!(joined.contains("beta"));
         // the .png is indexed by name via ImageExtractor
         assert!(chunks.iter().any(|c| c.file_type == "png"));
+    }
+
+    /// An unreadable ROOT must fail, not report an empty success. This is the shape a corpus on an
+    /// unreachable network share takes: the walk yields one error for the root, zero files, and the
+    /// caller printed "added: 0" and exited 0 — so a mis-mounted share looked like an indexed
+    /// corpus until someone searched it. A missing directory stands in for the share here; the
+    /// failure path is identical and it needs no network.
+    #[test]
+    fn an_unreadable_root_is_an_error_not_an_empty_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-corpus");
+
+        let mut seen = 0usize;
+        let err = walk_files(&missing, None, false, &mut |_| {
+            seen += 1;
+            Ok(())
+        })
+        .expect_err("an unreadable root must not look like an empty corpus");
+
+        assert_eq!(seen, 0, "nothing could have been visited");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("corpus root is not readable"),
+            "the error must name the cause, got: {msg}"
+        );
+        assert!(
+            msg.contains("network share"),
+            "the message must point at the common cause, got: {msg}"
+        );
     }
 
     #[test]
