@@ -22,6 +22,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   from different searches are not comparable (and a reranked hit's score is a logit), so a path now
   takes the best position it reached in any single `search`. **Retrieval@k numbers from before this
   change are not comparable with numbers after it.**
+- **The reranker now scores a chunk's provenance along with its text.** The cross-encoder used to
+  receive the chunk body alone, so a page-per-chunk PDF arrived as bare prose with no hint of which
+  document it came from. The passage is now `<folder> / <folder> / <file stem>`, then
+  ` > <location>` when the chunker recorded one (a heading breadcrumb for Markdown and Office, a row
+  range for CSV, and so on), a blank line, then the body verbatim. Measured over a 175-question set:
+  +2.3pp whole-chain coverage and +4.6pp any-of at a window of 10, 5 cases gained against 1 lost,
+  with the gain largest on multi-hop questions. **Rerank order changes, so retrieval@k numbers from
+  before this change are not comparable with numbers after it.** Nothing is reindexed and no stored
+  text changes — `read`, snippets and offsets still resolve to the verbatim body. Requires
+  `[rerank].enabled`; deployments with reranking off are unaffected.
 
 ### Fixed
 

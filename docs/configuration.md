@@ -196,6 +196,17 @@ Reorders the fetched candidate pool with a cross-encoder; off unless explicitly 
 | `scorer` | `"in_process"` \| `"http"` | `in_process` loads the cross-encoder locally; `http` offloads to a remote `kbi` server (`endpoint` below). |
 | `model_dir` | path | Cross-encoder ONNX model dir (`in_process` only). |
 | `pool_size` | integer · default `50` | How many fetched candidates to rerank; set larger than the search limit to pool deeper. Env `GLOSSA_RERANK_POOL_SIZE`. |
+
+**What the cross-encoder is given.** Each candidate is scored as its own provenance followed by its
+text: `<folder> / <folder> / <file stem>`, then ` > <location>` when the chunker recorded one — a
+heading breadcrumb for Markdown and Office, a row range for CSV, `(image)` for an image indexed by
+name — then a blank line, then the chunk body **verbatim**. The body is never altered: `read`,
+snippets and offsets all resolve to the stored text, and this string exists only to be scored. The
+provenance is there because a page-per-chunk PDF otherwise reaches the scorer as bare prose with no
+hint of which manual it belongs to; it is measurably worth a few points of retrieval coverage, and
+the model reads the prefix's topic rather than its mere presence, which is why it is always the
+hit's own path and never a default.
+
 | `device` / `gpu_id` / `gpu_mem_mb` | as in `[verify.nli]` | Compute device + GPU knobs (`in_process`). Same single-value/auto-CPU-fallback semantics + the same migration from the old `execution_providers`/`ep_*` keys. |
 | `batch_tokens` | integer > 0 · default unset | Per-batch token budget (`in_process` only). A batch fills while `rows × longest_row ≤ batch_tokens`, so short passages batch more densely than full-length ones. Unset ⇒ the engine default. A configured budget is validated at load: a size the device cannot take fails there, naming the number, rather than on the first query. Env `GLOSSA_RERANK_BATCH_TOKENS`. |
 | `intra_threads` | integer > 0 · default unset | ONNX Runtime intra-op threads for this engine's session (`in_process` only). Unset ⇒ the engine default of 1. Env `GLOSSA_RERANK_INTRA_THREADS`. |

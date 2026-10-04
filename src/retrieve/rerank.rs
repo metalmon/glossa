@@ -59,12 +59,47 @@ pub enum RerankOutcome {
     FailedOpen(String),
 }
 
-/// The text the cross-encoder scores for one hit.
+/// The text the cross-encoder scores for one hit: the chunk's own provenance, then its body.
 ///
-/// Today: the chunk's stored body, verbatim. The body is what `read`, snippets and offsets all
+/// Shape: `<folder> / <folder> / <file stem>`, then ` > <location>` when the chunker recorded one,
+/// then a blank line, then the body **verbatim**. The body is what `read`, snippets and offsets all
 /// resolve to, so this string is built for scoring only and never written anywhere.
-pub fn rerank_passage(_path: &str, _location: &str, body: &str) -> String {
-    body.to_string()
+///
+/// Why the provenance helps: a page-per-chunk PDF reaches the scorer as bare prose with no hint of
+/// which manual it belongs to. Measured over 175 cases — +2.3pp whole-chain coverage and +4.6pp
+/// any-of at a window of 10, 5 cases gained against 1 lost. Controls settle the mechanism: a
+/// constant word costs ~1pp, a name from an unrelated document costs the same, and a name from a
+/// sibling document gains nearly as much as the true one. The model reads the prefix's TOPIC, so
+/// this must be the hit's own path — a guessed or defaulted one is actively harmful.
+///
+/// `location` is whatever its extractor stored: a heading breadcrumb for Markdown and Office, a row
+/// range for CSV, `(image)` for an image indexed by name. It is passed through unfiltered by
+/// choice: an allow-list of "worthy" location shapes is a policy table with no owner, and every
+/// extractor added later falls out of it silently.
+pub fn rerank_passage(path: &str, location: &str, body: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let mut parts: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+    if let Some(file) = parts.pop() {
+        // Drop a real extension only: `report.v1_5` keeps its name, `guide.pdf` loses `.pdf`.
+        let stem = file
+            .rsplit_once('.')
+            .filter(|(_, ext)| {
+                !ext.is_empty() && ext.len() <= 5 && ext.chars().all(|c| c.is_ascii_alphanumeric())
+            })
+            .map_or(file, |(stem, _)| stem);
+        parts.push(stem);
+    }
+    let mut head = parts.join(" / ");
+    if !location.is_empty() {
+        if !head.is_empty() {
+            head.push_str(" > ");
+        }
+        head.push_str(location);
+    }
+    if head.is_empty() {
+        return body.to_string();
+    }
+    format!("{head}\n\n{body}")
 }
 
 /// Reorder `pool` by a fresh cross-encoder score and keep the top `top_n`. The returned hits carry
@@ -484,7 +519,10 @@ mod tests {
         let pool = idx.search_filtered("swap", 10, None, None, None).unwrap();
         let (out, outcome) = rerank_hits(&idx, "swap", pool, &ByProvenance, 10);
         assert_eq!(outcome, RerankOutcome::Applied);
-        assert_eq!(out[0].location, "C", "the scorer never saw the provenance prefix");
+        assert_eq!(
+            out[0].location, "C",
+            "the scorer never saw the provenance prefix"
+        );
         assert_eq!(out[0].score, 5.0);
     }
 
