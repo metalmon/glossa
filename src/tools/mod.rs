@@ -96,7 +96,6 @@ fn hit_json(h: &RankedHit) -> serde_json::Value {
 /// document" filter (bare path or glob, via `DocIndex::search_filtered`'s `scope` param) — a
 /// SEPARATE, ANDed filter alongside the existing raw ripgrep `glob`, not a replacement for it.
 #[allow(clippy::too_many_arguments)]
-
 pub fn search(
     idx: &DocIndex,
     glossa_dir: &std::path::Path,
