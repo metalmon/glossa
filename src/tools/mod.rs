@@ -74,6 +74,21 @@ fn path_not_found(idx: &DocIndex, path: &str) -> String {
     )
 }
 
+/// One `search` hit as the agent and the trace see it. `score` is the engine's native number
+/// (BM25, or the reranker's logit); `rel_bm25` and `rel_rerank` are the two normalized readings
+/// (`rel_rerank` is `null` when the list was not reranked by a logit source). See
+/// [`crate::index::store::RankedHit`].
+fn hit_json(h: &RankedHit) -> serde_json::Value {
+    json!({
+        "path": h.path,
+        "location": h.location,
+        "score": h.score,
+        "rel_bm25": h.rel_bm25,
+        "rel_rerank": h.rel_rerank,
+        "snippet": h.snippet,
+    })
+}
+
 /// BM25 search (optionally scoped), routed through the config-gated rerank stage
 /// (`retrieve::rerank::retrieve`): with no `[rerank]` config under `glossa_dir` this is plain BM25,
 /// byte-identical to before; with it configured, the hits carry the rerank score. Returns (model
@@ -81,6 +96,7 @@ fn path_not_found(idx: &DocIndex, path: &str) -> String {
 /// document" filter (bare path or glob, via `DocIndex::search_filtered`'s `scope` param) — a
 /// SEPARATE, ANDed filter alongside the existing raw ripgrep `glob`, not a replacement for it.
 #[allow(clippy::too_many_arguments)]
+
 pub fn search(
     idx: &DocIndex,
     glossa_dir: &std::path::Path,
@@ -101,10 +117,7 @@ pub fn search(
         scope,
     ) {
         Ok((hits, info)) => {
-            let th: Vec<_> = hits
-                .iter()
-                .map(|h| json!({"path": h.path, "location": h.location, "score": h.score, "snippet": h.snippet}))
-                .collect();
+            let th: Vec<_> = hits.iter().map(hit_json).collect();
             trace.log("search", json!({"query": query}), json!(th));
             if info.reranked {
                 trace.log(
@@ -4753,5 +4766,34 @@ strict = true
             out,
             vec![("MENTIONS".to_string(), "d.pdf".to_string(), 1u64)]
         );
+    }
+
+    /// The two readings travel with every hit the agent sees, beside the native score; nothing that
+    /// existed moves. `rel_rerank` is JSON null when the list was not reranked.
+    #[test]
+    fn search_hit_json_carries_rel_bm25_and_rel_rerank() {
+        let plain = RankedHit {
+            path: "d.md".into(),
+            location: "A".into(),
+            file_type: "md".into(),
+            ord: 2,
+            snippet: "s".into(),
+            score: 6.02,
+            rel_bm25: 0.75,
+            rel_rerank: None,
+        };
+        let j = hit_json(&plain);
+        assert_eq!(j["path"], "d.md");
+        assert_eq!(j["location"], "A");
+        assert_eq!(j["score"], 6.02_f32 as f64);
+        assert_eq!(j["rel_bm25"], 0.75_f32 as f64);
+        assert!(j["rel_rerank"].is_null(), "plain BM25 list: no probability");
+        assert_eq!(j["snippet"], "s");
+
+        let reranked = RankedHit {
+            rel_rerank: Some(0.9994),
+            ..plain
+        };
+        assert_eq!(hit_json(&reranked)["rel_rerank"], 0.9994_f32 as f64);
     }
 }

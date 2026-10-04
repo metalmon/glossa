@@ -1532,7 +1532,7 @@ impl GlossaServer {
     // keep in sync with registry::DESC_SEARCH (rmcp's #[tool(description=…)] rejects a
     // non-literal path expr; the mcp_advertised_set_matches_catalog_full_profile test enforces byte-equality).
     #[tool(
-        description = "Full-text search over the knowledge base — natural-language keywords (morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `path#n · label · snippet`. Open a hit with `read(path#n)` — copy that leading token exactly as shown; the same token is what a node's `source_path` takes to ground it. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches."
+        description = "Full-text search over the knowledge base — natural-language keywords (morphology-aware, BM25-ranked), NOT a regex. Returns ranked hits, one per line as `path#n · label · snippet`. Open a hit with `read(path#n)` — copy that leading token exactly as shown; the same token is what a node's `source_path` takes to ground it. Scope with optional glob/file_type filters; for an exact token or code use `grep` instead. Hits are ranked best-first — the top few usually contain the answer, so read those rather than running many searches. Each hit also carries `rel_bm25` (relevance relative to the best hit of this list, 0-1) and, when a reranker ran, `rel_rerank` (the reranker's probability that the chunk is relevant, comparable across queries)."
     )]
     async fn search(
         &self,
