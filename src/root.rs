@@ -27,6 +27,28 @@ pub struct Root {
     pub path: PathBuf,
 }
 
+/// Corpus roots that cannot be read, as `(label, path, reason)` — one entry per failed root.
+///
+/// Exists because the walker cannot answer this: a root it cannot open yields zero files and no
+/// error (deliberately, so one unmounted share does not cost a multi-root index its other three
+/// roots), and a FIRST index of such a root then looks exactly like an empty corpus — `added: 0`,
+/// exit 0. On a re-index the empty-mount guard already holds the stale snapshot; this closes the
+/// first-index case, and it is checked per root so the caller can report every failure rather than
+/// stopping at the first.
+///
+/// `read_dir` rather than `is_dir`: it is the operation the walk will actually perform, so a
+/// directory that exists but denies this user — a share mounted by another account, the common
+/// shape under a service — is caught here instead of looking empty.
+pub fn unreadable_roots(roots: &[Root]) -> Vec<(String, PathBuf, std::io::Error)> {
+    roots
+        .iter()
+        .filter_map(|r| match std::fs::read_dir(&r.path) {
+            Ok(_) => None,
+            Err(e) => Some((r.label.clone(), r.path.clone(), e)),
+        })
+        .collect()
+}
+
 /// The outcome of root resolution: the chosen root, how it was chosen, and — for the nested-corpus
 /// trap — the nearest `.glossa/` STRICTLY ABOVE the chosen root, if any. A second `.glossa` in the
 /// ancestor chain means a server rooted higher would index this tree too (split-brain): worth a
@@ -608,5 +630,50 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("label"));
+    }
+
+    /// The multi-root case is the one that matters: a corpus with four roots where one is an
+    /// unmounted share must report THAT root and keep the other three. Reporting per root is why
+    /// this is a list rather than a bail on the first failure.
+    #[test]
+    fn unreadable_roots_names_each_failure_and_keeps_the_good_ones() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let roots = vec![
+            Root {
+                label: "docs".into(),
+                path: a.path().to_path_buf(),
+            },
+            Root {
+                label: "share".into(),
+                path: a.path().join("not-mounted"),
+            },
+            Root {
+                label: "specs".into(),
+                path: b.path().to_path_buf(),
+            },
+            Root {
+                label: "other".into(),
+                path: b.path().join("also-missing"),
+            },
+        ];
+
+        let bad = unreadable_roots(&roots);
+        let labels: Vec<&str> = bad.iter().map(|(l, _, _)| l.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["share", "other"],
+            "every unreadable root is named, in order, and the readable ones are absent"
+        );
+    }
+
+    #[test]
+    fn unreadable_roots_is_empty_when_every_root_resolves() {
+        let a = tempfile::tempdir().unwrap();
+        let roots = vec![Root {
+            label: String::new(),
+            path: a.path().to_path_buf(),
+        }];
+        assert!(unreadable_roots(&roots).is_empty());
     }
 }

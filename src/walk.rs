@@ -48,19 +48,11 @@ pub fn walk_files(
         let entry = match result {
             Ok(e) => e,
             Err(e) => {
-                // An error ON THE ROOT means nothing below it was ever readable, so continuing
-                // produces an empty pass that reports success. That is how a corpus on an
-                // unreachable network share indexed zero documents and still exited 0 — the
-                // operator saw "added: 0" and had no reason to look further. A per-entry error
-                // deeper in the tree stays a skip: one unreadable file is not a failed corpus.
-                if e.path() == Some(root) {
-                    anyhow::bail!(
-                        "corpus root is not readable: {} ({e}) — check the path, and for a network \
-                         share that it is mounted and reachable by this user (a service runs as \
-                         its own account, which may not see your mapped drives)",
-                        root.display()
-                    );
-                }
+                // Stays a skip, deliberately: one unreadable file is not a failed corpus, and a
+                // multi-root index must not lose three good roots because the fourth is a share
+                // that is not mounted. Whether the ROOT itself is readable is the caller's
+                // question — it knows the root's label and can report it per root. See
+                // `root_is_readable` and `Delta::unreadable_roots`.
                 eprintln!("skip (walk error): {e}");
                 continue;
             }
@@ -119,33 +111,22 @@ mod cover_tests {
         assert!(chunks.iter().any(|c| c.file_type == "png"));
     }
 
-    /// An unreadable ROOT must fail, not report an empty success. This is the shape a corpus on an
-    /// unreachable network share takes: the walk yields one error for the root, zero files, and the
-    /// caller printed "added: 0" and exited 0 — so a mis-mounted share looked like an indexed
-    /// corpus until someone searched it. A missing directory stands in for the share here; the
-    /// failure path is identical and it needs no network.
+    /// An unreadable root yields zero files and no error here, ON PURPOSE: a multi-root index must
+    /// not lose its good roots because one is an unmounted share. Detecting the unreadable root is
+    /// `root_is_readable`'s job, and reporting it per label is `scan_delta`'s — this pins that the
+    /// walker itself stays non-fatal so that split cannot be undone by accident.
     #[test]
-    fn an_unreadable_root_is_an_error_not_an_empty_pass() {
+    fn an_unreadable_root_is_not_fatal_to_the_walker() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("no-such-corpus");
 
         let mut seen = 0usize;
-        let err = walk_files(&missing, None, false, &mut |_| {
+        walk_files(&missing, None, false, &mut |_| {
             seen += 1;
             Ok(())
         })
-        .expect_err("an unreadable root must not look like an empty corpus");
-
+        .expect("the walker reports nothing, it does not fail the whole pass");
         assert_eq!(seen, 0, "nothing could have been visited");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("corpus root is not readable"),
-            "the error must name the cause, got: {msg}"
-        );
-        assert!(
-            msg.contains("network share"),
-            "the message must point at the common cause, got: {msg}"
-        );
     }
 
     #[test]

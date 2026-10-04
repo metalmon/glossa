@@ -1862,6 +1862,33 @@ fn main() -> anyhow::Result<()> {
             let (effective_roots, effective_state_dir) =
                 merge_corpus(&root_flags, state_dir.clone(), &deploy_cfg);
             let rr = resolve_inputs(path, &effective_roots, effective_state_dir)?;
+
+            // A root we cannot read indexes nothing, and the walker says nothing about it — so
+            // without this the pass printed `added: 0` and exited 0, which is how a corpus on an
+            // unmounted network share passed for an empty one. Reported per root, so a multi-root
+            // index names every failure instead of stopping at the first, and refuses outright
+            // only when NO root is readable (there is nothing to index then).
+            let unreadable = glossa::root::unreadable_roots(&rr.roots);
+            for (label, path, err) in &unreadable {
+                let named = if label.is_empty() {
+                    path.display().to_string()
+                } else {
+                    format!("{label}={}", path.display())
+                };
+                glossa::cli_fmt::note(&format!(
+                    "corpus root is not readable: {named} ({err}) — check the path, and for a \
+                     network share that it is mounted and reachable by THIS user (a service runs \
+                     under its own account and does not see your mapped drives)"
+                ));
+            }
+            if !unreadable.is_empty() && unreadable.len() == rr.roots.len() {
+                anyhow::bail!(
+                    "no corpus root is readable ({} of {}); nothing to index",
+                    unreadable.len(),
+                    rr.roots.len()
+                );
+            }
+
             let started = std::time::Instant::now();
             if let Some(rel) = file {
                 let idx =
@@ -1949,7 +1976,18 @@ fn main() -> anyhow::Result<()> {
                 glossa::cli_fmt::format_elapsed(started.elapsed()),
             ));
             glossa::cli_fmt::summary(&pairs);
-            Ok(())
+            // The readable roots ARE indexed and their counts stand in the summary above — but a
+            // partial index must not exit 0, or a deploy script reads "done" while one share is
+            // missing. The whole-corpus refusal happened before any work; this is the mixed case.
+            if unreadable.is_empty() {
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "{} of {} corpus roots could not be read (named above); the rest were indexed",
+                    unreadable.len(),
+                    rr.roots.len()
+                )
+            }
         }
         #[cfg(feature = "notebook")]
         Cmd::Prune { path, dry_run } => {
