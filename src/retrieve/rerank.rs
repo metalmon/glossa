@@ -59,6 +59,14 @@ pub enum RerankOutcome {
     FailedOpen(String),
 }
 
+/// The text the cross-encoder scores for one hit.
+///
+/// Today: the chunk's stored body, verbatim. The body is what `read`, snippets and offsets all
+/// resolve to, so this string is built for scoring only and never written anywhere.
+pub fn rerank_passage(_path: &str, _location: &str, body: &str) -> String {
+    body.to_string()
+}
+
 /// Reorder `pool` by a fresh cross-encoder score and keep the top `top_n`. The returned hits carry
 /// the RERANK score in `RankedHit.score` (so the trace + eval `ranked_sources` reflect rerank order —
 /// see plan Global Constraints). Fail-open: any scorer error or a score/length mismatch returns the
@@ -79,7 +87,7 @@ pub fn rerank_hits(
             idx.read_chunk_by_ord(&h.path, h.ord)
                 .ok()
                 .flatten()
-                .map(|c| c.body)
+                .map(|c| rerank_passage(&h.path, &h.location, &c.body))
                 .unwrap_or_default()
         })
         .collect();
@@ -401,6 +409,83 @@ mod tests {
                 })
                 .collect())
         }
+    }
+
+    // Scores a passage only when it carries the chunk's provenance ahead of the body, so this
+    // double fails unless the prefix actually reaches the scorer.
+    struct ByProvenance;
+    impl Reranker for ByProvenance {
+        fn rerank(&self, _q: &str, passages: &[&str]) -> anyhow::Result<Vec<f32>> {
+            Ok(passages
+                .iter()
+                .map(|p| if p.starts_with("d > C\n\n") { 5.0 } else { 1.0 })
+                .collect())
+        }
+    }
+
+    #[test]
+    fn rerank_passage_leads_with_the_document_path() {
+        assert_eq!(
+            rerank_passage("manuals/plc/setup guide.pdf", "", "the body"),
+            "manuals / plc / setup guide\n\nthe body"
+        );
+    }
+
+    #[test]
+    fn rerank_passage_normalizes_windows_separators() {
+        assert_eq!(
+            rerank_passage(r"manuals\plc\guide.pdf", "", "b"),
+            "manuals / plc / guide\n\nb"
+        );
+    }
+
+    #[test]
+    fn rerank_passage_appends_whatever_location_the_chunker_recorded() {
+        // The heading breadcrumb for Markdown/Office…
+        assert_eq!(
+            rerank_passage("notes/ops.md", "Networking > Gateways", "b"),
+            "notes / ops > Networking > Gateways\n\nb"
+        );
+        // …and, deliberately unfiltered, every other extractor's own label. An allow-list of
+        // "good" shapes would be a policy table that each new extractor silently falls out of.
+        assert_eq!(
+            rerank_passage("data/hosts.csv", "rows 201-300", "b"),
+            "data / hosts > rows 201-300\n\nb"
+        );
+        assert_eq!(
+            rerank_passage("diagrams/wiring.png", "(image)", "wiring"),
+            "diagrams / wiring > (image)\n\nwiring"
+        );
+    }
+
+    #[test]
+    fn rerank_passage_keeps_the_body_verbatim() {
+        let body = "  leading and trailing whitespace, and\na newline\n";
+        let got = rerank_passage("a/b.md", "H", body);
+        assert_eq!(got, format!("a / b > H\n\n{body}"));
+        assert!(got.ends_with(body), "body was altered: {got:?}");
+    }
+
+    #[test]
+    fn rerank_passage_strips_only_a_real_extension() {
+        assert_eq!(rerank_passage("readme", "", "b"), "readme\n\nb");
+        // `.v1_5` is not an extension (underscore), so the name stays whole.
+        assert_eq!(rerank_passage("report.v1_5", "", "b"), "report.v1_5\n\nb");
+    }
+
+    #[test]
+    fn rerank_passage_without_a_path_is_the_body_alone() {
+        assert_eq!(rerank_passage("", "", "just the body"), "just the body");
+    }
+
+    #[test]
+    fn rerank_hits_scores_the_passage_with_its_provenance() {
+        let (_d, idx) = idx_with_pages();
+        let pool = idx.search_filtered("swap", 10, None, None, None).unwrap();
+        let (out, outcome) = rerank_hits(&idx, "swap", pool, &ByProvenance, 10);
+        assert_eq!(outcome, RerankOutcome::Applied);
+        assert_eq!(out[0].location, "C", "the scorer never saw the provenance prefix");
+        assert_eq!(out[0].score, 5.0);
     }
 
     #[test]
