@@ -237,6 +237,26 @@ is a command rather than a default. It refuses rather than guesses in two cases:
 is fail-open, so that session is on CPU — where the answer is known and a cross-encoder pool is a
 thermal hazard).
 
+**Two normalized readings on every search hit.** Beside the engine's native `score`, each hit the
+`search` tool (and its trace) returns carries `rel_bm25` and `rel_rerank`.
+
+- `rel_bm25` is the hit's BM25 score as a fraction of the best BM25 score in the list that query
+  produced, so the best hit reads `1.0` and the rest are proportional. It is **relative**: it orders
+  hits within one list and says nothing about absolute relevance or about another query's list. A
+  filtered or trimmed list keeps the values the full pool gave it and may therefore hold no `1.0`.
+- `rel_rerank` is present only when a reranker scored the list, and only when that reranker's
+  numbers are raw logits: it is `sigmoid(logit)`, the model's own probability that the chunk is
+  relevant — **absolute**, comparable across queries, and what a threshold would be calibrated
+  against. It is computed here, by one function, for every logit source: the in-process engine,
+  TEI and `kbi` (we request `raw_scores: true`), vLLM (we request `use_activation: false`) and
+  llama.cpp (its server returns the classification head's raw output). `cohere` and `jina` return a
+  score they normalized and offer no raw option, so hits from them carry no `rel_rerank` — the
+  order is unaffected, and a line on stderr says so once.
+
+Neither field changes the order of hits or the printed `score`. They exist so that MMR, a rerank
+threshold and a BM25-plus-rerank blend — none of which this version ships — can be built on one
+scale.
+
 **All three are read once, when the session loads.** Changing one afterwards does not affect a
 process that is already running — the batch budget is part of the session's identity (it is in the
 model cache key) and the session is built around it, so a value re-read per call would have

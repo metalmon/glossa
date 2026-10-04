@@ -6,6 +6,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Two normalized readings on every `search` hit.** `rel_bm25` — the hit's BM25 score as a fraction
+  of the best in its list (relative, always present) — and `rel_rerank` — `sigmoid(logit)`, the
+  reranker's probability, present when a logit-emitting reranker scored the list (in-process, TEI,
+  `kbi`, vLLM, llama.cpp; vLLM is now asked for raw logits with `use_activation: false`). `cohere`
+  and `jina` keep ordering but carry no `rel_rerank`. The native `score` is unchanged; the fields are
+  additive in the tool JSON and trace. A reranker returning a non-finite score now fails open instead
+  of reaching the sort.
+
+### Changed
+
+- **`kbx eval` fuses `ranked_sources` by best rank, not by raw score across queries.** BM25 values
+  from different searches are not comparable (and a reranked hit's score is a logit), so a path now
+  takes the best position it reached in any single `search`. **Retrieval@k numbers from before this
+  change are not comparable with numbers after it.**
+
 ### Fixed
 
 - **Markdown chunks keep their heading line.** `chunk_markdown` moved every heading into `location` and dropped it from the chunk body, so a query naming a section could not match the section and `read` did not show what the file shows; Office chunks had always kept theirs. The heading line now stays in the body of the section it opens. Chunk boundaries are unchanged — a run of headings with nothing between them rides with the body that follows, as the old chunker's `location` already implied — so every `path#N` locator keeps its meaning. `INDEX_SCHEMA_VERSION` 3 → 4: existing indexes rebuild on the next `kb index`.
