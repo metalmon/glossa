@@ -28,10 +28,25 @@ mod tests {
             .unwrap();
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[0].location, "A");
-        assert_eq!(chunks[0].text.trim(), "intro");
+        // The section's own heading line is part of its body (verbatim source text); the
+        // breadcrumb of ancestors is what `location` carries.
+        assert_eq!(
+            chunks[0].text.trim(),
+            "# A
+intro"
+        );
         assert_eq!(chunks[1].location, "A > B");
-        assert_eq!(chunks[1].text.trim(), "body b");
+        assert_eq!(
+            chunks[1].text.trim(),
+            "## B
+body b"
+        );
         assert_eq!(chunks[2].location, "C");
+        assert_eq!(
+            chunks[2].text.trim(),
+            "# C
+body c"
+        );
     }
 
     #[test]
