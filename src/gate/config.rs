@@ -314,7 +314,9 @@ impl VerifyConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{VerifyConfig, VerifyMode};
+    use super::{
+        VerifyConfig, VerifyMode, DEFAULT_NLI_THRESHOLD_MULTI, DEFAULT_NLI_THRESHOLD_SINGLE,
+    };
     use crate::gate::score::Bucket;
 
     #[test]
