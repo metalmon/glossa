@@ -6,6 +6,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.4] — 2026-10-05
+
+> **Upgrading from 0.5.3: reindex once, and do not compare retrieval numbers across this release.**
+> `INDEX_SCHEMA_VERSION` goes 3 → 5 here, so the first `kb index` after the upgrade rebuilds the
+> index from the corpus. That is the whole migration — nothing else to run, and the graph is
+> untouched. Two separate changes re-baseline retrieval measurements (rank fusion in `kbx eval`, and
+> the text the reranker scores), so a before/after comparison across 0.5.3 → 0.5.4 is not
+> meaningful. If you use the downloadable reranker models, re-fetch them (see Fixed).
+
 ### Added
 
 - **Two normalized readings on every `search` hit.** `rel_bm25` — the hit's BM25 score as a fraction
@@ -48,6 +57,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `[rerank].enabled`; deployments with reranking off are unaffected.
 
 ### Fixed
+
+- **The published reranker models were batch-1-only and are republished.** Between 2026-09-28 and
+  2026-10-02 all three variants (fp32 / fp16 / int8) on the model hub carried an ONNX export whose
+  two shared reshape vectors hard-coded a batch of one, so scoring any pool of two or more passages
+  failed with a broadcast error — and because reranking fails open, affected deployments silently
+  served plain BM25 while reporting a configured reranker. The exports were rebuilt from clean
+  sources with a narrow patch (only the two shared dynamic dimensions replaced with literals) and
+  verified at batch 2 on CPU, CUDA and DirectML. **If you downloaded a model in that window, fetch
+  it again** (`kbx rerank download`); a `kbx rerank check` that passes at batch 2 is the test. No
+  `kb`/`kbx` code was involved, so a rebuild alone does not fix it.
 
 - **Markdown chunks keep their heading line.** `chunk_markdown` moved every heading into `location` and dropped it from the chunk body, so a query naming a section could not match the section and `read` did not show what the file shows; Office chunks had always kept theirs. The heading line now stays in the body of the section it opens. Chunk boundaries are unchanged — a run of headings with nothing between them rides with the body that follows, as the old chunker's `location` already implied — so every `path#N` locator keeps its meaning. `INDEX_SCHEMA_VERSION` 3 → 4: existing indexes rebuild on the next `kb index`.
 
