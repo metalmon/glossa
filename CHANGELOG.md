@@ -6,6 +6,27 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **GPU release artifacts for Linux, and a vendor-independent GPU engine on both Linux and
+  Windows.** Release builds went from eight archives to twelve. New: `linux-gnu-cuda13` (the GPU
+  libraries bundled and pinned by digest, as the Windows one already was), `linux-gnu-rocm`, and
+  `vulkan` on Linux **and** Windows. The Vulkan rows are the pure-Rust burn engine rather than ONNX
+  Runtime, so they need only a graphics driver — no CUDA, no cuDNN, no ROCm, nothing bundled — which
+  makes them the practical answer on AMD, where Microsoft publishes no ROCm build of ONNX Runtime at
+  all. The ROCm archive is consequently the binary alone: the operator supplies a ROCm-enabled ONNX
+  Runtime through `ORT_DYLIB_PATH`, and a note inside the archive says so.
+- **`[features] nli-burn-vulkan` on the `glossa` crate.** `nli-burn` is engine code without a
+  backend, mirroring how the ORT features separate code from linking strategy, so a `kb` built with
+  it alone did not compile. This is the feature a `kb` build names to get the Vulkan backend.
+
+### Changed
+
+- **Release archives name their engine.** Three rows shipped as `…-ort` while being three different
+  engines — DirectML on Windows, CoreML on macOS, plain CPU on Linux. They are now `…-directml`,
+  `…-coreml` and `…-cpu`. The engine is the one thing an operator has to choose, so the filename
+  says it. Scripts that hardcoded `-ort` need updating.
+
 ## [0.5.4] — 2026-10-05
 
 > **Upgrading from 0.5.3: reindex once, and do not compare retrieval numbers across this release.**

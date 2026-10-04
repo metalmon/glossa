@@ -128,6 +128,13 @@ nli-dynamic = ["dep:glossa-nli", "glossa-nli/nli-ort"]
 # `cargo test -p glossa --all-features` is NOT used in CI (it would trip the XOR); the test matrix
 # enables an explicit ORT feature set and this burn engine in separate jobs (see .github/tests.yml).
 nli-burn = ["dep:glossa-nli", "glossa-nli/nli-burn-wgpu"]
+# The burn BACKEND, for builds where `glossa` IS the top crate — `kb` itself. `nli-burn` above is
+# code-only by design (it mirrors how the ORT features separate engine code from linking strategy),
+# so a `kb` built with `nli-burn` alone does not even compile: `BurnBackend` has no arm without a
+# backend feature. `kbx`/`kbi` get theirs from kb-eval's own `nli-burn`; this is the one a `kb`
+# build names. Vulkan/SPIR-V, so it runs on any vendor's card with only a driver present — no CUDA,
+# no cuDNN, no ROCm, no ONNX Runtime at all.
+nli-burn-vulkan = ["nli-burn", "glossa-nli/nli-burn-vulkan"]
 # GPU execution providers for the ORT engine, so `kb` (the live MCP `verify` gate) can run NLI on
 # the GPU — mirrors kb-eval's passthroughs. Opt-in only: NONE of these is in the CI feature set
 # (.github/tests.yml uses an explicit `nli nli-dynamic …` set, no `--all-features` job), because

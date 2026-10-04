@@ -36,32 +36,59 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      # Two engine variants per platform:
-      #   none — the lean public artifact: `--no-default-features` (no `notebook`, no ML deps).
-      #   ort  — the PROD-grade artifact: DEFAULT features (so `notebook` stays — prod relies on it)
-      #          PLUS a self-contained ONNX Runtime NLI execution provider that rides the
-      #          `nli-ort-bundled` (`download-binaries`) linking strategy — no external dll to source:
-      #          Windows → DirectML (all-vendor GPU), macOS → CoreML, Linux → CPU. (`constraint` stays
-      #          off — it is opt-in, not a default feature.)
-      # ROCm is excluded (load-dynamic, no self-contained artifact). CUDA ships as the `cuda13`
-      # Windows variant: it uses `load-dynamic` too, but the ONNX Runtime GPU (CUDA 13) DLLs are
-      # fetched and bundled beside the binary (see the "Fetch ONNX Runtime CUDA-13 DLLs" step), so it
-      # is drop-in APART FROM two runtime prerequisites on the target: CUDA 13 + cuDNN 9, and
-      # `ORT_DYLIB_PATH` pointing at the bundled `onnxruntime.dll`. Matched to ort 2.0.0-rc.13 (ORT
-      # 1.28) — `onnxruntime-win-x64-gpu_cuda13-1.28.2`.
+      # One row per (platform, engine). The engine name lands in the archive filename, because that
+      # is the only thing an operator has to choose. `none` is `--no-default-features` (no
+      # `notebook`, no ML deps); every other row keeps DEFAULT features, since prod relies on
+      # `notebook`, and adds exactly one engine (`constraint` stays opt-in either way).
+      #
+      # How the engines differ, because it decides what has to exist on the target machine:
+      #   directml / coreml — ONNX Runtime, self-contained (ort's bundled `download-binaries`):
+      #                       nothing to install. DirectML is all-vendor on Windows.
+      #   cpu               — the same bundled ONNX Runtime, no GPU provider.
+      #   cuda13            — ONNX Runtime `load-dynamic`; the GPU libraries are fetched and
+      #                       bundled beside the binary (steps below), pinned by digest and matched
+      #                       to ort 2.0.0-rc.13 (ORT 1.28.2). Still needs CUDA 13 + cuDNN 9 on the
+      #                       target, plus `ORT_DYLIB_PATH` pointing at the bundled runtime.
+      #   rocm              — ONNX Runtime `load-dynamic` with NOTHING bundled: Microsoft publishes
+      #                       no ROCm build of ONNX Runtime, so the operator supplies one.
+      #   vulkan            — not ONNX Runtime at all: the pure-Rust burn engine on Vulkan/SPIR-V.
+      #                       Needs only a driver, works on any vendor, bundles nothing.
       matrix:
         include:
+          # `engine` used to read `ort` on three rows that are three DIFFERENT engines (DirectML,
+          # CoreML, plain CPU) — and it is the filename an operator picks from, so it now names the
+          # engine instead.
+          #
+          # No engine at all: BM25 retrieval only. `kbi` cannot exist here — it has nothing to serve.
           - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
           - { os: macos-latest,   target: aarch64-apple-darwin,     archive: tar.gz, engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
           - { os: macos-latest,   target: x86_64-apple-darwin,      archive: tar.gz, engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: ort,  kb_flags: "--features nli-directml", kbx_flags: "--features nli-directml", build_server: true }
+          # ONNX Runtime, SELF-CONTAINED: the provider rides ort's bundled download, nothing to
+          # install on the target.
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: directml, kb_flags: "--features nli-directml", kbx_flags: "--features nli-directml", build_server: true }
+          - { os: macos-latest,   target: aarch64-apple-darwin,     archive: tar.gz, engine: coreml,   kb_flags: "--features nli-coreml",   kbx_flags: "--features nli-coreml",   build_server: true }
+          # NOTE: no x86_64-apple-darwin engine row — ort-sys ships no `download-binaries` ONNX
+          # Runtime for Intel Mac ("no prebuilt binaries available for target x86_64-apple-darwin"),
+          # so a self-contained build is impossible there. Intel Mac gets the `none` variant only.
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: cpu,      kb_flags: "--features nli",          kbx_flags: "--features nli" }
+          # ONNX Runtime, LOAD-DYNAMIC: nothing is linked at build time, so the GPU-capable runtime
+          # travels with the archive (cuda13, fetched below) or is supplied by the operator (rocm).
           - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: cuda13, kb_flags: "--features nli-cuda", kbx_flags: "--features nli-cuda", build_server: true }
-          - { os: macos-latest,   target: aarch64-apple-darwin,     archive: tar.gz, engine: ort,  kb_flags: "--features nli-coreml",   kbx_flags: "--features nli-coreml", build_server: true }
-          # NOTE: no x86_64-apple-darwin · ort — ort-sys ships no `download-binaries` ONNX Runtime for
-          # Intel Mac ("no prebuilt binaries available for target x86_64-apple-darwin"), so a
-          # self-contained ort build is impossible there. Intel Mac gets the `none` variant only.
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: ort,  kb_flags: "--features nli",          kbx_flags: "--features nli" }
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: cuda13, kb_flags: "--features nli-cuda", kbx_flags: "--features nli-cuda", build_server: true }
+          # ROCm ships no runtime of its own: Microsoft publishes NO ROCm build of ONNX Runtime for
+          # any platform (the 1.28.2 release carries linux/win CUDA 12 and 13 and nothing else), so
+          # this row is the binary only and the operator points `ORT_DYLIB_PATH` at a ROCm-enabled
+          # ONNX Runtime they built. Linux only — AMD on Windows is DirectML's job, above.
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: rocm,   kb_flags: "--features nli-rocm", kbx_flags: "--features nli-rocm", build_server: true }
+          # The pure-Rust engine: burn with the Vulkan/SPIR-V backend. NOT ONNX Runtime at all, so
+          # there is nothing to install or bundle — any vendor's card with a Vulkan driver. This is
+          # the practical answer for AMD, where no ROCm runtime is published. `kb` names the backend
+          # through glossa's own `nli-burn-vulkan` (its `nli-burn` is code-only); `kbx` gets it from
+          # kb-eval's `nli-burn`. No `build_server` yet: `kbi` still holds concrete ORT types, so it
+          # joins these rows with the change that makes the server engine-agnostic.
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: vulkan, kb_flags: "--features nli-burn-vulkan", kbx_flags: "--features nli-burn" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: vulkan, kb_flags: "--features nli-burn-vulkan", kbx_flags: "--features nli-burn" }
     steps:
       - uses: actions/checkout@v4
 
@@ -71,7 +98,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.engine }}   # keep the none/ort dependency graphs in separate caches
+          key: ${{ matrix.engine }}   # one cache per engine — the dependency graphs differ
 
       - name: Build kb
         run: cargo build --release --locked --target ${{ matrix.target }} -p glossa --bin kb ${{ matrix.kb_flags }}
@@ -81,19 +108,20 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }} -p kb-eval --bin kbx ${{ matrix.kbx_flags }}
 
       - name: Build kbi
-        # The standalone HTTP scorer (NLI + reranker over TEI/Jina). Built ONLY on rows whose feature
-        # enables the server — the GPU execution providers (nli-cuda/nli-directml/nli-coreml). The
-        # `none` and CPU-`nli` rows would ship the useless "needs an engine feature" stub (the server
-        # is gated on a GPU EP, not plain `nli`), so `build_server` marks the rows that build a real one.
+        # The standalone HTTP scorer (NLI + reranker over TEI/Jina). `build_server` marks the rows
+        # that can build a REAL one: the server's CLI is gated on an ORT execution-provider feature
+        # (nli-directml/nli-coreml/nli-cuda/nli-rocm), so a `none`, `cpu` or `vulkan` row would ship
+        # the "needs an ORT engine feature" stub that exits 2. The `cpu` and `vulkan` rows join once
+        # the server stops holding concrete ORT types; `none` never can, having no engine at all.
         if: matrix.build_server
         run: cargo build --release --locked --target ${{ matrix.target }} -p kb-eval --bin kbi ${{ matrix.kbx_flags }}
 
-      - name: Fetch ONNX Runtime CUDA-13 DLLs (cuda13 only)
+      - name: Fetch ONNX Runtime CUDA-13 DLLs (Windows cuda13)
         # nli-cuda uses ort's `load-dynamic`: nothing is linked/downloaded at build time, so the
         # GPU-capable ONNX Runtime must be supplied at RUNTIME. Fetch the ORT 1.28 CUDA-13 build
         # (matches ort 2.0.0-rc.13's ORT 1.28 target) and drop its DLLs beside the binary — the
         # Windows package step below copies `onnxruntime*.dll` from the release dir into the zip.
-        if: matrix.engine == 'cuda13'
+        if: matrix.engine == 'cuda13' && runner.os == 'Windows'
         shell: pwsh
         run: |
           $ver = "1.28.2"
@@ -114,6 +142,51 @@ jobs:
           Get-ChildItem -Recurse ort-gpu -Filter "onnxruntime*.dll" | Copy-Item -Destination $dst -Force
           Get-ChildItem "$dst/onnxruntime*.dll" | ForEach-Object { Write-Host "bundled: $($_.Name)" }
 
+      - name: Fetch ONNX Runtime CUDA-13 shared libraries (Linux cuda13)
+        # Same reasoning as the Windows step above, different archive shape: the Linux asset is a
+        # .tgz of `lib/libonnxruntime*.so*`. Dropped beside the binary, where the Unix package step
+        # below already copies `libonnxruntime*.so*` into the tarball. The digest is the GitHub
+        # release asset digest, verified after download so a substituted archive fails the build
+        # instead of shipping an unverified GPU library.
+        if: matrix.engine == 'cuda13' && runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          ver="1.28.2"
+          sha="118ca8dbc4e4bb9b3b7fea137d796a89d957c9aa70e1dc3a5199a302cdd5bb32"
+          url="https://github.com/microsoft/onnxruntime/releases/download/v${ver}/onnxruntime-linux-x64-gpu_cuda13-${ver}.tgz"
+          curl -fsSL -o ort-gpu.tgz "$url"
+          echo "${sha}  ort-gpu.tgz" | sha256sum -c -
+          echo "ORT GPU tgz SHA256 verified"
+          mkdir -p ort-gpu && tar -xzf ort-gpu.tgz -C ort-gpu --strip-components=1
+          dst="target/${{ matrix.target }}/release"
+          mkdir -p "$dst"
+          # Only the ONNX Runtime libraries. CUDA/cuDNN runtime libs are NOT bundled (licensing) —
+          # they come from the target's CUDA 13 + cuDNN 9, exactly as on Windows.
+          find ort-gpu -name 'libonnxruntime*.so*' -exec cp -P {} "$dst/" \;
+          ls -1 "$dst"/libonnxruntime*.so* | sed 's/^/bundled: /'
+
+      - name: Note the runtime ROCm needs (rocm only)
+        # This row bundles no ONNX Runtime at all, because none is published for ROCm. Say so inside
+        # the archive rather than letting the operator discover it from a load failure.
+        if: matrix.engine == 'rocm'
+        run: |
+          cat > ENGINE-NOTES.txt <<'EOF'
+          ROCm build — the ONNX Runtime is NOT included.
+
+          Microsoft publishes no ROCm build of ONNX Runtime, so this archive carries the glossa
+          binaries only. To use the GPU you must supply a ROCm-enabled ONNX Runtime yourself and
+          point ORT_DYLIB_PATH at it:
+
+              export ORT_DYLIB_PATH=/path/to/libonnxruntime.so
+
+          Without it, scoring falls back to the CPU silently — `kbx nli check <corpus>` and
+          `kbx rerank check --model-dir <dir>` report `ep_active`, which is how you tell.
+
+          If building ONNX Runtime from source is not something you want to own, prefer the
+          `vulkan` archive: it is a pure-Rust engine that needs only a Vulkan driver, works on any
+          vendor, and bundles nothing.
+          EOF
+
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
         run: |
@@ -130,6 +203,8 @@ jobs:
           cp target/${{ matrix.target }}/release/libonnxruntime*.dylib "dist/${stem}/" 2>/dev/null || true
           cp target/${{ matrix.target }}/release/libonnxruntime*.so* "dist/${stem}/" 2>/dev/null || true
           cp README.md LICENSE "dist/${stem}/"
+          # Present only on rows that bundle no runtime of their own (rocm); no-op elsewhere.
+          cp ENGINE-NOTES.txt "dist/${stem}/" 2>/dev/null || true
           tar -czf "dist/${stem}.tar.gz" -C dist "${stem}"
 
       - name: Package (Windows)
@@ -158,7 +233,7 @@ jobs:
       # thing a release publishes, and shipping binaries that cannot find an ONNX Runtime would break
       # that promise. This one is for `gh run download` on an already-provisioned box.
       - name: Package (Windows, binaries only — cuda13)
-        if: matrix.engine == 'cuda13'
+        if: matrix.engine == 'cuda13' && runner.os == 'Windows'
         shell: pwsh
         run: |
           $tag = ("${{ github.ref_name }}" -replace '^v', '') -replace '/', '-'
@@ -182,7 +257,7 @@ jobs:
       # Named OUTSIDE the `glossa-*` namespace on purpose: the release job downloads `glossa-*` only,
       # so this never becomes a published release asset.
       - uses: actions/upload-artifact@v4
-        if: matrix.engine == 'cuda13'
+        if: matrix.engine == 'cuda13' && runner.os == 'Windows'
         with:
           name: binsonly-${{ matrix.target }}-${{ matrix.engine }}
           path: dist-bins/*.zip
