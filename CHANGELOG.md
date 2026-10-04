@@ -6,6 +6,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Markdown chunks keep their heading line.** `chunk_markdown` moved every heading into `location` and dropped it from the chunk body, so a query naming a section could not match the section and `read` did not show what the file shows; Office chunks had always kept theirs. The heading line now stays in the body of the section it opens. Chunk boundaries are unchanged — a run of headings with nothing between them rides with the body that follows, as the old chunker's `location` already implied — so every `path#N` locator keeps its meaning. `INDEX_SCHEMA_VERSION` 3 → 4: existing indexes rebuild on the next `kb index`.
+
 ## [0.5.3] — 2026-10-01
 
 ### Added

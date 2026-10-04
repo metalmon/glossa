@@ -16,7 +16,9 @@ use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer};
 use tantivy::{doc, Index, IndexReader, TantivyDocument, TantivyError};
 
 /// Bump when the tantivy schema changes (triggers index-only rebuild via manifest migration).
-pub const INDEX_SCHEMA_VERSION: u32 = 3;
+// 4: Markdown chunks keep the heading line that opens them (it used to live in `location` only),
+//    so every stored body changes and a stale index would keep headings unsearchable.
+pub const INDEX_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone, Copy)]
 pub struct Fields {

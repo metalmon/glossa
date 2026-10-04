@@ -45,35 +45,42 @@ fn push_chunk(
 }
 
 /// Split Markdown (or Markdown rendered from another format) into heading-scoped chunks.
+///
+/// A chunk is a section's text VERBATIM, heading line included: the heading is source text at that
+/// position, a query naming the section has to be able to match the chunk, and `read` has to show
+/// what the file shows. The breadcrumb of ancestors still goes to `location` as before.
+///
+/// Boundaries are unchanged from when headings were dropped: a chunk closes only when it holds body
+/// text, so a run of headings with nothing between them (a title directly over its first
+/// subsection) rides with the body that follows instead of becoming a chunk of its own, and every
+/// `path#N` locator stays where it was. The one exception is a document made ENTIRELY of headings —
+/// it would otherwise produce zero chunks and vanish from search while the manifest records it as
+/// indexed — which comes out as a single chunk of its heading lines.
 pub fn chunk_markdown(path: &Path, text: &str, file_type: &str) -> Vec<Chunk> {
     let mut out = Vec::new();
     let mut heading_path: Vec<String> = Vec::new();
-    let mut all_headings: Vec<String> = Vec::new();
     let mut buf = String::new();
+    // Whether `buf` holds at least one non-blank line that is not a heading.
+    let mut has_body = false;
 
     for line in text.lines() {
         if let Some((level, title)) = parse_atx_heading(line) {
-            push_chunk(path, &heading_path, file_type, &mut buf, &mut out);
+            if has_body {
+                push_chunk(path, &heading_path, file_type, &mut buf, &mut out);
+                has_body = false;
+            }
             heading_path.truncate(level.saturating_sub(1));
-            heading_path.push(title.clone());
-            all_headings.push(title);
-        } else {
-            buf.push_str(line);
-            buf.push('\n');
+            heading_path.push(title);
+        } else if !line.trim().is_empty() {
+            has_body = true;
         }
+        buf.push_str(line);
+        buf.push('\n');
     }
-    push_chunk(path, &heading_path, file_type, &mut buf, &mut out);
-    // A document made up ENTIRELY of headings (a title-only stub, no body text) would otherwise
-    // produce zero chunks and vanish from search — the manifest records the file as indexed, yet
-    // nothing is findable. Index the heading text as a single chunk so the doc stays searchable by
-    // its title. Only fires when there is no body chunk at all; docs with any body are unaffected.
-    if out.is_empty() && !all_headings.is_empty() {
-        out.push(Chunk {
-            doc_path: path.to_path_buf(),
-            location: heading_path.join(" > "),
-            file_type: file_type.to_string(),
-            text: all_headings.join("\n"),
-        });
+    // A trailing run of headings with no body under it is not a section anyone can point at and
+    // produced no chunk before either — unless it is the whole document.
+    if has_body || out.is_empty() {
+        push_chunk(path, &heading_path, file_type, &mut buf, &mut out);
     }
     out
 }
