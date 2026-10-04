@@ -117,12 +117,45 @@ mod tests {
         );
     }
 
+    /// The heading line is source text at that position, and the body is meant to be verbatim: a
+    /// query naming the section has to be able to match the chunk, and `read` has to show what the
+    /// file shows. Office chunks already keep their own heading; Markdown dropped it into `location`
+    /// only, which made a heading's words unsearchable in the one place they belong.
     #[test]
-    fn doc_with_body_is_unaffected_by_heading_only_fallback() {
-        // The fallback must NOT change chunking for a normal doc that has body text.
+    fn the_heading_line_stays_in_the_body_of_the_section_it_opens() {
+        let chunks = chunk_markdown(Path::new("x.md"), "# H\nbody\n", "md");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, "# H\nbody\n");
+        assert_eq!(chunks[0].location, "H", "the breadcrumb is unchanged");
+    }
+
+    /// Headings with nothing between them (a title directly over its first subsection) do not
+    /// become chunks of their own: they ride with the body that follows. That keeps every chunk
+    /// boundary — and so every `path#N` locator — exactly where it was before headings were kept.
+    #[test]
+    fn headings_without_text_between_them_join_the_body_that_follows() {
+        let chunks = chunk_markdown(Path::new("x.md"), "# A\n## B\nbody b\n## C\nbody c\n", "md");
+        assert_eq!(chunks.len(), 2, "same count as when headings were dropped");
+        assert_eq!(chunks[0].text, "# A\n## B\nbody b\n");
+        assert_eq!(chunks[0].location, "A > B");
+        assert_eq!(chunks[1].text, "## C\nbody c\n");
+        assert_eq!(chunks[1].location, "A > C");
+    }
+
+    /// A heading at the very end with no body under it produced no chunk before, and still does not:
+    /// a stub section is not a locator anyone can point at.
+    #[test]
+    fn a_trailing_heading_with_no_body_adds_no_chunk() {
+        let chunks = chunk_markdown(Path::new("x.md"), "# A\nbody\n## B\n", "md");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, "# A\nbody\n");
+    }
+
+    #[test]
+    fn section_bodies_carry_their_own_heading_line() {
         let chunks = chunk_markdown(Path::new("x.md"), "# A\nintro\n## B\nbody b\n", "md");
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].text.trim(), "intro");
-        assert_eq!(chunks[1].text.trim(), "body b");
+        assert_eq!(chunks[0].text, "# A\nintro\n");
+        assert_eq!(chunks[1].text, "## B\nbody b\n");
     }
 }
