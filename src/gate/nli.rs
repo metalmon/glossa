@@ -145,6 +145,7 @@ mod tests {
             mode: VerifyMode::Nli,
             nli_threshold_single: Some(0.5),
             nli_threshold_multi: Some(0.5),
+            nli_thresholds_defaulted: false,
             combined_single: None,
             combined_multi: None,
             scorer: None,

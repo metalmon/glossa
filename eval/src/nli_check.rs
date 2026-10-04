@@ -422,6 +422,26 @@ pub fn nli_check(path: Option<PathBuf>, overrides: NliOverrides) -> Result<()> {
             "not loaded"
         }
     );
+    // Which thresholds are in force, and whether anyone measured them. A corpus with no
+    // calibration data now gets conservative defaults instead of a silently inert NLI mode, so the
+    // one thing an operator must be able to see is which of the two they have — the defaults err
+    // toward abstaining, and coverage compared against a calibrated corpus is not comparable.
+    if cfg.mode != glossa::gate::VerifyMode::Ac {
+        let fmt_thr =
+            |t: Option<f32>| t.map_or_else(|| "(unset)".to_string(), |v| format!("{v:.2}"));
+        println!(
+            "nli thresholds = single {} / multi {}{}",
+            fmt_thr(cfg.nli_threshold_single),
+            fmt_thr(cfg.nli_threshold_multi),
+            if cfg.nli_thresholds_defaulted {
+                " — DEFAULT, not calibrated for this corpus: run `kbx eval calibrate` once a \
+                 graded run exists. Multi-hop entailment measured near chance, so a multi-hop \
+                 corpus should not rely on the default."
+            } else {
+                " (calibrated)"
+            }
+        );
+    }
     match &facts.probe {
         Probe::Ran {
             identity_ge_disjoint,

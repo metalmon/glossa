@@ -28,6 +28,28 @@ impl VerifyMode {
     }
 }
 
+/// Conservative NLI serve thresholds for a corpus with no calibration data, as `P(entailment)`.
+///
+/// They exist because the alternative was worse: `is_nli_ready` requires BOTH thresholds, so a
+/// corpus that set `mode = "nli"` without running `kbx eval calibrate` got NO threshold, no
+/// readiness, and the gate quietly ran AC-only. The mode was configured, reported as configured,
+/// and did nothing — the same silent-no-op class as a config key that is parsed and ignored.
+///
+/// They are a PRIOR, not a calibration, and they are deliberately pessimistic. Our own measurement
+/// on real reader answers (not proxy negatives) put a 0.2B NLI encoder at AUC ~0.66 overall, and
+/// cross-validated at the strict zero-wrong-served operating point it auto-answered 9% of
+/// single-hop cases. That point sits deep in the entailment tail, which is the only region where no
+/// wrong answer leaked — hence a value near 1 rather than the natural-looking 0.5.
+///
+/// `MULTI` is stricter on purpose: the same measurement put multi-hop separation at AUC ~0.56,
+/// barely above chance, with a wrong answer leaking even at the strict threshold. A corpus whose
+/// questions are mostly multi-hop should calibrate rather than rely on this; the defaults err
+/// toward abstaining, which costs coverage and not correctness.
+pub const DEFAULT_NLI_THRESHOLD_SINGLE: f32 = 0.90;
+/// See [`DEFAULT_NLI_THRESHOLD_SINGLE`] — stricter because multi-hop entailment measured near
+/// chance.
+pub const DEFAULT_NLI_THRESHOLD_MULTI: f32 = 0.95;
+
 pub struct VerifyConfig {
     pub enabled: bool,
     pub rare_df_frac: f32,
@@ -37,6 +59,11 @@ pub struct VerifyConfig {
     pub mode: VerifyMode,
     pub nli_threshold_single: Option<f32>,
     pub nli_threshold_multi: Option<f32>,
+    /// True when either NLI threshold above came from [`DEFAULT_NLI_THRESHOLD_SINGLE`] /
+    /// [`DEFAULT_NLI_THRESHOLD_MULTI`] rather than from calibration. Carried so the gate and
+    /// `kbx nli check` can SAY so: a default threshold is a usable starting point, but an operator
+    /// comparing coverage against a calibrated corpus needs to know which one they have.
+    pub nli_thresholds_defaulted: bool,
     pub combined_single: Option<CombinedStats>,
     pub combined_multi: Option<CombinedStats>,
     /// Runtime NLI scorer selection from `[verify.nli]` (Plan 2 Task 3): `"in_process"` (built) |
@@ -126,7 +153,7 @@ impl VerifyConfig {
         // `as_deref`, not `as_ref`: `ont` is an `Arc` now, and a function pointer taking
         // `&Ontology` gets no auto-deref through `and_then`.
         let og = |f: fn(&Ontology) -> Option<f32>| ont.as_deref().and_then(f);
-        VerifyConfig {
+        let mut cfg = VerifyConfig {
             enabled: env_bool("GLOSSA_VERIFY_ENABLED")
                 .or_else(|| ont.as_ref().and_then(|o| o.verify_enabled()))
                 .unwrap_or(false),
@@ -221,7 +248,23 @@ impl VerifyConfig {
                     .and_then(|o| o.verify_nli_api_key())
                     .map(str::to_string)
             }),
+            nli_thresholds_defaulted: false,
+        };
+        // A corpus that asks for NLI but has never been calibrated gets the conservative defaults
+        // rather than silence. Without this, `is_nli_ready` was false, the scorer was never
+        // called, and `mode = "nli"` ran plain AC while reporting itself as configured. `mode = Ac`
+        // is left alone: it is not asking for NLI, so filling thresholds there would be noise.
+        if cfg.mode != VerifyMode::Ac {
+            if cfg.nli_threshold_single.is_none() {
+                cfg.nli_threshold_single = Some(DEFAULT_NLI_THRESHOLD_SINGLE);
+                cfg.nli_thresholds_defaulted = true;
+            }
+            if cfg.nli_threshold_multi.is_none() {
+                cfg.nli_threshold_multi = Some(DEFAULT_NLI_THRESHOLD_MULTI);
+                cfg.nli_thresholds_defaulted = true;
+            }
         }
+        cfg
     }
 
     pub fn threshold(&self, b: Bucket) -> Option<f32> {
@@ -289,6 +332,81 @@ mod tests {
         assert_eq!(c.threshold(Bucket::Single), None);
         assert!(matches!(c.mode, VerifyMode::Ac));
         assert!(!c.is_nli_ready());
+    }
+
+    /// A corpus that asks for NLI but has never been calibrated must still get a working gate.
+    /// Before this, both thresholds were `None`, `is_nli_ready` was false, the scorer was never
+    /// called, and `mode = "nli"` ran plain AC while reporting itself configured — a silent no-op.
+    #[test]
+    fn nli_mode_without_calibration_gets_conservative_defaults() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_VERIFY_NLI_THRESHOLD_SINGLE");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_THRESHOLD_MULTI");
+        std::env::set_var("GLOSSA_VERIFY_MODE", "nli");
+
+        let dir = tempfile::tempdir().unwrap(); // no ontology, so nothing is calibrated
+        let c = VerifyConfig::resolve(dir.path());
+
+        assert_eq!(
+            c.nli_threshold(Bucket::Single),
+            Some(DEFAULT_NLI_THRESHOLD_SINGLE)
+        );
+        assert_eq!(
+            c.nli_threshold(Bucket::Multi),
+            Some(DEFAULT_NLI_THRESHOLD_MULTI)
+        );
+        assert!(
+            c.nli_thresholds_defaulted,
+            "the gate and `kbx nli check` have to be able to say these were not measured"
+        );
+        assert!(
+            c.is_nli_ready(),
+            "the whole point: the configured mode now actually engages"
+        );
+        assert!(
+            DEFAULT_NLI_THRESHOLD_MULTI > DEFAULT_NLI_THRESHOLD_SINGLE,
+            "multi-hop entailment measured near chance, so its default must be the stricter one"
+        );
+        std::env::remove_var("GLOSSA_VERIFY_MODE");
+    }
+
+    /// `mode = ac` is not asking for NLI, so filling its thresholds would be noise — and an
+    /// explicitly configured threshold is never overwritten by a default.
+    #[test]
+    fn defaults_apply_only_to_an_nli_mode_and_never_overwrite() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_VERIFY_MODE");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_THRESHOLD_SINGLE");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_THRESHOLD_MULTI");
+
+        let dir = tempfile::tempdir().unwrap();
+        let ac = VerifyConfig::resolve(dir.path());
+        assert_eq!(ac.nli_threshold(Bucket::Single), None);
+        assert!(!ac.nli_thresholds_defaulted);
+
+        std::env::set_var("GLOSSA_VERIFY_MODE", "nli");
+        std::env::set_var("GLOSSA_VERIFY_NLI_THRESHOLD_SINGLE", "0.42");
+        let mixed = VerifyConfig::resolve(dir.path());
+        assert_eq!(
+            mixed.nli_threshold(Bucket::Single),
+            Some(0.42),
+            "a configured threshold wins over the default"
+        );
+        assert_eq!(
+            mixed.nli_threshold(Bucket::Multi),
+            Some(DEFAULT_NLI_THRESHOLD_MULTI),
+            "the unset bucket still gets its default, or the mode would stay inert"
+        );
+        assert!(
+            mixed.nli_thresholds_defaulted,
+            "one defaulted bucket is enough to make the report say so"
+        );
+        std::env::remove_var("GLOSSA_VERIFY_MODE");
+        std::env::remove_var("GLOSSA_VERIFY_NLI_THRESHOLD_SINGLE");
     }
 
     #[test]

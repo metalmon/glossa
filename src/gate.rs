@@ -203,6 +203,19 @@ pub fn verify_outcome_with_scorer(
             VerifyMode::Nli => cfg.is_nli_ready(),
             VerifyMode::Combined => cfg.is_combined_ready(),
         };
+    if need_nli && cfg.nli_thresholds_defaulted {
+        // Once per process: the mode is live and gating, but on a prior rather than on this
+        // corpus's own data. Said out loud because the defaults err toward abstaining, so the
+        // symptom is lost coverage — which looks like the model being bad rather than unmeasured.
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| {
+            eprintln!(
+                "verify: NLI thresholds are DEFAULTS, not calibrated for this corpus — run \
+                 `kbx eval calibrate` once a graded run exists. They are deliberately strict, so \
+                 coverage is a floor, not a measurement."
+            );
+        });
+    }
     let nli_val = if need_nli {
         nli::nli_score(answer, &chunks, &df, &cfg, scorer.unwrap())
     } else {
@@ -311,6 +324,7 @@ mod resolve_scorer_tests {
             mode: VerifyMode::Ac,
             nli_threshold_single: None,
             nli_threshold_multi: None,
+            nli_thresholds_defaulted: false,
             combined_single: None,
             combined_multi: None,
             scorer: None,

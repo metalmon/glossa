@@ -159,7 +159,7 @@ enabled here and has a calibrated threshold.
 | `mode` | `"ac"` \| `"nli"` \| `"combined"` · default `"ac"` | How the lexical/anomaly ("AC") and NLI verdicts combine. |
 | `[verify.threshold]` | `single`, `multi` floats | Calibrated grounding thresholds by hop bucket; an unset table (or field) means uncalibrated — the gate abstains rather than guess. Legacy location, superseded by `[verify.ac.threshold]` when present. |
 | `[verify.ac.threshold]` | `single`, `multi` floats | The AC verifier's own threshold table (preferred over `[verify.threshold]`). |
-| `[verify.nli.threshold]` | `single`, `multi` floats | The NLI verifier's calibrated thresholds by bucket. |
+| `[verify.nli.threshold]` | `single`, `multi` floats | The NLI verifier's thresholds by bucket, as `P(entailment)`. Written by `kbx eval calibrate`. **Unset on a corpus whose `mode` asks for NLI falls back to conservative defaults (single 0.90, multi 0.95) rather than leaving the mode inert** — it used to need BOTH values before the gate would consult NLI at all, so an uncalibrated corpus silently ran AC-only. The defaults are a prior, not a measurement: they err toward abstaining, `kbx nli check` labels them `DEFAULT, not calibrated`, and the gate says so once per process. Multi-hop entailment measured near chance in our own evaluation, which is why its default is the stricter of the two and why a multi-hop corpus should calibrate. |
 
 ### `[verify.nli]` — NLI support-verifier
 

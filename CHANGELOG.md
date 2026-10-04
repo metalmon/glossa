@@ -33,6 +33,19 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`mode = "nli"` without calibration ran plain AC and reported itself configured.** The gate
+  consulted NLI only when BOTH per-bucket thresholds were set, and thresholds come from
+  `kbx eval calibrate`, which needs a graded run. So a corpus that had never been calibrated — any
+  new deployment — loaded the model, never called it, and gated on lexical grounding alone while
+  `[verify] mode` said otherwise. Uncalibrated NLI modes now fall back to conservative default
+  thresholds (`P(entailment)` 0.90 single, 0.95 multi) so the configured mode actually engages.
+  They are a prior, not a measurement, and they are deliberately strict — our own evaluation on
+  real reader answers put a 0.2B encoder at AUC ~0.66, with the zero-wrong-served operating point
+  deep in the entailment tail, and multi-hop separation near chance, which is why the multi default
+  is the stricter one and why a multi-hop corpus should still calibrate. Nothing is silent about
+  it: `kbx nli check` prints the thresholds and labels them `DEFAULT, not calibrated`, the gate
+  warns once per process, and an explicitly configured threshold is never overwritten.
+
 - **A corpus on a network share indexed nothing, and said it succeeded.** Two defects, both on the
   path a pilot deployment takes. Windows canonicalizes a UNC root to `\\?\UNC\server\share\dir`,
   and the engine stripped only the four-character `\\?\` prefix — leaving `UNC\server\share\dir`, a
