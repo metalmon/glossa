@@ -24,6 +24,12 @@ name = "kbx"
 path = "src/bin/kbx.rs"
 
 [features]
+# Marker, enabled by every feature that compiles an in-process engine. `kbi` and the scorer probes
+# gate on THIS, never on a list of engine names. That list used to be spelled out at ~20 `cfg`
+# sites across seven files, which is exactly how the pure-Rust burn engine ended up unable to build
+# `kbi` at all: adding an engine meant editing twenty lists, and one was missed. Extend this in one
+# place instead. Carries no dependency of its own.
+engine = []
 # Off by default: pulls in glossa's CSP/marking-schema solver (glossa-constraint). Rare/opt-in
 # path, exercised by `eval/tests/constraint_it.rs`.
 constraint = ["glossa/constraint", "dep:glossa-constraint"]
@@ -32,7 +38,7 @@ constraint = ["glossa/constraint", "dep:glossa-constraint"]
 # check` still compiles and runs against the always-present `resolve_scorer` stub (`None` ⇒
 # AC-only); with it, a real model can load. See `just build-kb-constraint` for the analogous
 # opt-in pattern.
-nli = ["glossa/nli"]
+nli = ["glossa/nli", "engine"]
 # Light remote HTTP scorer clients for `kbx nli/rerank check --endpoint` (forwards to glossa's
 # `http-scorer`: ureq + serde, no ORT). Independent of the engine features.
 http-scorer = ["glossa/http-scorer"]
@@ -57,15 +63,15 @@ nli-coreml = ["nli", "glossa/tls", "dep:glossa-nli", "glossa-nli/nli-coreml"]
 # `download-binaries` pulled in alongside it. Build with e.g.
 # `cargo build -p kb-eval --features nli-cuda` (bring an `onnxruntime-gpu` dll via
 # `ORT_DYLIB_PATH` at runtime).
-nli-cuda = ["glossa/nli-dynamic", "glossa/tls", "dep:glossa-nli", "glossa-nli/nli-cuda"]
-nli-rocm = ["glossa/nli-dynamic", "glossa/tls", "dep:glossa-nli", "glossa-nli/nli-rocm"]
+nli-cuda = ["glossa/nli-dynamic", "glossa/tls", "dep:glossa-nli", "glossa-nli/nli-cuda", "engine"]
+nli-rocm = ["glossa/nli-dynamic", "glossa/tls", "dep:glossa-nli", "glossa-nli/nli-rocm", "engine"]
 # Pure-Rust burn/wgpu engine (Plan 4) — a DIFFERENT engine, mutually exclusive with the ORT features
 # above. Pulls `glossa/nli-burn` (the burn adapter + resolve_scorer branch, no backend) and supplies
 # the backend on the shared glossa-nli instance: `nli-burn` = Vulkan/SPIR-V GPU (production, run with
 # only a Vulkan driver present); `nli-burn-cpu` = NdArray (CI/tests, no GPU). Do NOT combine with
 # `nli`/`nli-cuda`/... (the ORT XOR burn `compile_error!` in glossa-nli would fire).
-nli-burn = ["glossa/nli-burn", "dep:glossa-nli", "glossa-nli/nli-burn-vulkan"]
-nli-burn-cpu = ["glossa/nli-burn", "dep:glossa-nli", "glossa-nli/nli-burn-cpu"]
+nli-burn = ["glossa/nli-burn", "dep:glossa-nli", "glossa-nli/nli-burn-vulkan", "engine"]
+nli-burn-cpu = ["glossa/nli-burn", "dep:glossa-nli", "glossa-nli/nli-burn-cpu", "engine"]
 
 [dependencies]
 glossa = { path = ".." }
