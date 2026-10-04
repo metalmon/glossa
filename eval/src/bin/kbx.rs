@@ -1548,7 +1548,7 @@ fn run_eval(args: EvalArgs) -> Result<()> {
                 String,      // judge_raw
                 kb_eval::backend::agent_loop::CapturedEpisode, // trajectory (empty unless captured)
                 bool,        // errored (reader endpoint failure)
-                Vec<String>, // ranked_sources (deduped retrieved doc paths, score/coverage ranked)
+                Vec<String>, // ranked_sources (deduped retrieved doc paths, best-rank then coverage ranked)
                 Vec<(String, String)>, // reader<->user_sim dialogue (empty unless a user_sim gate deflected)
                 bool, // answered_without_retrieval (from-memory answer, no tool, not rescued)
                 bool, // no_tool_rescued (guard fired then a resample produced a tool call)

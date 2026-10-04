@@ -13,7 +13,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reranker's probability, present when a logit-emitting reranker scored the list (in-process, TEI,
   `kbi`, vLLM, llama.cpp; vLLM is now asked for raw logits with `use_activation: false`). `cohere`
   and `jina` keep ordering but carry no `rel_rerank`. The native `score` is unchanged; the fields are
-  additive in the tool JSON and trace. A reranker returning a non-finite score now fails open instead
+  additive in the search trace and in the `RankedHit` retrieval returns; the agent's reply and the `kb search` output are unchanged. A reranker returning a non-finite score now fails open instead
   of reaching the sort.
 
 ### Changed

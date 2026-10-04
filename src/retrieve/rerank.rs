@@ -164,7 +164,7 @@ pub fn retrieve_with(
                 static SAID: std::sync::Once = std::sync::Once::new();
                 SAID.call_once(|| {
                     eprintln!(
-                        "rerank: this backend returns a normalized score, not a logit, so hits                          carry no rel_rerank (order is unaffected)"
+                        "rerank: this backend returns a normalized score, not a logit, so hits carry no rel_rerank (order is unaffected)"
                     );
                 });
             }

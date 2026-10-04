@@ -263,12 +263,24 @@ pub struct RankedHit {
 }
 
 /// Fill `rel_bm25` over one BM25 list: each score divided by the list's maximum. A list whose
-/// maximum is not positive (one hit, all equal at zero, empty) reads 1.0 throughout — there is no
-/// information to spread, and 1.0 is the honest "best available" rather than a NaN.
+/// maximum is not finite and positive (one hit, all equal at zero, empty) reads 1.0 throughout —
+/// there is no information to spread, and 1.0 is the honest "best available" rather than a NaN.
+///
+/// Non-finite scores are excluded from the maximum and read 1.0 themselves. Tantivy's BM25 cannot
+/// produce one, but this is `pub`: the guarantee the doc makes — a finite value in (0, 1] — has to
+/// hold for whatever a caller hands in, not only for what the index happens to emit.
 pub fn fill_rel_bm25(hits: &mut [RankedHit]) {
-    let max = hits.iter().map(|h| h.score).fold(0.0f32, f32::max);
+    let max = hits
+        .iter()
+        .map(|h| h.score)
+        .filter(|s| s.is_finite())
+        .fold(0.0f32, f32::max);
     for h in hits.iter_mut() {
-        h.rel_bm25 = if max > 0.0 { h.score / max } else { 1.0 };
+        h.rel_bm25 = if max > 0.0 && h.score.is_finite() {
+            h.score / max
+        } else {
+            1.0
+        };
     }
 }
 
@@ -4665,6 +4677,20 @@ mod search_tests {
 
         let mut none: Vec<RankedHit> = vec![];
         fill_rel_bm25(&mut none); // must not panic
+
+        // `pub fn`, so the doc's "(0, 1], never a NaN" has to survive a caller's junk: a NaN or an
+        // infinity must not poison the maximum, and must not come back out as rel_bm25.
+        let mut junk = vec![bare_hit(f32::NAN), bare_hit(4.0), bare_hit(f32::INFINITY)];
+        fill_rel_bm25(&mut junk);
+        assert!(
+            junk.iter()
+                .all(|h| h.rel_bm25.is_finite() && h.rel_bm25 > 0.0 && h.rel_bm25 <= 1.0),
+            "{junk:?}"
+        );
+        assert_eq!(
+            junk[1].rel_bm25, 1.0,
+            "the only finite score is the maximum"
+        );
     }
 
     /// `search` fills the field; `search_filtered` reuses `search`'s pool and only filters, so a

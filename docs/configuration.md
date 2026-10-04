@@ -237,8 +237,9 @@ is a command rather than a default. It refuses rather than guesses in two cases:
 is fail-open, so that session is on CPU — where the answer is known and a cross-encoder pool is a
 thermal hazard).
 
-**Two normalized readings on every search hit.** Beside the engine's native `score`, each hit the
-`search` tool (and its trace) returns carries `rel_bm25` and `rel_rerank`.
+**Two normalized readings on every search hit.** Beside the engine's native `score`, every hit
+carries `rel_bm25` and `rel_rerank` in the `search` **trace** and in the `RankedHit` that retrieval
+hands its callers. The agent's own reply is unchanged — one line per hit, as before.
 
 - `rel_bm25` is the hit's BM25 score as a fraction of the best BM25 score in the list that query
   produced, so the best hit reads `1.0` and the rest are proportional. It is **relative**: it orders

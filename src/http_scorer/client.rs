@@ -107,13 +107,18 @@ pub fn new_ureq_reranker(
     model: Option<String>,
 ) -> Result<HttpReranker> {
     let wire = wire::RerankWire::from_backend(backend)?;
+    // Normalized HERE, once, because three decisions key off this string: the wire shape (which
+    // `from_backend` normalizes internally), whether the backend emits logits, and whether to ask
+    // vLLM for raw scores. Comparing the raw value in the last two would make `backend = "TEI"`
+    // silently drop every `rel_rerank` while claiming on stderr that the server normalizes scores.
+    let backend = backend.trim().to_ascii_lowercase();
     Ok(HttpReranker {
         endpoint,
         transport: Box::new(UreqTransport { timeout_ms }),
         api_key,
         wire,
         model,
-        backend: backend.to_string(),
+        backend,
     })
 }
 
@@ -230,5 +235,29 @@ mod tests {
         assert!(mk("llamacpp").emits_logits());
         assert!(!mk("cohere").emits_logits());
         assert!(!mk("jina").emits_logits());
+    }
+
+    /// Three decisions key off the backend name, and `from_backend` normalizes only its own. A
+    /// miscased or padded name used to pass the wire check, keep sending `raw_scores: true`, and
+    /// then report the real logits as "not logits" -- dropping every rel_rerank and printing a
+    /// stderr line that was false.
+    #[test]
+    fn backend_name_is_normalized_for_every_decision_that_reads_it() {
+        let mk = |b: &str| new_ureq_reranker("http://x".into(), 10, None, b, None).unwrap();
+        assert!(mk("TEI").emits_logits(), "case must not matter");
+        assert!(mk(" vLLM ").emits_logits(), "padding must not matter");
+        assert_eq!(mk(" vLLM ").backend, "vllm");
+
+        // ... and the normalized name is what decides the vLLM-only request flag.
+        let body = wire::build_rerank_body(
+            wire::RerankWire::Jina,
+            "q",
+            &["a"],
+            None,
+            mk(" vLLM ").backend == "vllm",
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["use_activation"], serde_json::json!(false));
     }
 }
