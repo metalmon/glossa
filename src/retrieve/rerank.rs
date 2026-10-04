@@ -16,8 +16,11 @@ pub trait Reranker {
     }
 }
 
-/// `1 / (1 + e^-x)` in f32. Saturates to exactly 0.0 / 1.0 for |x| >~ 17, which is the intended
-/// reading of a logit that far from zero.
+/// `1 / (1 + e^-x)` in f32. Saturation is asymmetric, because it comes from f32's own limits: the
+/// result is exactly 1.0 once `e^-x` falls below the ulp of 1 (x >~ 17), but reaching exactly 0.0
+/// needs `e^-x` to overflow to infinity (x <~ -88). In between, a very negative logit reads as a
+/// tiny positive probability rather than zero, which is the honest reading of "almost certainly
+/// irrelevant".
 pub fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
@@ -656,8 +659,18 @@ mod tests {
         assert_eq!(sigmoid(0.0), 0.5);
         assert!((sigmoid(7.35) - 0.9994).abs() < 1e-3, "{}", sigmoid(7.35));
         assert!(sigmoid(-11.04) < 2e-5, "{}", sigmoid(-11.04));
-        assert_eq!(sigmoid(20.0), 1.0, "f32 saturates to exactly 1");
-        assert_eq!(sigmoid(-20.0), 0.0, "f32 saturates to exactly 0");
+        assert_eq!(sigmoid(20.0), 1.0, "f32 saturates to exactly 1 above ~17");
+        // The other end is NOT symmetric: exactly 0.0 needs e^-x to overflow f32 (x <~ -88).
+        assert!(
+            sigmoid(-20.0) > 0.0 && sigmoid(-20.0) < 1e-8,
+            "{}",
+            sigmoid(-20.0)
+        );
+        assert_eq!(
+            sigmoid(-100.0),
+            0.0,
+            "f32 reaches exactly 0 only past the exp overflow"
+        );
         assert!(sigmoid(1.0) > sigmoid(0.9));
     }
 
