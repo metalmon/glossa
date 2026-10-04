@@ -35,7 +35,9 @@ pub fn resolve_model_dir(
     };
     let to = cache_dir.join(subdir);
     if !to.join("model.onnx").is_file() {
-        download_variant(repo, "main", &to, variant)?;
+        // The bar hides itself when stderr is not a TTY, which is every service start, so a
+        // foreground `kbi` shows download progress and a managed service stays quiet.
+        download_variant(repo, "main", &to, variant, false)?;
     }
     Ok(Some(to))
 }

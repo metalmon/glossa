@@ -252,13 +252,18 @@ and whether every precondition is met.
 ```bash
 kbx rerank download [--fp16|--int8] --to <dir>   # fetch a variant (default repo; fp32 if no flag)
 kbx rerank set --model-dir <dir> --scorer in_process [--pool-size N] [--device cuda]
-kbx rerank check --model-dir <dir> [--device cuda]
+kbx rerank check [PATH]                          # probes what [rerank] configures
+kbx rerank check --model-dir <dir> [--device cuda]   # ... or an explicit dir, overriding it
 ```
 
 `rerank set` writes `[rerank]` (`model_dir`, `scorer`, optional `pool_size` / `device` /
-`gpu_id` / `gpu_mem_mb`) into `ontology.toml`, preserving every other table. Unlike `nli
-check`, `rerank check` probes the `--model-dir` weights directly — a green check means the model loads
-and ranks a relevant passage above an irrelevant one, not that retrieval is wired to use it.
+`gpu_id` / `gpu_mem_mb`) into `ontology.toml`, preserving every other table. `rerank check`
+resolves that same config — like `nli check` and `rerank fit` do — so with no flags it probes the
+deployment retrieval will actually use, including the configured batch budget, which is part of the
+session's identity. Every flag overrides one piece of it, and a corpus whose `[rerank]` names a
+remote scorer is probed remotely without passing `--endpoint`. A green check means the model loads
+and ranks a relevant passage above an irrelevant one; whether a `search` really reranks is visible
+in the trace, where a hit carries `rel_rerank`.
 
 The NLI engine is compiled in at build time — exactly one per binary: the **ORT** engine
 (`model.onnx`) or a **pure-Rust burn** engine (`.safetensors`), the latter as `burn-wgpu (vulkan)`

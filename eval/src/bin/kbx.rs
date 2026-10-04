@@ -449,6 +449,9 @@ enum NliCmd {
         /// Fetch the int8 variant (`model.int8.onnx`), saved locally as `model.onnx`. CPU.
         #[arg(long)]
         int8: bool,
+        /// Suppress the progress bar (it is already suppressed when stderr is not a terminal).
+        #[arg(long = "no-progress")]
+        no_progress: bool,
     },
     /// Report whether the NLI verifier will actually run for a corpus, or why it fails open to AC.
     Check {
@@ -528,50 +531,58 @@ enum NliCmd {
 /// passage above a known-irrelevant one.
 #[derive(Subcommand)]
 enum RerankCmd {
-    /// Probe the reranker's execution provider and run a fixed relevant-vs-irrelevant sanity pair
-    /// through `InProcessReranker`, reporting `ep_active` and both scores. Unlike `kbx nli check`
-    /// (which resolves a corpus), this checks the `--model-dir` weights directly; it does not read
-    /// the `[rerank]` config `rerank set` wrote, so a green check means the model loads and ranks,
-    /// not that retrieval is wired to use it.
+    /// Probe the reranker's execution provider and run a fixed relevant-vs-irrelevant sanity pair,
+    /// reporting `ep_active` and both scores. Resolves the deployment from the corpus's `[rerank]`
+    /// — the same way `kbx nli check` and `kbx rerank fit` do — so `kbx rerank check` with no flags
+    /// probes exactly what retrieval will use. Every flag below overrides that; passing
+    /// `--model-dir` alone still works for a model dir no corpus points at.
     Check {
-        /// Local model dir holding the cross-encoder ONNX weights + tokenizer. Omit when probing a
-        /// remote scorer with `--endpoint`.
+        /// Corpus root (kb-style PATH resolution: explicit if given, else discovered from the
+        /// current directory upward, else the current directory). Supplies the `[rerank]` defaults
+        /// for every flag below.
+        path: Option<PathBuf>,
+        /// Local model dir holding the cross-encoder ONNX weights + tokenizer. Defaults to
+        /// `[rerank].model_dir`. Omit when probing a remote scorer with `--endpoint`.
         #[arg(long = "model-dir")]
         model_dir: Option<PathBuf>,
         /// Compute device: `cpu` | `cuda` | `directml` | `rocm`. A single value with automatic
-        /// CPU fallback (e.g. `--device cuda` runs on GPU, falling back to CPU).
+        /// CPU fallback (e.g. `--device cuda` runs on GPU, falling back to CPU). Defaults to the
+        /// corpus's configured device.
         #[arg(long = "device")]
         device: Option<String>,
-        /// GPU device id the CUDA/DirectML/ROCm EP binds to.
+        /// GPU device id the CUDA/DirectML/ROCm EP binds to. Defaults to `[rerank].gpu_id`.
         #[arg(long = "gpu-id")]
         gpu_id: Option<i32>,
         /// GPU arena memory cap in MB for the reranker EP, so it can share a GPU with an LLM or
-        /// the NLI verifier.
+        /// the NLI verifier. Defaults to `[rerank].gpu_mem_mb`.
         #[arg(long = "gpu-mem-mb")]
         gpu_mem_mb: Option<usize>,
-        /// Per-batch token budget, as `[rerank].batch_tokens` would set it. Pass the value the
-        /// corpus configures: the budget is part of the session's identity, so without it this
-        /// probes a session shape production never builds — and skips the load-time check that
-        /// would name a budget the device cannot take.
+        /// Per-batch token budget. Defaults to `[rerank].batch_tokens`, which is what you want:
+        /// the budget is part of the session's identity, so probing without the configured value
+        /// builds a session shape production never does — and skips the load-time check that would
+        /// name a budget the device cannot take.
         #[arg(long = "batch-tokens")]
         batch_tokens: Option<usize>,
-        /// ONNX Runtime intra-op threads, as `[rerank].intra_threads` would set it. Same reason.
+        /// ONNX Runtime intra-op threads. Defaults to `[rerank].intra_threads`, same reason.
         #[arg(long = "intra-threads")]
         intra_threads: Option<usize>,
         /// Probe a REMOTE reranker at this base URL instead of a local model dir. Reports
         /// reachability + the inversion guard.
         #[arg(long = "endpoint")]
         endpoint: Option<String>,
-        /// Remote probe timeout (ms) for `--endpoint`.
-        #[arg(long = "timeout-ms", default_value_t = 5000)]
-        timeout_ms: u64,
+        /// Remote probe timeout (ms). Defaults to `[rerank].timeout_ms`, else 5000. Left as an
+        /// `Option` on purpose: with a clap default there is no way to tell "the operator asked for
+        /// 5000" from "clap filled it in", and the corpus value would lose either way.
+        #[arg(long = "timeout-ms")]
+        timeout_ms: Option<u64>,
         /// Optional Bearer api-key for the remote endpoint.
         #[arg(long = "api-key")]
         api_key: Option<String>,
-        /// Remote backend for `--endpoint`: tei | vllm | llamacpp | kbi | jina | cohere. Names the
-        /// server so the probe sends the right wire shape; defaults to our own `kbi`.
-        #[arg(long = "backend", default_value = "kbi")]
-        backend: String,
+        /// Remote backend: tei | vllm | llamacpp | kbi | jina | cohere. Names the server so the
+        /// probe sends the right wire shape. Defaults to `[rerank].backend`, else `kbi` — same
+        /// `Option` reasoning as `--timeout-ms`.
+        #[arg(long = "backend")]
+        backend: Option<String>,
         /// Served-model name for a Jina-family `--backend` (e.g. vLLM); omit for kbi / llama.cpp.
         #[arg(long = "model")]
         model: Option<String>,
@@ -600,6 +611,9 @@ enum RerankCmd {
         /// Fetch the int8 variant (`model.int8.onnx`), saved locally as `model.onnx`. CPU.
         #[arg(long)]
         int8: bool,
+        /// Suppress the progress bar (it is already suppressed when stderr is not a terminal).
+        #[arg(long = "no-progress")]
+        no_progress: bool,
     },
     /// Write `[rerank]` (model_dir + scorer, optional pool_size/device/gpu_*) into the
     /// corpus `ontology.toml`, preserving all other tables/comments. Pairs with `download` + `check`.
@@ -706,6 +720,7 @@ fn resolve_repo(repo: Option<String>, default_repo: &str) -> String {
 /// Shared `download` dispatch for both `nli` and `rerank`: resolve the repo (default when omitted)
 /// and the variant, fetch (explicit `--file` list, else the variant's file set → canonical
 /// `model.onnx`), and print a summary.
+#[allow(clippy::too_many_arguments)]
 fn run_download(
     default_repo: &str,
     repo: Option<String>,
@@ -714,17 +729,19 @@ fn run_download(
     files: Vec<String>,
     fp16: bool,
     int8: bool,
+    no_progress: bool,
 ) -> Result<()> {
     let repo = resolve_repo(repo, default_repo);
     let variant = resolve_variant(fp16, int8, &files)?;
     let downloaded = if !files.is_empty() {
-        kb_eval::download::download_files(&repo, &revision, &files, &to)?
+        kb_eval::download::download_files(&repo, &revision, &files, &to, no_progress)?
     } else {
         kb_eval::download::download_variant(
             &repo,
             &revision,
             &to,
             variant.unwrap_or(kb_eval::download::Variant::Fp32),
+            no_progress,
         )?
     };
     let mut total = 0u64;
@@ -1007,8 +1024,18 @@ fn main() -> Result<()> {
                     files,
                     fp16,
                     int8,
+                    no_progress,
                 },
-        } => run_download(NLI_DEFAULT_REPO, repo, revision, to, files, fp16, int8),
+        } => run_download(
+            NLI_DEFAULT_REPO,
+            repo,
+            revision,
+            to,
+            files,
+            fp16,
+            int8,
+            no_progress,
+        ),
         Cmd::Nli {
             cmd: NliCmd::Check { path },
         } => kb_eval::nli_check::nli_check(path),
@@ -1049,6 +1076,7 @@ fn main() -> Result<()> {
         Cmd::Rerank {
             cmd:
                 RerankCmd::Check {
+                    path,
                     model_dir,
                     device,
                     gpu_id,
@@ -1061,39 +1089,20 @@ fn main() -> Result<()> {
                     backend,
                     model,
                 },
-        } => {
-            if let Some(endpoint) = endpoint {
-                // Remote probe: needs the light http-scorer client.
-                #[cfg(feature = "http-scorer")]
-                {
-                    println!(
-                        "{}",
-                        kb_eval::rerank_check::probe_remote_rerank(
-                            &endpoint, timeout_ms, api_key, &backend, model
-                        )
-                    );
-                    Ok(())
-                }
-                #[cfg(not(feature = "http-scorer"))]
-                {
-                    let _ = (timeout_ms, api_key, backend, model);
-                    anyhow::bail!(
-                        "rebuild kbx with --features http-scorer to probe a remote endpoint ({endpoint})"
-                    );
-                }
-            } else if let Some(model_dir) = model_dir {
-                kb_eval::rerank_check::rerank_check(
-                    model_dir,
-                    device,
-                    gpu_id,
-                    gpu_mem_mb,
-                    batch_tokens,
-                    intra_threads,
-                )
-            } else {
-                anyhow::bail!("pass --model-dir <dir> (local) or --endpoint <url> (remote)")
-            }
-        }
+        } => run_rerank_check(RerankCheckArgs {
+            path,
+            model_dir,
+            device,
+            gpu_id,
+            gpu_mem_mb,
+            batch_tokens,
+            intra_threads,
+            endpoint,
+            timeout_ms,
+            api_key,
+            backend,
+            model,
+        }),
         Cmd::Rerank {
             cmd:
                 RerankCmd::Download {
@@ -1103,8 +1112,18 @@ fn main() -> Result<()> {
                     files,
                     fp16,
                     int8,
+                    no_progress,
                 },
-        } => run_download(RERANK_DEFAULT_REPO, repo, revision, to, files, fp16, int8),
+        } => run_download(
+            RERANK_DEFAULT_REPO,
+            repo,
+            revision,
+            to,
+            files,
+            fp16,
+            int8,
+            no_progress,
+        ),
         Cmd::Rerank {
             cmd:
                 RerankCmd::Set {
@@ -1144,6 +1163,86 @@ fn main() -> Result<()> {
             path, model_dir, device, gpu_id, gpu_mem_mb, max_rows, seq, repeats, tolerance,
         ),
     }
+}
+
+/// Everything `kbx rerank check` accepts. A struct because the resolver takes twelve values and a
+/// positional list that long is its own kind of defect.
+struct RerankCheckArgs {
+    path: Option<PathBuf>,
+    model_dir: Option<PathBuf>,
+    device: Option<String>,
+    gpu_id: Option<i32>,
+    gpu_mem_mb: Option<usize>,
+    batch_tokens: Option<usize>,
+    intra_threads: Option<usize>,
+    endpoint: Option<String>,
+    timeout_ms: Option<u64>,
+    api_key: Option<String>,
+    backend: Option<String>,
+    model: Option<String>,
+}
+
+/// `kbx rerank check` — resolve the deployment from the corpus's `[rerank]`, with every flag as an
+/// override, exactly like `kbx rerank fit` and `kbx nli check` already do.
+///
+/// This used to take `--model-dir` and nothing else: it could not see a corpus at all, so an
+/// operator had to copy the model dir, device, GPU id, memory cap, batch budget and thread count
+/// out of `ontology.toml` by hand, and a forgotten `--batch-tokens` probed a session shape
+/// production never builds. The sibling `fit` command had resolved the corpus all along.
+fn run_rerank_check(a: RerankCheckArgs) -> anyhow::Result<()> {
+    let kbx_paths = kb_eval::workspace::resolve(a.path);
+    let glossa_dir = kb_eval::workspace::glossa_dir(&kbx_paths.root);
+    let cfg = glossa::retrieve::config::RerankConfig::resolve(&glossa_dir);
+
+    // A corpus configured for a remote scorer is probed remotely without anyone passing a flag —
+    // the same "report what this deployment actually does" contract `kbx nli check` has.
+    let remote = a
+        .endpoint
+        .clone()
+        .or_else(|| (cfg.scorer.as_deref() == Some("http")).then(|| cfg.endpoint.clone())?);
+    if let Some(endpoint) = remote {
+        let timeout_ms = a.timeout_ms.unwrap_or(cfg.timeout_ms);
+        let api_key = a.api_key.or_else(|| cfg.api_key.clone());
+        let backend = a.backend.unwrap_or_else(|| cfg.backend.clone());
+        let model = a.model.or_else(|| cfg.model.clone());
+        #[cfg(feature = "http-scorer")]
+        {
+            println!(
+                "{}",
+                kb_eval::rerank_check::probe_remote_rerank(
+                    &endpoint, timeout_ms, api_key, &backend, model
+                )
+            );
+            return Ok(());
+        }
+        #[cfg(not(feature = "http-scorer"))]
+        {
+            let _ = (timeout_ms, api_key, backend, model);
+            anyhow::bail!(
+                "rebuild kbx with --features http-scorer to probe a remote endpoint ({endpoint})"
+            );
+        }
+    }
+
+    let Some(model_dir) = a.model_dir.or_else(|| cfg.model_dir.clone()) else {
+        anyhow::bail!(
+            "no reranker model dir: pass --model-dir, or run `kbx rerank set` so [rerank].model_dir \
+             names one (and `--endpoint <url>` probes a remote scorer instead)"
+        );
+    };
+    kb_eval::rerank_check::rerank_check(
+        model_dir,
+        a.device.or_else(|| {
+            cfg.execution_providers
+                .iter()
+                .find(|p| *p != "cpu")
+                .cloned()
+        }),
+        a.gpu_id.or(cfg.ep_device),
+        a.gpu_mem_mb.or(cfg.ep_mem_limit_mb),
+        a.batch_tokens.or(cfg.batch_tokens),
+        a.intra_threads.or(cfg.intra_threads),
+    )
 }
 
 /// `kbx rerank fit` — resolve the deployment from `[rerank]` (flags override), hand the neighbour's

@@ -183,11 +183,23 @@ impl InProcessBurnNli {
     /// P(entail) of each hypothesis against `premise`. Delegates windowing/batching/pooling to the
     /// shared [`harness::entail`]; this engine only supplies the raw forward (`RawForward` below).
     pub fn entail(&self, premise: &str, hypotheses: &[&str]) -> Result<Vec<f32>> {
+        self.entail_with_budget(premise, hypotheses, self.budget())
+    }
+
+    /// [`Self::entail`] at an explicit per-call budget — what a batch-size sweep drives, so the
+    /// measured path is the serving path. The ORT engine carries the same method; that symmetry is
+    /// what lets `fit` and the inference server hold one engine-neutral handle.
+    pub fn entail_with_budget(
+        &self,
+        premise: &str,
+        hypotheses: &[&str],
+        batch_tokens: usize,
+    ) -> Result<Vec<f32>> {
         harness::entail(
             self,
             &self.inner.tokenizer,
             self.inner.max_seq_len,
-            self.budget(),
+            batch_tokens.max(1),
             self.entail_index,
             premise,
             hypotheses,

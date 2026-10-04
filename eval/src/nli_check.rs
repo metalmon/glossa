@@ -451,11 +451,15 @@ pub fn nli_fit(
     let cfg = VerifyConfig::resolve(&glossa_dir);
     let rerank = glossa::retrieve::config::RerankConfig::resolve(&glossa_dir);
 
+    // Any GPU-capable engine, which is the four ORT execution providers plus the burn engine on
+    // its Vulkan backend. `nli-burn-cpu` is deliberately absent: it is the NdArray CI backend, and
+    // a fit on the CPU is refused below for the same reason a CPU ORT build is.
     #[cfg(any(
         feature = "nli-directml",
         feature = "nli-coreml",
         feature = "nli-cuda",
         feature = "nli-rocm",
+        feature = "nli-burn",
     ))]
     {
         use crate::fit::{fit_refusal, fit_report, select, sweep, NliTarget, SweepOpts};
@@ -550,12 +554,14 @@ pub fn nli_fit(
         feature = "nli-coreml",
         feature = "nli-cuda",
         feature = "nli-rocm",
+        feature = "nli-burn",
     )))]
     {
         let _ = (cfg, rerank, max_rows, seq, repeats, tolerance);
         anyhow::bail!(
-            "this build has no GPU execution provider compiled in, and a fit on CPU is refused \
-             (known answer, and a thermal hazard): rebuild with --features nli-cuda / nli-directml"
+            "this build has no GPU engine compiled in, and a fit on CPU is refused (known answer, \
+             and a thermal hazard): rebuild with one of --features nli-cuda, nli-directml, \
+             nli-rocm, nli-coreml, or nli-burn (Vulkan, any vendor)"
         )
     }
 }

@@ -363,14 +363,9 @@ pub fn sweep(target: &dyn FitTarget, opts: &SweepOpts) -> anyhow::Result<Vec<Sam
 ///
 /// Gated on the execution-provider features, which are what make `glossa-nli` a dependency of this
 /// crate at all (see `eval/Cargo.toml`).
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 pub struct RerankTarget<'a> {
-    pub engine: &'a glossa_nli::InProcessReranker,
+    pub engine: &'a glossa_nli::Reranker,
     pub seq: usize,
 }
 
@@ -381,23 +376,13 @@ pub struct RerankTarget<'a> {
 /// stretches it past the window budget anyway, the harness splits it and every size in the sweep
 /// pays the same multiple, so the shape of the curve — which is all selection reads — is unchanged.
 /// What the number then means is hypotheses per second rather than rows per second.
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 pub struct NliTarget<'a> {
-    pub engine: &'a glossa_nli::InProcessNli,
+    pub engine: &'a glossa_nli::Nli,
     pub seq: usize,
 }
 
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 impl FitTarget for NliTarget<'_> {
     fn score_pool(&self, batch_rows: usize, pool_rows: usize) -> anyhow::Result<()> {
         // Sized UNDER `seq` so the pair tokenizes to at most `seq` ids and the harness keeps the
@@ -412,12 +397,7 @@ impl FitTarget for NliTarget<'_> {
     }
 }
 
-#[cfg(any(
-    feature = "nli-directml",
-    feature = "nli-coreml",
-    feature = "nli-cuda",
-    feature = "nli-rocm"
-))]
+#[cfg(feature = "engine")]
 impl FitTarget for RerankTarget<'_> {
     fn score_pool(&self, batch_rows: usize, pool_rows: usize) -> anyhow::Result<()> {
         // A filler word repeated to length: the fit measures shapes, not relevance, and generic

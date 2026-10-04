@@ -33,6 +33,28 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`kbx rerank check` reads the corpus, like every sibling command already did.** It took
+  `--model-dir` and had no way to see a corpus at all, so an operator had to copy the model dir,
+  device, GPU id, memory cap, batch budget and thread count out of `ontology.toml` by hand — and a
+  forgotten `--batch-tokens` probed a session shape production never builds, which the flag's own
+  help text admitted. It now resolves `[rerank]` exactly as `kbx nli check` and `kbx rerank fit`
+  do, with every flag as an override, and a corpus configured for a remote scorer is probed
+  remotely without `--endpoint`. `--timeout-ms` and `--backend` became real options rather than
+  clap defaults, because a hardcoded default is indistinguishable from an explicit value and the
+  corpus setting lost either way.
+- **Model downloads show progress.** `kbx nli download` / `kbx rerank download` fetch hundreds of
+  megabytes through one `io::copy` and printed nothing until they finished, which on a slow link is
+  indistinguishable from a hang. They now drive the toolkit's canonical progress bar, in bytes, with
+  a rate; `--no-progress` suppresses it, as on `build`/`train`/`reason`/`distil`, and it is already
+  suppressed when stderr is not a terminal. A server's own auto-download is therefore quiet under a
+  service manager and visible in the foreground.
+- **`kbx nli fit` / `kbx rerank fit` work on the Vulkan engine.** Both refused unless one of four
+  ONNX Runtime execution providers was compiled in, so a pure-Rust Vulkan build — a GPU build — got
+  the "no GPU execution provider" refusal meant for CPU-only builds. The refusal now keys on GPU
+  capability rather than on ORT, and still refuses a CPU fit, which is a known answer and a thermal
+  hazard. The burn engine gained `entail_with_budget` and `rerank_with_budget` so the measured path
+  is the serving path there too.
+
 - **Release archives name their engine.** Three rows shipped as `…-ort` while being three different
   engines — DirectML on Windows, CoreML on macOS, plain CPU on Linux. They are now `…-directml`,
   `…-coreml` and `…-cpu`. The engine is the one thing an operator has to choose, so the filename

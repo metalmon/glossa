@@ -22,6 +22,35 @@ pub fn progress_bar(len: u64, no_progress: bool) -> ProgressBar {
     pb
 }
 
+/// [`progress_bar`]'s byte-counting sibling, for a download rather than a count of items: same
+/// spinner, same tick, same hidden-when-not-a-TTY contract, but `{bytes}/{total_bytes}` and a rate.
+/// `len = None` means the server sent no `Content-Length`, so the bar shows bytes-so-far with no
+/// total instead of pretending to know one.
+///
+/// Separate function rather than a parameter because the template differs; keeping both here is
+/// what stops a third style appearing somewhere else in the toolkit.
+pub fn progress_bar_bytes(len: Option<u64>, no_progress: bool) -> ProgressBar {
+    if no_progress || !std::io::stderr().is_terminal() {
+        return ProgressBar::hidden();
+    }
+    let pb = match len {
+        Some(n) => ProgressBar::new(n),
+        None => ProgressBar::new_spinner(),
+    };
+    let template = if len.is_some() {
+        "{spinner:.white} {prefix} [{bytes}/{total_bytes}] {wide_bar:.white} {bytes_per_sec} {elapsed_precise}{msg}"
+    } else {
+        "{spinner:.white} {prefix} {bytes} {bytes_per_sec} {elapsed_precise}{msg}"
+    };
+    pb.set_style(
+        ProgressStyle::with_template(template)
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+    );
+    pb.enable_steady_tick(std::time::Duration::from_millis(90));
+    pb
+}
+
 /// True when stdout is an interactive terminal and color isn't disabled via NO_COLOR.
 pub fn use_color() -> bool {
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()

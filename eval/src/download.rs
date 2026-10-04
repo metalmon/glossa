@@ -29,8 +29,9 @@ pub fn download_files(
     revision: &str,
     files: &[String],
     to_dir: &Path,
+    no_progress: bool,
 ) -> Result<Vec<(PathBuf, u64)>> {
-    download_files_tolerant(repo, revision, files, to_dir, &[])
+    download_files_tolerant(repo, revision, files, to_dir, &[], no_progress)
 }
 
 /// Like [`download_files`], but a `404` on a file listed in `optional` is skipped (not an error) —
@@ -42,6 +43,7 @@ pub fn download_files_tolerant(
     files: &[String],
     to_dir: &Path,
     optional: &[&str],
+    no_progress: bool,
 ) -> Result<Vec<(PathBuf, u64)>> {
     std::fs::create_dir_all(to_dir)
         .with_context(|| format!("creating download dir {}", to_dir.display()))?;
@@ -58,11 +60,21 @@ pub fn download_files_tolerant(
             }
             Err(e) => return Err(anyhow::anyhow!("GET {url}: {e}")),
         };
-        let mut reader = resp.into_reader();
+        // A model file is hundreds of megabytes to over a gigabyte. Without this the command
+        // printed nothing at all until it finished, which is indistinguishable from a hang on a
+        // slow link. Content-Length is advisory: HuggingFace sends it, a proxy may not, and the
+        // bar degrades to a byte counter rather than inventing a total.
+        let total = resp
+            .header("Content-Length")
+            .and_then(|v| v.parse::<u64>().ok());
+        let pb = glossa::cli_fmt::progress_bar_bytes(total, no_progress);
+        pb.set_prefix(format!("download {file}"));
+        let mut reader = pb.wrap_read(resp.into_reader());
         let mut out_file =
             std::fs::File::create(&dest).with_context(|| format!("creating {}", dest.display()))?;
         let bytes = std::io::copy(&mut reader, &mut out_file)
             .with_context(|| format!("writing {} from {url}", dest.display()))?;
+        pb.finish_and_clear();
 
         if bytes == 0 {
             let _ = std::fs::remove_file(&dest);
@@ -127,9 +139,17 @@ pub fn download_variant(
     revision: &str,
     to_dir: &Path,
     variant: Variant,
+    no_progress: bool,
 ) -> Result<Vec<(PathBuf, u64)>> {
     let files = variant_files(variant);
-    let out = download_files_tolerant(repo, revision, &files, to_dir, &["model.onnx.data"])?;
+    let out = download_files_tolerant(
+        repo,
+        revision,
+        &files,
+        to_dir,
+        &["model.onnx.data"],
+        no_progress,
+    )?;
     canonicalize_onnx(to_dir, variant)?;
     Ok(out)
 }
