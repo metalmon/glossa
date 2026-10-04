@@ -30,6 +30,15 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
   (`chart:values-cell-range-address="Sheet1.$B$2:.$B$4"` etc.) instead of embedding a local data
   table — the Excel→ODS export form. Sheet1 holds the data (Cat / Series 1; Q1–Q3; 4.3/2.5/3.5).
   Exercises ref-only chart resolution (resolve the ranges against the sheet). English, hand-built.
+- `sample.xlsb` — Excel Binary Workbook (BIFF12): one sheet `Readings` with the marker in A1 and a
+  two-column English table (`inlet pressure` 42 / `outlet pressure` 97). Exercises the `.xlsb`
+  branch, which `office_oxide` decodes into the same model as `.xlsx`. Generated via Excel COM with
+  `RemoveDocumentInformation`, then scrubbed further than that API reaches: `docProps/core.xml` was
+  rewritten with a neutral creator and fixed dates, the localized theme/heading labels in the XML
+  parts were replaced with their English equivalents, and the built-in cell-style name inside the
+  binary `xl/styles.bin` was patched **length-preserving** (a BIFF12 record carries its own byte
+  length, so a shorter replacement would corrupt every following offset). Verified afterwards by
+  scanning every part for Cyrillic in UTF-8 *and* UTF-16LE, and by reopening the result in Excel.
 - `sample_legacy.doc` / `sample_legacy.xls` — legacy binary OLE Office (Word 97-2003 / Excel
   97-2003) each carrying one embedded 1×1 PNG picture (exercises `office_oxide::{doc,xls}::images`
   extraction wired into `read.rs`). Generated via MS Office COM with document metadata scrubbed
