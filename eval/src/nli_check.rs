@@ -222,10 +222,73 @@ pub fn probe_remote_nli(
     }
 }
 
-pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
+/// Flag overrides for the deployment `kbx nli check` / `kbx nli fit` report on. The corpus's
+/// `[verify.nli]` supplies every default; each `Some` here replaces one piece of it.
+///
+/// Exists so the two `nli` commands accept what the two `rerank` ones always did. Half a pair
+/// taking overrides is still a mismatched pair, just differently — and the asymmetry showed up as
+/// "this command cannot probe a model dir no corpus points at", which is a real thing to want when
+/// you have just downloaded one.
+#[derive(Default)]
+pub struct NliOverrides {
+    pub model_dir: Option<PathBuf>,
+    pub entail_index: Option<usize>,
+    pub device: Option<String>,
+    pub gpu_id: Option<i32>,
+    pub gpu_mem_mb: Option<usize>,
+    pub batch_tokens: Option<usize>,
+    pub intra_threads: Option<usize>,
+    pub endpoint: Option<String>,
+    pub timeout_ms: Option<u64>,
+    pub api_key: Option<String>,
+}
+
+impl NliOverrides {
+    /// Fold the overrides into an already-resolved config, so the rest of the command reads one
+    /// config and cannot forget a flag. `--endpoint` and `--model-dir` also decide the scorer,
+    /// because asking to probe one is asking for that path rather than whatever the file says.
+    fn apply(self, cfg: &mut VerifyConfig) {
+        if let Some(d) = self.model_dir {
+            cfg.model_dir = Some(d);
+            cfg.scorer = Some("in_process".to_string());
+        }
+        if let Some(i) = self.entail_index {
+            cfg.entail_index = i;
+        }
+        if let Some(dev) = self.device {
+            cfg.execution_providers = glossa::config_util::expand_device(Some(&dev));
+        }
+        if self.gpu_id.is_some() {
+            cfg.execution_provider_device = self.gpu_id;
+        }
+        if self.gpu_mem_mb.is_some() {
+            cfg.execution_provider_mem_limit_mb = self.gpu_mem_mb;
+        }
+        if self.batch_tokens.is_some() {
+            cfg.batch_tokens = self.batch_tokens;
+        }
+        if self.intra_threads.is_some() {
+            cfg.intra_threads = self.intra_threads;
+        }
+        if let Some(ep) = self.endpoint {
+            cfg.endpoint = Some(ep);
+            cfg.scorer = Some("http".to_string());
+        }
+        if let Some(t) = self.timeout_ms {
+            cfg.timeout_ms = t;
+        }
+        if self.api_key.is_some() {
+            cfg.api_key = self.api_key;
+        }
+    }
+}
+
+pub fn nli_check(path: Option<PathBuf>, overrides: NliOverrides) -> Result<()> {
     let kbx_paths = crate::workspace::resolve(path);
     let glossa_dir = crate::workspace::glossa_dir(&kbx_paths.root);
-    let cfg = VerifyConfig::resolve(&glossa_dir);
+    let mut cfg = VerifyConfig::resolve(&glossa_dir);
+    overrides.apply(&mut cfg);
+    let cfg = cfg;
 
     let mode = match cfg.mode {
         glossa::gate::VerifyMode::Ac => "ac",
@@ -441,6 +504,7 @@ pub fn nli_check(path: Option<PathBuf>) -> Result<()> {
 /// remote scorer and a provider that did not bind, for the reasons in `fit_refusal`.
 pub fn nli_fit(
     path: Option<PathBuf>,
+    overrides: NliOverrides,
     max_rows: usize,
     seq: Option<usize>,
     repeats: usize,
@@ -448,7 +512,9 @@ pub fn nli_fit(
 ) -> Result<()> {
     let kbx_paths = crate::workspace::resolve(path);
     let glossa_dir = crate::workspace::glossa_dir(&kbx_paths.root);
-    let cfg = VerifyConfig::resolve(&glossa_dir);
+    let mut cfg = VerifyConfig::resolve(&glossa_dir);
+    overrides.apply(&mut cfg);
+    let cfg = cfg;
     let rerank = glossa::retrieve::config::RerankConfig::resolve(&glossa_dir);
 
     // Any GPU-capable engine, which is the four ORT execution providers plus the burn engine on

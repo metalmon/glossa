@@ -42,6 +42,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   remotely without `--endpoint`. `--timeout-ms` and `--backend` became real options rather than
   clap defaults, because a hardcoded default is indistinguishable from an explicit value and the
   corpus setting lost either way.
+- **`kbx nli check` / `kbx nli fit` take the same deployment overrides the `rerank` pair does.**
+  `--model-dir`, `--device`, `--gpu-id`, `--gpu-mem-mb`, `--batch-tokens`, `--intra-threads` on
+  `check` (plus `--entail-index` and the remote `--endpoint` / `--timeout-ms` / `--api-key`), and
+  `--model-dir` / `--device` / `--gpu-id` / `--gpu-mem-mb` on `fit`. Fixing only the `rerank` side
+  would have left the pair mismatched in the other direction: `nli check` still could not probe a
+  model directory no corpus points at, which is exactly what you want right after downloading one.
+  Overrides fold into the resolved config in one place, so no command can read a flag and forget it.
+
 - **Model downloads show progress.** `kbx nli download` / `kbx rerank download` fetch hundreds of
   megabytes through one `io::copy` and printed nothing until they finished, which on a slow link is
   indistinguishable from a hang. They now drive the toolkit's canonical progress bar, in bytes, with

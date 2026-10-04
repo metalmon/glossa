@@ -454,9 +454,45 @@ enum NliCmd {
         no_progress: bool,
     },
     /// Report whether the NLI verifier will actually run for a corpus, or why it fails open to AC.
+    /// Resolves `[verify.nli]`; every flag below overrides one piece of it, so the same command
+    /// probes either the configured deployment or a model dir no corpus points at yet.
     Check {
         /// Corpus root (kb-style PATH resolution, like other kbx subcommands).
         path: Option<PathBuf>,
+        /// Model dir to probe instead of `[verify.nli].model_dir` — e.g. one just downloaded.
+        /// Implies the in-process scorer.
+        #[arg(long = "model-dir")]
+        model_dir: Option<PathBuf>,
+        /// Softmax index of the entailment class, as `[verify.nli].entail_index` would set it.
+        #[arg(long = "entail-index")]
+        entail_index: Option<usize>,
+        /// Compute device: `cpu` | `cuda` | `directml` | `coreml` | `rocm`. A single value with
+        /// automatic CPU fallback. Defaults to the corpus's configured device.
+        #[arg(long = "device")]
+        device: Option<String>,
+        /// GPU device id the provider binds to. Defaults to the corpus's.
+        #[arg(long = "gpu-id")]
+        gpu_id: Option<i32>,
+        /// GPU arena memory cap in MB, so the gate can share a card. Defaults to the corpus's.
+        #[arg(long = "gpu-mem-mb")]
+        gpu_mem_mb: Option<usize>,
+        /// Per-batch token budget. Defaults to `[verify.nli].batch_tokens` — which is what you
+        /// want, since the budget is part of the session's identity.
+        #[arg(long = "batch-tokens")]
+        batch_tokens: Option<usize>,
+        /// ONNX Runtime intra-op threads. Defaults to the corpus's.
+        #[arg(long = "intra-threads")]
+        intra_threads: Option<usize>,
+        /// Probe a REMOTE NLI scorer at this base URL instead of a local model. Implies the http
+        /// scorer; defaults to `[verify.nli].endpoint` when the corpus configures one.
+        #[arg(long = "endpoint")]
+        endpoint: Option<String>,
+        /// Remote probe timeout (ms). Defaults to the corpus's, else the engine default.
+        #[arg(long = "timeout-ms")]
+        timeout_ms: Option<u64>,
+        /// Optional Bearer api-key for the remote endpoint. Defaults to the corpus's.
+        #[arg(long = "api-key")]
+        api_key: Option<String>,
     },
     /// Measure what a larger batch buys the NLI gate on THIS device, under the deployment
     /// `[verify.nli]` describes, and print the budget to configure. Prints only — `nli set
@@ -467,6 +503,19 @@ enum NliCmd {
     Fit {
         /// Corpus root (kb-style PATH resolution, like `check`).
         path: Option<PathBuf>,
+        /// Model dir to measure instead of `[verify.nli].model_dir`. Implies the in-process scorer.
+        #[arg(long = "model-dir")]
+        model_dir: Option<PathBuf>,
+        /// Compute device to measure on. Defaults to the corpus's configured device — the whole
+        /// point of a fit is that the number is device-specific.
+        #[arg(long = "device")]
+        device: Option<String>,
+        /// GPU device id the provider binds to. Defaults to the corpus's.
+        #[arg(long = "gpu-id")]
+        gpu_id: Option<i32>,
+        /// GPU arena memory cap in MB. Defaults to the corpus's.
+        #[arg(long = "gpu-mem-mb")]
+        gpu_mem_mb: Option<usize>,
         /// Ceiling on the sweep, in rows per batch (clamped to 64, the most the planner puts in one
         /// batch). Load-bearing: the sweep's own peak stays resident too, so this caps what the
         /// measurement itself costs.
@@ -1037,8 +1086,35 @@ fn main() -> Result<()> {
             no_progress,
         ),
         Cmd::Nli {
-            cmd: NliCmd::Check { path },
-        } => kb_eval::nli_check::nli_check(path),
+            cmd:
+                NliCmd::Check {
+                    path,
+                    model_dir,
+                    entail_index,
+                    device,
+                    gpu_id,
+                    gpu_mem_mb,
+                    batch_tokens,
+                    intra_threads,
+                    endpoint,
+                    timeout_ms,
+                    api_key,
+                },
+        } => kb_eval::nli_check::nli_check(
+            path,
+            kb_eval::nli_check::NliOverrides {
+                model_dir,
+                entail_index,
+                device,
+                gpu_id,
+                gpu_mem_mb,
+                batch_tokens,
+                intra_threads,
+                endpoint,
+                timeout_ms,
+                api_key,
+            },
+        ),
         Cmd::Nli {
             cmd:
                 NliCmd::Set {
@@ -1067,12 +1143,29 @@ fn main() -> Result<()> {
             cmd:
                 NliCmd::Fit {
                     path,
+                    model_dir,
+                    device,
+                    gpu_id,
+                    gpu_mem_mb,
                     max_rows,
                     seq,
                     repeats,
                     tolerance,
                 },
-        } => kb_eval::nli_check::nli_fit(path, max_rows, seq, repeats, tolerance),
+        } => kb_eval::nli_check::nli_fit(
+            path,
+            kb_eval::nli_check::NliOverrides {
+                model_dir,
+                device,
+                gpu_id,
+                gpu_mem_mb,
+                ..Default::default()
+            },
+            max_rows,
+            seq,
+            repeats,
+            tolerance,
+        ),
         Cmd::Rerank {
             cmd:
                 RerankCmd::Check {
@@ -2948,7 +3041,94 @@ mod tests {
             _ => panic!("expected rerank fit"),
         }
 
-        // The NLI side is corpus-resolved, so it takes a PATH rather than a model dir.
+        // Both sides are corpus-resolved AND both take the same deployment overrides. Half a pair
+        // accepting them is still a mismatched pair, so this pins the symmetry rather than trusting
+        // it: a fit on the NLI side takes a model dir and a device exactly as the rerank side does.
+        let cli = Cli::try_parse_from([
+            "kbx",
+            "nli",
+            "fit",
+            "corpus",
+            "--model-dir",
+            "m",
+            "--device",
+            "cuda",
+            "--gpu-id",
+            "1",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Nli {
+                cmd:
+                    NliCmd::Fit {
+                        path,
+                        model_dir,
+                        device,
+                        gpu_id,
+                        ..
+                    },
+            } => {
+                assert_eq!(path, Some(PathBuf::from("corpus")));
+                assert_eq!(model_dir, Some(PathBuf::from("m")));
+                assert_eq!(device.as_deref(), Some("cuda"));
+                assert_eq!(gpu_id, Some(1));
+            }
+            _ => panic!("expected nli fit with overrides"),
+        }
+
+        // `rerank check` with NO flags has to parse: it used to demand `--model-dir` and could not
+        // see a corpus at all, which is the defect this symmetry exists to close.
+        let cli = Cli::try_parse_from(["kbx", "rerank", "check"]).unwrap();
+        match cli.cmd {
+            Cmd::Rerank {
+                cmd:
+                    RerankCmd::Check {
+                        path,
+                        model_dir,
+                        batch_tokens,
+                        timeout_ms,
+                        backend,
+                        ..
+                    },
+            } => {
+                assert_eq!(path, None, "no PATH means kb-style discovery, not an error");
+                assert_eq!(model_dir, None, "the corpus supplies it");
+                assert_eq!(batch_tokens, None, "unset means take the configured budget");
+                assert_eq!(
+                    timeout_ms, None,
+                    "a clap default here would shadow the corpus value"
+                );
+                assert_eq!(backend, None, "same reason as timeout_ms");
+            }
+            _ => panic!("expected rerank check"),
+        }
+
+        // And the NLI check takes the same overrides, including the remote ones.
+        let cli = Cli::try_parse_from([
+            "kbx",
+            "nli",
+            "check",
+            "--endpoint",
+            "http://127.0.0.1:8071",
+            "--timeout-ms",
+            "250",
+        ])
+        .unwrap();
+        match cli.cmd {
+            Cmd::Nli {
+                cmd:
+                    NliCmd::Check {
+                        endpoint,
+                        timeout_ms,
+                        ..
+                    },
+            } => {
+                assert_eq!(endpoint.as_deref(), Some("http://127.0.0.1:8071"));
+                assert_eq!(timeout_ms, Some(250));
+            }
+            _ => panic!("expected nli check with remote overrides"),
+        }
+
         let cli =
             Cli::try_parse_from(["kbx", "nli", "fit", "corpus", "--tolerance", "0.1"]).unwrap();
         match cli.cmd {
