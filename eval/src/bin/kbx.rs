@@ -2412,7 +2412,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_trace_file_builds_ranked_sources() {
+    fn parse_trace_file_ranks_sources_by_best_rank_then_coverage() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("t.jsonl");
         let lines = [
@@ -2422,9 +2422,13 @@ mod tests {
         ];
         std::fs::write(&file, lines.join("\n")).unwrap();
         let (_tools, _chunks, ranked, _transcript) = parse_trace_file(&file);
+        // b.md is rank 1 of the first search; a.md is rank 2 there and rank 1 of the second, so
+        // both hold best rank 1 and the tie goes to the one seen first. a.md's score of 30.0 — the
+        // largest in the trace — no longer decides anything: that is the fusion change, visible
+        // here. grep's c.md is coverage and follows the ranked set.
         assert_eq!(
             ranked,
-            vec!["a.md".to_string(), "b.md".to_string(), "c.md".to_string()]
+            vec!["b.md".to_string(), "a.md".to_string(), "c.md".to_string()]
         );
     }
 
@@ -3073,15 +3077,16 @@ mod tests {
         )
         .unwrap();
         let (_tools, _chunks, ranked, _text) = parse_trace_file(&p);
+        // Ranks: x=1 and b=1 (tie -> first seen wins), y=2, a=min(3,2)=2.
+        assert_eq!(ranked[0], "x.md", "rank 1, seen first: {ranked:?}");
+        assert_eq!(ranked[1], "b.md", "rank 1 in the other search, seen later");
         assert_eq!(
-            ranked[0], "b.md",
-            "rank 1 in a search beats rank 3 anywhere: {ranked:?}"
+            ranked[2], "y.md",
+            "rank 2, seen first among the rank-2 pair"
         );
-        assert_eq!(ranked[1], "x.md", "also rank 1, seen later -> second");
-        assert_eq!(ranked[2], "y.md");
         assert_eq!(
             ranked[3], "a.md",
-            "best rank 2 (second search), not its 99.0 score"
+            "best rank 2 (second search) — its 99.0, the largest score in the trace, buys nothing"
         );
         assert_eq!(
             ranked.last().unwrap(),
