@@ -59,6 +59,11 @@ pub enum RerankOutcome {
     FailedOpen(String),
 }
 
+/// How much of a [`rerank_passage`] may be provenance rather than text. Roughly a quarter of the
+/// scorer's 512-token window once a non-Latin script is counted, so the body it introduces still
+/// dominates the input even for a pathologically deep heading breadcrumb.
+const MAX_PROVENANCE_CHARS: usize = 200;
+
 /// The text the cross-encoder scores for one hit: the chunk's own provenance, then its body.
 ///
 /// Shape: `<folder> / <folder> / <file stem>`, then ` > <location>` when the chunker recorded one,
@@ -75,16 +80,24 @@ pub enum RerankOutcome {
 /// `location` is whatever its extractor stored: a heading breadcrumb for Markdown and Office, a row
 /// range for CSV, `(image)` for an image indexed by name. It is passed through unfiltered by
 /// choice: an allow-list of "worthy" location shapes is a policy table with no owner, and every
-/// extractor added later falls out of it silently.
+/// extractor added later falls out of it silently. Length is the one thing that IS bounded, see
+/// [`MAX_PROVENANCE_CHARS`].
 pub fn rerank_passage(path: &str, location: &str, body: &str) -> String {
     let normalized = path.replace('\\', "/");
     let mut parts: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
     if let Some(file) = parts.pop() {
-        // Drop a real extension only: `report.v1_5` keeps its name, `guide.pdf` loses `.pdf`.
+        // Drop a real extension only, and only when a name is left behind: `guide.pdf` loses
+        // `.pdf`, while `report.v1_5` (underscore), `.gitignore` (too long), `file.` (nothing after
+        // the dot) and `.png` (nothing before it) all keep their basename whole. Without the
+        // `stem` check, a basename that is only an extension would collapse to an empty segment —
+        // dropping the provenance entirely, or leaving a doubled separator before the location.
         let stem = file
             .rsplit_once('.')
-            .filter(|(_, ext)| {
-                !ext.is_empty() && ext.len() <= 5 && ext.chars().all(|c| c.is_ascii_alphanumeric())
+            .filter(|(stem, ext)| {
+                !stem.is_empty()
+                    && !ext.is_empty()
+                    && ext.len() <= 5
+                    && ext.chars().all(|c| c.is_ascii_alphanumeric())
             })
             .map_or(file, |(stem, _)| stem);
         parts.push(stem);
@@ -98,6 +111,14 @@ pub fn rerank_passage(path: &str, location: &str, body: &str) -> String {
     }
     if head.is_empty() {
         return body.to_string();
+    }
+    // The provenance must never crowd out the text it introduces. The scorer's window is fixed
+    // (512 tokens) and truncation drops the END of the passage, while a heading breadcrumb has no
+    // depth limit of its own — it is as deep as the document. Cutting here eats the deepest
+    // headings first and always leaves the document path, the part the measurement credits.
+    if let Some((cut, _)) = head.char_indices().nth(MAX_PROVENANCE_CHARS) {
+        head.truncate(cut);
+        head.push('…');
     }
     format!("{head}\n\n{body}")
 }
@@ -506,6 +527,40 @@ mod tests {
         assert_eq!(rerank_passage("readme", "", "b"), "readme\n\nb");
         // `.v1_5` is not an extension (underscore), so the name stays whole.
         assert_eq!(rerank_passage("report.v1_5", "", "b"), "report.v1_5\n\nb");
+    }
+
+    #[test]
+    fn rerank_passage_keeps_a_basename_that_is_only_an_extension() {
+        // `.png` has no name in front of the dot, so stripping would leave an empty segment: the
+        // provenance would vanish entirely, or double its separator once a folder is involved.
+        assert_eq!(rerank_passage(".png", "", "b"), ".png\n\nb");
+        assert_eq!(
+            rerank_passage("diagrams/.png", "(image)", "b"),
+            "diagrams / .png > (image)\n\nb"
+        );
+    }
+
+    #[test]
+    fn rerank_passage_caps_the_provenance_so_it_cannot_crowd_out_the_body() {
+        // A breadcrumb is as deep as its document, and the scorer's window cuts the END of the
+        // passage, so an uncapped head would truncate away the body it introduces. Multi-byte
+        // headings also prove the cut lands on a character boundary rather than panicking.
+        let deep = (1..40)
+            .map(|i| format!("Überschrift {i}"))
+            .collect::<Vec<_>>()
+            .join(" > ");
+        let got = rerank_passage("manuals/guide.md", &deep, "the body");
+        assert!(
+            got.starts_with("manuals / guide > Überschrift 1 > "),
+            "document path lost: {got:?}"
+        );
+        assert!(got.ends_with("\n\nthe body"), "body lost: {got:?}");
+        let head = got.split("\n\n").next().unwrap();
+        assert!(
+            head.chars().count() <= MAX_PROVENANCE_CHARS + 1,
+            "head not capped: {} chars",
+            head.chars().count()
+        );
     }
 
     #[test]
