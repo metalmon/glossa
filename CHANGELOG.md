@@ -8,6 +8,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The Linux archives no longer require a newer glibc than they need.** They were built on the
+  floating `ubuntu-latest` runner, which has moved to 24.04, so the linker recorded glibc 2.39 as
+  the minimum and distributions on an older glibc warned about a binary that otherwise runs fine.
+  The five Linux rows now build on `ubuntu-22.04` (glibc 2.35); newer hosts are unaffected, since a
+  low floor binds nobody. macOS and Windows have no equivalent and are unchanged.
+
 - **`kb index` now says when a corpus will not take the default `.ignore`.** The seed was written
   with `.ok()?`, so a failed write looked exactly like "an ignore file already existed". The case
   where that matters is the one the docs steer operators toward — a read-only corpus share — and
