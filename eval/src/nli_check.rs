@@ -572,7 +572,7 @@ pub fn nli_fit(
         let tolerance = crate::fit::sanitize_tolerance(tolerance);
         let max_rows = max_rows.clamp(1, glossa_nli::harness::NLI_BATCH_MAX_ROWS);
         // One row per batch at load: the sweep hands each size in explicitly.
-        let engine = glossa_nli::InProcessNli::load(
+        let engine = glossa_nli::load_nli(
             &model_dir,
             cfg.entail_index,
             &cfg.execution_providers,

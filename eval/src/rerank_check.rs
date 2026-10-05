@@ -268,7 +268,7 @@ pub fn rerank_fit(opts: &FitOpts) -> Result<()> {
             .clamp(1, glossa_nli::harness::NLI_BATCH_MAX_ROWS);
         // Loaded at one row per batch: the sweep supplies each size explicitly, so the session's own
         // budget must not be the thing under measurement.
-        let engine = glossa_nli::InProcessReranker::load(
+        let engine = glossa_nli::load_reranker(
             &opts.model_dir,
             &ep,
             opts.gpu_id,

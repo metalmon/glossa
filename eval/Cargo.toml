@@ -36,7 +36,7 @@ path = "src/bin/kbx.rs"
 # and Vulkan rows could too: they enabled the marker, compiled the server, and had no `glossa::tls`.
 # Same lesson as the cfg list, one level up: a requirement of the server belongs on the one feature
 # that says "a server exists here".
-engine = ["glossa/tls"]
+engine = ["glossa/tls", "dep:glossa-nli"]
 # Off by default: pulls in glossa's CSP/marking-schema solver (glossa-constraint). Rare/opt-in
 # path, exercised by `eval/tests/constraint_it.rs`.
 constraint = ["glossa/constraint", "dep:glossa-constraint"]
@@ -83,11 +83,14 @@ nli-burn-cpu = ["glossa/nli-burn", "dep:glossa-nli", "glossa-nli/nli-burn-cpu", 
 [dependencies]
 glossa = { path = ".." }
 glossa-constraint = { path = "../constraint", optional = true }
-# Direct optional dep purely to give the `nli-cuda`/`nli-directml`/`nli-coreml` passthrough
-# features (above) a local crate name to enable a feature on — kb-eval never calls glossa-nli
-# directly (it only ever goes through `glossa::gate`/`resolve_scorer`); Cargo's feature
-# unification is what makes this reach the shared instance glossa itself depends on. See the
-# `nli-cuda` feature comment above for the full mechanism.
+# Direct optional dep. Two jobs: it gives the `nli-cuda`/`nli-directml`/`nli-coreml` passthrough
+# features (above) a local crate name to enable a feature on, and it is what `kbi` and the fit
+# paths name directly (`glossa_nli::Nli`, `load_nli`, the harness constants). It therefore hangs
+# off the `engine` marker rather than off each engine feature: a row that compiles the server has
+# to be able to SAY `glossa_nli`, and the CPU row proved the point by enabling the marker through
+# plain `nli` and then failing to resolve the crate. Cargo's feature unification is what gives
+# this the same instance glossa itself depends on, with the union of both sides' features — see
+# the `nli-cuda` feature comment above for the full mechanism.
 glossa-nli = { path = "../glossa-nli", optional = true, default-features = false }
 anyhow = "1"
 regex = "1"
