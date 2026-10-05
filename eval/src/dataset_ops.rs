@@ -553,6 +553,7 @@ confidence = 3
             needs_graph: "yes".into(),
             source: vec!["a.pdf#p.1".into(), "b.pdf#p.2".into()],
             answerable: false,
+            extra: toml::Table::new(),
         }];
         write_cases(&path, &cases).unwrap();
 
