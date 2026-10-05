@@ -89,17 +89,22 @@ pub const DEFAULT_IGNORE: &str = "\
 ";
 
 /// Write the default whitelist `.ignore` at `root`, but ONLY when the corpus has no ignore file of
-/// its own (`.ignore` or `.gitignore`) — never clobber a user's existing setup. Returns the written
-/// path, or `None` if one already existed (or the write failed). Idempotent: a second call is a
-/// no-op once `.ignore` exists.
-pub fn seed_if_absent(root: &Path) -> Option<PathBuf> {
+/// its own (`.ignore` or `.gitignore`) — never clobber a user's existing setup. `Ok(None)` means one
+/// already existed; idempotent, so a second call is a no-op once `.ignore` exists.
+///
+/// A failed write is an `Err`, not a silent `None`. It used to be the latter, and the case that
+/// makes the difference is the one this is most likely to meet: a read-only corpus share, where
+/// seeding is impossible and the consequence — the walker treating every installer and archive it
+/// finds as indexable text, which is exactly what the seed exists to prevent — is invisible unless
+/// someone says so.
+pub fn seed_if_absent(root: &Path) -> std::io::Result<Option<PathBuf>> {
     let dot_ignore = root.join(".ignore");
     let git_ignore = root.join(".gitignore");
     if dot_ignore.exists() || git_ignore.exists() {
-        return None;
+        return Ok(None);
     }
-    std::fs::write(&dot_ignore, DEFAULT_IGNORE).ok()?;
-    Some(dot_ignore)
+    std::fs::write(&dot_ignore, DEFAULT_IGNORE)?;
+    Ok(Some(dot_ignore))
 }
 
 #[cfg(test)]
@@ -109,7 +114,9 @@ mod tests {
     #[test]
     fn seeds_a_whitelist_ignore_when_none_present() {
         let d = tempfile::tempdir().unwrap();
-        let p = seed_if_absent(d.path()).expect("seeds when no ignore file exists");
+        let p = seed_if_absent(d.path())
+            .expect("seeding must not fail on a writable dir")
+            .expect("seeds when no ignore file exists");
         assert_eq!(p, d.path().join(".ignore"));
         let content = std::fs::read_to_string(&p).unwrap();
         // The gitignore-whitelist idiom must be intact.
@@ -125,12 +132,12 @@ mod tests {
     #[test]
     fn is_idempotent_and_never_clobbers_existing() {
         let d = tempfile::tempdir().unwrap();
-        seed_if_absent(d.path()).unwrap();
+        seed_if_absent(d.path()).unwrap().unwrap();
         // Second call is a no-op — the file already exists.
-        assert!(seed_if_absent(d.path()).is_none());
+        assert!(seed_if_absent(d.path()).unwrap().is_none());
         // A user edit must survive a later seed attempt.
         std::fs::write(d.path().join(".ignore"), "*\n!*.pdf\n").unwrap();
-        assert!(seed_if_absent(d.path()).is_none());
+        assert!(seed_if_absent(d.path()).unwrap().is_none());
         assert_eq!(
             std::fs::read_to_string(d.path().join(".ignore")).unwrap(),
             "*\n!*.pdf\n"
@@ -142,7 +149,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join(".gitignore"), "target/\n").unwrap();
         assert!(
-            seed_if_absent(d.path()).is_none(),
+            seed_if_absent(d.path()).unwrap().is_none(),
             "respects an existing .gitignore"
         );
         assert!(!d.path().join(".ignore").exists());

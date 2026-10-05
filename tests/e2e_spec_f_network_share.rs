@@ -109,9 +109,12 @@ fn indexes_a_share_hosted_corpus_with_state_on_local_disk() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // The state landed on local disk, and NOTHING landed on the share. The second half is the
-    // standing rule that an indexed corpus is never written into, and it is the reason an operator
-    // can point this at a read-only share.
+    // The state landed on local disk, and the ONLY thing `kb index` adds to the share is the
+    // default `.ignore` it seeds on a corpus that has none. An earlier version of this test
+    // asserted the share was untouched; that was simply false, and because the test is opt-in it
+    // had never run to say so. The distinction matters to an operator: `--state-dir` keeps the
+    // INDEX off the share, it does not make indexing read-only, and on a share that really is
+    // read-only the seed fails (audibly, now) and the walk proceeds with no whitelist.
     assert!(
         state.path().join(".glossa").is_dir(),
         "no .glossa under --state-dir: {}",
@@ -121,10 +124,14 @@ fn indexes_a_share_hosted_corpus_with_state_on_local_disk() {
         !corpus.join(".glossa").exists(),
         "kb index wrote .glossa into the share-hosted corpus"
     );
+    let added: Vec<String> = listing(&corpus)
+        .into_iter()
+        .filter(|p| !before.contains(p))
+        .collect();
     assert_eq!(
-        listing(&corpus),
-        before,
-        "the corpus directory on the share changed during indexing"
+        added,
+        vec![".ignore".to_string()],
+        "kb index added something other than the seeded .ignore to the share"
     );
 
     // Both documents are retrievable, which is what the UNC-prefix defect broke: the root resolved

@@ -177,7 +177,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   explicitly, including that a service runs as its own account and may not see a mapped drive.
   Covered by unit tests for both path forms and the root-failure path, plus an opt-in end-to-end
   spec (`GLOSSA_TEST_SHARE_ROOT`) that indexes, searches and reads a share-hosted corpus with state
-  on local disk and proves the share is never written to.
+  on local disk and pins what `kb index` may add to the share: the seeded default `.ignore`,
+  and nothing else.
 
 ## [0.5.3] — 2026-10-01
 
