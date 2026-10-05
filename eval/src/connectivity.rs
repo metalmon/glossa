@@ -217,6 +217,7 @@ mod tests {
             needs_graph: String::new(),
             source: vec!["man.pdf#p.5".into()],
             answerable: true,
+            extra: toml::Table::new(),
         }];
         let report = answer_reachability(&g, &cases).unwrap();
         let mh = report.get("multihop").expect("multihop bucket");
@@ -281,6 +282,7 @@ mod tests {
             needs_graph: String::new(),
             source: vec![],
             answerable: false,
+            extra: toml::Table::new(),
         }];
         let report = answer_reachability(&g, &cases).unwrap();
         assert!(report.values().all(|h| h.n == 0), "no evaluable cases");
