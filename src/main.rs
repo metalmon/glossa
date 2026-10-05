@@ -1928,20 +1928,11 @@ fn main() -> anyhow::Result<()> {
             }
             // Seed a default whitelist `.ignore` on a corpus that has none, so a first index doesn't
             // slurp installers/archives/temp files as text. Never clobbers an existing ignore setup.
-            match glossa::default_ignore::seed_if_absent(&rr.root) {
-                Ok(Some(p)) => eprintln!(
+            if let Some(p) = glossa::default_ignore::seed_if_absent(&rr.root) {
+                eprintln!(
                     "wrote default {} (whitelist of supported types) — edit it to tune what's indexed",
                     p.display()
-                ),
-                Ok(None) => {}
-                // Not fatal: indexing proceeds without a whitelist. But it changes what gets
-                // indexed, so it is said out loud rather than swallowed — a read-only corpus
-                // share reaches here, and that is a configuration the docs recommend.
-                Err(e) => cli_fmt::note(&format!(
-                    "could not write a default .ignore into {}: {e}
-                       indexing continues, but with no ignore file every supported-looking file in                      the tree is read as text. Put an .ignore on the corpus, or narrow the roots.",
-                    rr.root.display()
-                )),
+                );
             }
             let stats = glossa::index::store::index_dir_at(&rr.roots, &rr.state_base, force)?;
             if !stats.errors.is_empty() {
