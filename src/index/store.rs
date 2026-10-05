@@ -116,7 +116,7 @@ fn strip_verbatim_prefix(s: &str) -> String {
 }
 
 /// The absolute corpus root — the single anchor for relative doc keys. Canonicalized so that `.`,
-/// `kb-test` and `E:\…\kb-test` all resolve to the same root, with the verbatim prefix undone by
+/// `corpus` and `D:\…\corpus` all resolve to the same root, with the verbatim prefix undone by
 /// [`strip_verbatim_prefix`] (see there for why a UNC share needs its own case).
 pub fn abs_root(dir: &Path) -> PathBuf {
     match std::fs::canonicalize(dir) {

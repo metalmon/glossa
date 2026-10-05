@@ -18,7 +18,7 @@
 # # Optional. Other acceptable surface forms of the SAME answer — the judge accepts any of them.
 # # For a question with several genuinely different valid answers, this is the field to use;
 # # `source` is not (it is an AND of required evidence, see below).
-# aliases = ["4,2 МПа", "4.2 megapascals"]
+# aliases = ["4,2 MPa", "4.2 megapascals"]
 #
 # # Optional. Free-form labels; `kbx eval --tag-filter` runs a subset by them.
 # tags = ["pressure", "smoke"]
