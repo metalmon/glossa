@@ -111,7 +111,22 @@ jobs:
       - name: cargo clippy (burn engine, CPU backend)
         run: cargo clippy -p glossa-nli --no-default-features --features nli-burn-cpu --all-targets --locked -- -D warnings
 
+      # The parity test (`tests/burn_parity.rs`) compares the burn forward against committed ORT
+      # reference logits, and skips itself when no model dir is given. The ~700 MB weights cannot
+      # live in the repo, so for most of this engine's life the test has silently no-opped. They
+      # are published now, so fetch them and let it actually run: this is the only check that the
+      # burn engine SCORES correctly rather than merely compiling.
+      - name: fetch burn NLI weights (parity fixtures)
+        run: |
+          mkdir -p "$RUNNER_TEMP/burn-nli"
+          base=https://huggingface.co/metalmon80/rubert-nli-threeway-burn/resolve/main
+          curl -fsSL "$base/model.safetensors" -o "$RUNNER_TEMP/burn-nli/model.safetensors"
+          curl -fsSL "$base/tokenizer.json" -o "$RUNNER_TEMP/burn-nli/tokenizer.json"
+          ls -l "$RUNNER_TEMP/burn-nli"
+
       - name: cargo test (glossa-nli, burn engine, CPU backend)
+        env:
+          GLOSSA_NLI_BURN_TEST_MODEL: ${{ runner.temp }}/burn-nli
         run: cargo test -p glossa-nli --release --locked --no-default-features --features nli-burn-cpu
 
       - name: cargo build (kb-eval, burn engine wiring, CPU backend)
