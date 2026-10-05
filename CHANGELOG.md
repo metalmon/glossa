@@ -1,8 +1,26 @@
 # Changelog
 
-All notable changes to glossa are documented here. Release tags ship **`kb`**, **`kbx`**, and — in the GPU-execution-provider artifacts (cuda13 / DirectML / CoreML) — **`kbi`** (the inference server); `kb-train` and other utilities are built from source.
+All notable changes to glossa are documented here. Release tags ship **`kb`** and **`kbx`** everywhere, plus **`kbi`** (the inference server) in every archive that has an engine — eight of the twelve, all but the `none` rows; `kb-train` and other utilities are built from source.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+### Fixed
+
+- **`kb index` now says when a corpus will not take the default `.ignore`.** The seed was written
+  with `.ok()?`, so a failed write looked exactly like "an ignore file already existed". The case
+  where that matters is the one the docs steer operators toward — a read-only corpus share — and
+  there the silence cost real behaviour: with no whitelist, every supported-looking file in the
+  tree is read as text, which is precisely what the seed exists to prevent. Indexing still
+  continues; it just no longer continues quietly.
+- **The network-share spec asserted something the product does not do.** It checked that the corpus
+  directory on the share was byte-for-byte unchanged by indexing, and a comment said that this is
+  what lets an operator point at a read-only share. Both were wrong: `kb index` seeds `.ignore`
+  there. It went unnoticed because the test is gated on `GLOSSA_TEST_SHARE_ROOT` and had never run.
+  It now pins the real contract — `.ignore` may appear on the share, nothing else may — and
+  `--state-dir` is described for what it does, which is keeping the INDEX off the share rather
+  than making indexing read-only.
 
 ## [0.5.4] — 2026-10-05
 
