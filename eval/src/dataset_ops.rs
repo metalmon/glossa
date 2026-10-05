@@ -1,8 +1,14 @@
 //! `kbx dataset` operations over `dataset.toml`-shape files: `stat`, `merge`, `validate`, `dedup`,
-//! `sample`. Every op reads through [`crate::dataset_toml::parse_dataset_toml`] (the single case
-//! parser) and writes through [`write_cases`] — a full-fidelity `[[case]]` serializer that
-//! ROUND-TRIPS every field the parser understands (id/question/answer/aliases/tags/hop_type/
-//! needs_graph/source/answerable), so merge/dedup never silently drop a field.
+//! `sample`. Every op reads through [`load_cases`] and writes through [`write_cases`], which
+//! round-trip a `[[case]]` WITHOUT LOSS: the nine fields the eval pipeline models
+//! (id/question/answer/aliases/tags/hop_type/needs_graph/source/answerable) plus every other key
+//! the file happens to carry, kept verbatim in [`Case::extra`].
+//!
+//! That last part is the point. These ops rewrite the whole file, so anything the serializer does
+//! not emit is DELETED — and this module used to promise fidelity only for "every field the parser
+//! understands", which is a different and much smaller set. A dataset carrying `distilled_query`
+//! or a per-case `abstention` flag lost them to a `dedup` that was asked only to remove
+//! duplicates.
 //!
 //! The logic here is pure and testable — no clap, no stdout formatting, no wall clock (sampling is
 //! seeded). `kbx.rs` stays thin: parse args -> call one function here -> print.
@@ -12,30 +18,47 @@ use crate::dataset_toml::parse_dataset_toml;
 use anyhow::{Context, Result};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
-/// One `[[case]]` in full fidelity — every field `parse_dataset_toml` reads back. Empty
-/// collections/strings and the `answerable=true` default are skipped on write so a round-tripped
-/// file stays as terse as it started (an absent field re-parses to the same default).
-#[derive(Debug, Clone, Serialize)]
+/// One `[[case]]`, round-tripped WITHOUT LOSS — including keys this crate does not model.
+///
+/// The nine named fields are the ones the eval pipeline reads. Everything else a dataset carries
+/// lands in [`Case::extra`] and is written back verbatim. That is not a nicety: `dedup` and
+/// `merge` rewrite the whole file through [`write_cases`], so a key absent from this struct used
+/// to be DELETED from the user's dataset by a command that claims only to remove duplicates. Real
+/// datasets carry such keys — `distilled_query`, a per-case `abstention` flag — and losing them is
+/// losing hand-written work, silently.
+///
+/// Empty collections/strings and the `answerable = true` default are skipped on write, so a
+/// round-tripped file stays as terse as it started (an absent field re-parses to the same default).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Case {
     pub id: String,
     pub question: String,
     pub answer: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub hop_type: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub needs_graph: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source: Vec<String>,
-    #[serde(skip_serializing_if = "is_true")]
+    #[serde(default = "default_answerable", skip_serializing_if = "is_true")]
     pub answerable: bool,
+    /// Every `[[case]]` key this crate does not model, kept so a rewrite gives it back. Flattened,
+    /// so it is invisible in the file: these keys sit at case level exactly where they started.
+    #[serde(flatten, default, skip_serializing_if = "toml::Table::is_empty")]
+    pub extra: toml::Table,
+}
+
+/// serde `default` for `answerable`: an absent key means true, matching `parse_dataset_toml`.
+fn default_answerable() -> bool {
+    true
 }
 
 /// `#[serde(skip_serializing_if)]` predicate: omit `answerable` when it holds its `true` default
@@ -58,12 +81,17 @@ impl Case {
             needs_graph: q.needs_graph.clone(),
             source: q.source.clone(),
             answerable: q.answerable,
+            // A `Question` has already lost whatever the parser did not model, so nothing can be
+            // recovered here. This path builds NEW cases (distil); the preserving path is
+            // `load_cases`, which reads the file straight into `Case`.
+            extra: toml::Table::new(),
         }
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct CaseFile {
+    #[serde(default)]
     case: Vec<Case>,
 }
 
@@ -84,12 +112,21 @@ pub fn write_cases(path: &Path, cases: &[Case]) -> Result<()> {
     Ok(())
 }
 
-/// Parse a `dataset.toml` file into full-fidelity [`Case`]s (through the single shared parser).
+/// Parse a `dataset.toml` file into lossless [`Case`]s.
+///
+/// Reads the TOML straight into `Case` rather than going through `parse_dataset_toml`'s
+/// `Question`: `Question` models only what the eval pipeline consumes, so routing through it threw
+/// away every other key before `write_cases` could put it back. The shared parser is still the
+/// authority for what a case MEANS — it is validated against here — but it is not the right shape
+/// for a read-modify-write.
 pub fn load_cases(path: &Path) -> Result<Vec<Case>> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let qs = parse_dataset_toml(&text)?;
-    Ok(qs.iter().map(Case::from_question).collect())
+    // Parse through the shared parser too, purely so a file that the eval pipeline would reject
+    // fails here with the same message instead of passing dedup and failing later.
+    parse_dataset_toml(&text)?;
+    let file: CaseFile = toml::from_str(&text).context("parsing dataset.toml")?;
+    Ok(file.case)
 }
 
 /// Normalize a question/answer for dedup + duplicate counting: trim, collapse inner whitespace
@@ -408,6 +445,85 @@ pub fn sample_cases(cases: &[Case], n: usize, seed: u64) -> Vec<Case> {
 mod tests {
     use super::*;
 
+    /// The reported data loss, pinned: `dedup` rewrites the file, so any key the serializer does
+    /// not emit is deleted from the user's dataset. Real datasets carry `distilled_query` and a
+    /// per-case `abstention` flag; neither is modelled here, and both used to vanish from a
+    /// command asked only to remove duplicates.
+    #[test]
+    fn a_rewrite_keeps_keys_this_crate_does_not_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dataset.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[case]]
+id = "a"
+question = "Q1?"
+answer = "A1"
+hop_type = "lexical"
+distilled_query = "short side, fits the NLI window"
+abstention = true
+
+[[case]]
+id = "b"
+question = "Q1?"
+answer = "A1"
+reviewed_by = "ops"
+confidence = 3
+"#,
+        )
+        .unwrap();
+
+        let loaded = load_cases(&path).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(
+            loaded[0]
+                .extra
+                .get("distilled_query")
+                .and_then(|v| v.as_str()),
+            Some("short side, fits the NLI window"),
+            "an unmodelled key must survive the READ"
+        );
+        assert_eq!(
+            loaded[0]
+                .extra
+                .get("abstention")
+                .and_then(toml::Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            !loaded[0].extra.contains_key("hop_type"),
+            "a modelled field belongs in its own slot, not in extra"
+        );
+
+        // Dedup drops the duplicate question and rewrites the whole file — the destructive path.
+        let (kept, removed) = dedup_cases(&loaded);
+        assert_eq!(kept.len(), 1, "the two cases share a question");
+        assert_eq!(removed, 1);
+        write_cases(&path, &kept).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("distilled_query"),
+            "the rewrite deleted a hand-written field:
+{after}"
+        );
+        assert!(
+            after.contains("abstention"),
+            "same, for the abstention flag"
+        );
+
+        let reread = load_cases(&path).unwrap();
+        assert_eq!(
+            reread[0]
+                .extra
+                .get("distilled_query")
+                .and_then(|v| v.as_str()),
+            Some("short side, fits the NLI window"),
+            "and it must come back identical on the next read"
+        );
+    }
+
     fn case(id: &str, q: &str, a: &str) -> Case {
         Case {
             id: id.into(),
@@ -419,6 +535,7 @@ mod tests {
             needs_graph: String::new(),
             source: Vec::new(),
             answerable: true,
+            extra: toml::Table::new(),
         }
     }
 

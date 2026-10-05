@@ -33,6 +33,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`kbx dataset dedup` and `merge` deleted dataset fields they did not understand.** Both rewrite
+  the whole file through one serializer whose case struct models nine fields, so every other key a
+  dataset carried was gone after a command asked only to remove duplicates — reported with
+  `distilled_query` and a per-case `abstention` flag vanishing from a real dataset. The module even
+  promised fidelity, but only for "every field the parser understands", which is a different and
+  much smaller set than what a file actually holds. A case now keeps unmodelled keys verbatim and
+  writes them back unchanged, and the read path goes straight to that struct instead of through the
+  eval pipeline's `Question`, which had already discarded them. The shared parser still runs, so a
+  file the pipeline would reject still fails here rather than later.
+
 - **The dataset schema's docs promised a value its validator rejects.** Three field docstrings
   described `hop_type` as `lexical|multihop|mixed`, while `kbx dataset validate` accepts only
   `""`, `lexical` or `multihop` — so a dataset written from the documentation failed validation on
