@@ -4,10 +4,24 @@ All notable changes to glossa are documented here. Release tags ship **`kb`**, *
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.5.4] — 2026-10-05
+
+> **Upgrading from 0.5.3: reindex once, and do not compare retrieval numbers across this release.**
+> `INDEX_SCHEMA_VERSION` goes 3 → 5 here, so the first `kb index` after the upgrade rebuilds the
+> index from the corpus. That is the whole migration — nothing else to run, and the graph is
+> untouched. Two separate changes re-baseline retrieval measurements (rank fusion in `kbx eval`, and
+> the text the reranker scores), so a before/after comparison across 0.5.3 → 0.5.4 is not
+> meaningful. If you use the downloadable reranker models, re-fetch them (see Fixed).
 
 ### Added
 
+- **Two normalized readings on every `search` hit.** `rel_bm25` — the hit's BM25 score as a fraction
+  of the best in its list (relative, always present) — and `rel_rerank` — `sigmoid(logit)`, the
+  reranker's probability, present when a logit-emitting reranker scored the list (in-process, TEI,
+  `kbi`, vLLM, llama.cpp; vLLM is now asked for raw logits with `use_activation: false`). `cohere`
+  and `jina` keep ordering but carry no `rel_rerank`. The native `score` is unchanged; the fields are
+  additive in the search trace and in the `RankedHit` retrieval returns; the agent's reply and the `kb search` output are unchanged. A reranker returning a non-finite score now fails open instead
+  of reaching the sort.
 - **GPU release artifacts for Linux, and a vendor-independent GPU engine on both Linux and
   Windows.** Release builds went from eight archives to twelve. New: `linux-gnu-cuda13` (the GPU
   libraries bundled and pinned by digest, as the Windows one already was), `linux-gnu-rocm`, and
@@ -31,8 +45,84 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   batch-budget override, so a measured budget reaches the engine instead of being dropped when
   another handle loaded the same model directory first.
 
+### Changed
+
+- **Extractor upgrade: `office_oxide` 0.1.8 → 0.1.11, `pdf_oxide` 0.3.77 → 0.3.78.** This changes
+  extracted text, so **`INDEX_SCHEMA_VERSION` 4 → 5: existing indexes rebuild on the next
+  `kb index`** — a file's signature is its mtime and size, so an extractor upgrade alone would never
+  re-read it, and a stale index would keep serving the old text. The visible gain is on legacy
+  Office: a `.doc` now yields tables at all (their structure was silently dropped, while `.docx`
+  emitted tables from the same call), document metadata is read instead of coming back empty, and
+  embedded pictures in `.doc`/`.xls`/`.ppt` include formats that used to be skipped. On the PDF
+  side, rendering gained a 16-megapixel output budget — nothing in a PDF bounds page size times
+  scale, so a huge page is now scaled to fit rather than exhausting memory — and five aborts on
+  valid files became catchable errors instead of killing the process.
+  **`office_oxide` is pinned at `<0.1.12` on purpose:** 0.1.12 added a field to a public IR struct
+  that `pdf_oxide` builds with an exhaustive literal, so the two cannot be in one dependency tree
+  until `pdf_oxide` default-fills it. That also holds `.xlsb` support, which arrived in 0.1.12.
+
+- **`kbx eval` fuses `ranked_sources` by best rank, not by raw score across queries.** BM25 values
+  from different searches are not comparable (and a reranked hit's score is a logit), so a path now
+  takes the best position it reached in any single `search`. **Retrieval@k numbers from before this
+  change are not comparable with numbers after it.**
+- **The reranker now scores a chunk's provenance along with its text.** The cross-encoder used to
+  receive the chunk body alone, so a page-per-chunk PDF arrived as bare prose with no hint of which
+  document it came from. The passage is now `<folder> / <folder> / <file stem>`, then
+  ` > <location>` when the chunker recorded one (a heading breadcrumb for Markdown and Office, a row
+  range for CSV, and so on), a blank line, then the body verbatim. Measured over a 175-question set:
+  +2.3pp whole-chain coverage and +4.6pp any-of at a window of 10, 5 cases gained against 1 lost,
+  with the gain largest on multi-hop questions. **Rerank order changes, so retrieval@k numbers from
+  before this change are not comparable with numbers after it.** Nothing is reindexed and no stored
+  text changes — `read`, snippets and offsets still resolve to the verbatim body. Requires
+  `[rerank].enabled`; deployments with reranking off are unaffected.
+- **`kbx rerank check` reads the corpus, like every sibling command already did.** It took
+  `--model-dir` and had no way to see a corpus at all, so an operator had to copy the model dir,
+  device, GPU id, memory cap, batch budget and thread count out of `ontology.toml` by hand — and a
+  forgotten `--batch-tokens` probed a session shape production never builds, which the flag's own
+  help text admitted. It now resolves `[rerank]` exactly as `kbx nli check` and `kbx rerank fit`
+  do, with every flag as an override, and a corpus configured for a remote scorer is probed
+  remotely without `--endpoint`. `--timeout-ms` and `--backend` became real options rather than
+  clap defaults, because a hardcoded default is indistinguishable from an explicit value and the
+  corpus setting lost either way.
+- **`kbx nli check` / `kbx nli fit` take the same deployment overrides the `rerank` pair does.**
+  `--model-dir`, `--device`, `--gpu-id`, `--gpu-mem-mb`, `--batch-tokens`, `--intra-threads` on
+  `check` (plus `--entail-index` and the remote `--endpoint` / `--timeout-ms` / `--api-key`), and
+  `--model-dir` / `--device` / `--gpu-id` / `--gpu-mem-mb` on `fit`. Fixing only the `rerank` side
+  would have left the pair mismatched in the other direction: `nli check` still could not probe a
+  model directory no corpus points at, which is exactly what you want right after downloading one.
+  Overrides fold into the resolved config in one place, so no command can read a flag and forget it.
+
+- **Model downloads show progress.** `kbx nli download` / `kbx rerank download` fetch hundreds of
+  megabytes through one `io::copy` and printed nothing until they finished, which on a slow link is
+  indistinguishable from a hang. They now drive the toolkit's canonical progress bar, in bytes, with
+  a rate; `--no-progress` suppresses it, as on `build`/`train`/`reason`/`distil`, and it is already
+  suppressed when stderr is not a terminal. A server's own auto-download is therefore quiet under a
+  service manager and visible in the foreground.
+- **`kbx nli fit` / `kbx rerank fit` work on the Vulkan engine.** Both refused unless one of four
+  ONNX Runtime execution providers was compiled in, so a pure-Rust Vulkan build — a GPU build — got
+  the "no GPU execution provider" refusal meant for CPU-only builds. The refusal now keys on GPU
+  capability rather than on ORT, and still refuses a CPU fit, which is a known answer and a thermal
+  hazard. The burn engine gained `entail_with_budget` and `rerank_with_budget` so the measured path
+  is the serving path there too.
+
+- **Release archives name their engine.** Three rows shipped as `…-ort` while being three different
+  engines — DirectML on Windows, CoreML on macOS, plain CPU on Linux. They are now `…-directml`,
+  `…-coreml` and `…-cpu`. The engine is the one thing an operator has to choose, so the filename
+  says it. Scripts that hardcoded `-ort` need updating.
+
 ### Fixed
 
+- **The published reranker models were batch-1-only and are republished.** Between 2026-09-28 and
+  2026-10-02 all three variants (fp32 / fp16 / int8) on the model hub carried an ONNX export whose
+  two shared reshape vectors hard-coded a batch of one, so scoring any pool of two or more passages
+  failed with a broadcast error — and because reranking fails open, affected deployments silently
+  served plain BM25 while reporting a configured reranker. The exports were rebuilt from clean
+  sources with a narrow patch (only the two shared dynamic dimensions replaced with literals) and
+  verified at batch 2 on CPU, CUDA and DirectML. **If you downloaded a model in that window, fetch
+  it again** (`kbx rerank download`); a `kbx rerank check` that passes at batch 2 is the test. No
+  `kb`/`kbx` code was involved, so a rebuild alone does not fix it.
+
+- **Markdown chunks keep their heading line.** `chunk_markdown` moved every heading into `location` and dropped it from the chunk body, so a query naming a section could not match the section and `read` did not show what the file shows; Office chunks had always kept theirs. The heading line now stays in the body of the section it opens. Chunk boundaries are unchanged — a run of headings with nothing between them rides with the body that follows, as the old chunker's `location` already implied — so every `path#N` locator keeps its meaning. `INDEX_SCHEMA_VERSION` 3 → 4: existing indexes rebuild on the next `kb index`.
 - **`kbx dataset dedup` and `merge` deleted dataset fields they did not understand.** Both rewrite
   the whole file through one serializer whose case struct models nine fields, so every other key a
   dataset carried was gone after a command asked only to remove duplicates — reported with
@@ -88,107 +178,6 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Covered by unit tests for both path forms and the root-failure path, plus an opt-in end-to-end
   spec (`GLOSSA_TEST_SHARE_ROOT`) that indexes, searches and reads a share-hosted corpus with state
   on local disk and proves the share is never written to.
-
-### Changed
-
-- **`kbx rerank check` reads the corpus, like every sibling command already did.** It took
-  `--model-dir` and had no way to see a corpus at all, so an operator had to copy the model dir,
-  device, GPU id, memory cap, batch budget and thread count out of `ontology.toml` by hand — and a
-  forgotten `--batch-tokens` probed a session shape production never builds, which the flag's own
-  help text admitted. It now resolves `[rerank]` exactly as `kbx nli check` and `kbx rerank fit`
-  do, with every flag as an override, and a corpus configured for a remote scorer is probed
-  remotely without `--endpoint`. `--timeout-ms` and `--backend` became real options rather than
-  clap defaults, because a hardcoded default is indistinguishable from an explicit value and the
-  corpus setting lost either way.
-- **`kbx nli check` / `kbx nli fit` take the same deployment overrides the `rerank` pair does.**
-  `--model-dir`, `--device`, `--gpu-id`, `--gpu-mem-mb`, `--batch-tokens`, `--intra-threads` on
-  `check` (plus `--entail-index` and the remote `--endpoint` / `--timeout-ms` / `--api-key`), and
-  `--model-dir` / `--device` / `--gpu-id` / `--gpu-mem-mb` on `fit`. Fixing only the `rerank` side
-  would have left the pair mismatched in the other direction: `nli check` still could not probe a
-  model directory no corpus points at, which is exactly what you want right after downloading one.
-  Overrides fold into the resolved config in one place, so no command can read a flag and forget it.
-
-- **Model downloads show progress.** `kbx nli download` / `kbx rerank download` fetch hundreds of
-  megabytes through one `io::copy` and printed nothing until they finished, which on a slow link is
-  indistinguishable from a hang. They now drive the toolkit's canonical progress bar, in bytes, with
-  a rate; `--no-progress` suppresses it, as on `build`/`train`/`reason`/`distil`, and it is already
-  suppressed when stderr is not a terminal. A server's own auto-download is therefore quiet under a
-  service manager and visible in the foreground.
-- **`kbx nli fit` / `kbx rerank fit` work on the Vulkan engine.** Both refused unless one of four
-  ONNX Runtime execution providers was compiled in, so a pure-Rust Vulkan build — a GPU build — got
-  the "no GPU execution provider" refusal meant for CPU-only builds. The refusal now keys on GPU
-  capability rather than on ORT, and still refuses a CPU fit, which is a known answer and a thermal
-  hazard. The burn engine gained `entail_with_budget` and `rerank_with_budget` so the measured path
-  is the serving path there too.
-
-- **Release archives name their engine.** Three rows shipped as `…-ort` while being three different
-  engines — DirectML on Windows, CoreML on macOS, plain CPU on Linux. They are now `…-directml`,
-  `…-coreml` and `…-cpu`. The engine is the one thing an operator has to choose, so the filename
-  says it. Scripts that hardcoded `-ort` need updating.
-
-## [0.5.4] — 2026-10-05
-
-> **Upgrading from 0.5.3: reindex once, and do not compare retrieval numbers across this release.**
-> `INDEX_SCHEMA_VERSION` goes 3 → 5 here, so the first `kb index` after the upgrade rebuilds the
-> index from the corpus. That is the whole migration — nothing else to run, and the graph is
-> untouched. Two separate changes re-baseline retrieval measurements (rank fusion in `kbx eval`, and
-> the text the reranker scores), so a before/after comparison across 0.5.3 → 0.5.4 is not
-> meaningful. If you use the downloadable reranker models, re-fetch them (see Fixed).
-
-### Added
-
-- **Two normalized readings on every `search` hit.** `rel_bm25` — the hit's BM25 score as a fraction
-  of the best in its list (relative, always present) — and `rel_rerank` — `sigmoid(logit)`, the
-  reranker's probability, present when a logit-emitting reranker scored the list (in-process, TEI,
-  `kbi`, vLLM, llama.cpp; vLLM is now asked for raw logits with `use_activation: false`). `cohere`
-  and `jina` keep ordering but carry no `rel_rerank`. The native `score` is unchanged; the fields are
-  additive in the search trace and in the `RankedHit` retrieval returns; the agent's reply and the `kb search` output are unchanged. A reranker returning a non-finite score now fails open instead
-  of reaching the sort.
-
-### Changed
-
-- **Extractor upgrade: `office_oxide` 0.1.8 → 0.1.11, `pdf_oxide` 0.3.77 → 0.3.78.** This changes
-  extracted text, so **`INDEX_SCHEMA_VERSION` 4 → 5: existing indexes rebuild on the next
-  `kb index`** — a file's signature is its mtime and size, so an extractor upgrade alone would never
-  re-read it, and a stale index would keep serving the old text. The visible gain is on legacy
-  Office: a `.doc` now yields tables at all (their structure was silently dropped, while `.docx`
-  emitted tables from the same call), document metadata is read instead of coming back empty, and
-  embedded pictures in `.doc`/`.xls`/`.ppt` include formats that used to be skipped. On the PDF
-  side, rendering gained a 16-megapixel output budget — nothing in a PDF bounds page size times
-  scale, so a huge page is now scaled to fit rather than exhausting memory — and five aborts on
-  valid files became catchable errors instead of killing the process.
-  **`office_oxide` is pinned at `<0.1.12` on purpose:** 0.1.12 added a field to a public IR struct
-  that `pdf_oxide` builds with an exhaustive literal, so the two cannot be in one dependency tree
-  until `pdf_oxide` default-fills it. That also holds `.xlsb` support, which arrived in 0.1.12.
-
-- **`kbx eval` fuses `ranked_sources` by best rank, not by raw score across queries.** BM25 values
-  from different searches are not comparable (and a reranked hit's score is a logit), so a path now
-  takes the best position it reached in any single `search`. **Retrieval@k numbers from before this
-  change are not comparable with numbers after it.**
-- **The reranker now scores a chunk's provenance along with its text.** The cross-encoder used to
-  receive the chunk body alone, so a page-per-chunk PDF arrived as bare prose with no hint of which
-  document it came from. The passage is now `<folder> / <folder> / <file stem>`, then
-  ` > <location>` when the chunker recorded one (a heading breadcrumb for Markdown and Office, a row
-  range for CSV, and so on), a blank line, then the body verbatim. Measured over a 175-question set:
-  +2.3pp whole-chain coverage and +4.6pp any-of at a window of 10, 5 cases gained against 1 lost,
-  with the gain largest on multi-hop questions. **Rerank order changes, so retrieval@k numbers from
-  before this change are not comparable with numbers after it.** Nothing is reindexed and no stored
-  text changes — `read`, snippets and offsets still resolve to the verbatim body. Requires
-  `[rerank].enabled`; deployments with reranking off are unaffected.
-
-### Fixed
-
-- **The published reranker models were batch-1-only and are republished.** Between 2026-09-28 and
-  2026-10-02 all three variants (fp32 / fp16 / int8) on the model hub carried an ONNX export whose
-  two shared reshape vectors hard-coded a batch of one, so scoring any pool of two or more passages
-  failed with a broadcast error — and because reranking fails open, affected deployments silently
-  served plain BM25 while reporting a configured reranker. The exports were rebuilt from clean
-  sources with a narrow patch (only the two shared dynamic dimensions replaced with literals) and
-  verified at batch 2 on CPU, CUDA and DirectML. **If you downloaded a model in that window, fetch
-  it again** (`kbx rerank download`); a `kbx rerank check` that passes at batch 2 is the test. No
-  `kb`/`kbx` code was involved, so a rebuild alone does not fix it.
-
-- **Markdown chunks keep their heading line.** `chunk_markdown` moved every heading into `location` and dropped it from the chunk body, so a query naming a section could not match the section and `read` did not show what the file shows; Office chunks had always kept theirs. The heading line now stays in the body of the section it opens. Chunk boundaries are unchanged — a run of headings with nothing between them rides with the body that follows, as the old chunker's `location` already implied — so every `path#N` locator keeps its meaning. `INDEX_SCHEMA_VERSION` 3 → 4: existing indexes rebuild on the next `kb index`.
 
 ## [0.5.3] — 2026-10-01
 
