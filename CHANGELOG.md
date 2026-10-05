@@ -8,11 +8,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- **The Linux archives no longer require a newer glibc than they need.** They were built on the
+- **Most Linux archives no longer require a newer glibc than they need.** They were built on the
   floating `ubuntu-latest` runner, which has moved to 24.04, so the linker recorded glibc 2.39 as
   the minimum and distributions on an older glibc warned about a binary that otherwise runs fine.
-  The five Linux rows now build on `ubuntu-22.04` (glibc 2.35); newer hosts are unaffected, since a
-  low floor binds nobody. macOS and Windows have no equivalent and are unchanged.
+  `none`, `cuda13`, `rocm` and `vulkan` now build on `ubuntu-22.04`, lowering their floor to glibc
+  2.35; newer hosts are unaffected, since a low floor binds nobody.
+
+  **`linux-gnu-cpu` is the exception and keeps the higher floor.** It is the only Linux row that
+  links the prebuilt ONNX Runtime rather than loading it at runtime, and that prebuilt requires
+  glibc 2.38 and libstdc++ 13 itself — on 22.04 it does not link at all. That floor is set by the
+  upstream binaries, not by our choice of runner, and lowering it would mean giving up a
+  self-contained archive. On an older distribution, prefer `vulkan` (a graphics driver is all it
+  needs) or `none` if BM25 is enough. macOS and Windows have no equivalent and are unchanged.
 
 - **`kb index` now says when a corpus will not take the default `.ignore`.** The seed was written
   with `.ok()?`, so a failed write looked exactly like "an ignore file already existed". The case

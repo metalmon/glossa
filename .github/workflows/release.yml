@@ -76,7 +76,12 @@ jobs:
           # NOTE: no x86_64-apple-darwin engine row — ort-sys ships no `download-binaries` ONNX
           # Runtime for Intel Mac ("no prebuilt binaries available for target x86_64-apple-darwin"),
           # so a self-contained build is impossible there. Intel Mac gets the `none` variant only.
-          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: cpu,      kb_flags: "--features nli",          kbx_flags: "--features nli", build_server: true }
+          # The CPU row is the exception and stays on the floating runner: it is the only Linux row
+          # that LINKS the prebuilt ONNX Runtime (the others load it at runtime or carry no ORT at
+          # all), and that prebuilt needs glibc 2.38+ / libstdc++ 13 itself — on 22.04 it fails to
+          # link with undefined `__isoc23_strtol` and `_M_replace_cold`. Its floor is set upstream,
+          # not here; lowering it means giving up a self-contained archive.
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: cpu,      kb_flags: "--features nli",          kbx_flags: "--features nli", build_server: true }
           # ONNX Runtime, LOAD-DYNAMIC: nothing is linked at build time, so the GPU-capable runtime
           # travels with the archive (cuda13, fetched below) or is supplied by the operator (rocm).
           - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: cuda13, kb_flags: "--features nli-cuda", kbx_flags: "--features nli-cuda", build_server: true }
