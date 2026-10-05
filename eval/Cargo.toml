@@ -28,8 +28,15 @@ path = "src/bin/kbx.rs"
 # gate on THIS, never on a list of engine names. That list used to be spelled out at ~20 `cfg`
 # sites across seven files, which is exactly how the pure-Rust burn engine ended up unable to build
 # `kbi` at all: adding an engine meant editing twenty lists, and one was missed. Extend this in one
-# place instead. Carries no dependency of its own.
-engine = []
+# place instead.
+#
+# It carries `glossa/tls` because the thing it unlocks is the SERVER, and the server's TLS/mTLS
+# surface needs it. That used to hang off each of the four ORT execution-provider features
+# separately — which held while only those features could build `kbi`, and broke the moment the CPU
+# and Vulkan rows could too: they enabled the marker, compiled the server, and had no `glossa::tls`.
+# Same lesson as the cfg list, one level up: a requirement of the server belongs on the one feature
+# that says "a server exists here".
+engine = ["glossa/tls"]
 # Off by default: pulls in glossa's CSP/marking-schema solver (glossa-constraint). Rare/opt-in
 # path, exercised by `eval/tests/constraint_it.rs`.
 constraint = ["glossa/constraint", "dep:glossa-constraint"]
@@ -53,8 +60,8 @@ http-scorer = ["glossa/http-scorer"]
 #
 # `nli-directml`/`nli-coreml` stay on the bundled (self-contained) linking strategy: they pull in
 # `nli` (=> `glossa/nli` => glossa-nli's `nli-ort-bundled`) plus the EP feature.
-nli-directml = ["nli", "glossa/tls", "dep:glossa-nli", "glossa-nli/nli-directml"]
-nli-coreml = ["nli", "glossa/tls", "dep:glossa-nli", "glossa-nli/nli-coreml"]
+nli-directml = ["nli", "dep:glossa-nli", "glossa-nli/nli-directml"]
+nli-coreml = ["nli", "dep:glossa-nli", "glossa-nli/nli-coreml"]
 # `nli-cuda`/`nli-rocm` need the runtime `load-dynamic` linking strategy instead (ort's
 # `download-binaries` archive doesn't ship these providers — validated locally: a
 # `download-binaries` CUDA build silently ran on CPU). They pull in `glossa/nli-dynamic` (glossa's
@@ -63,8 +70,8 @@ nli-coreml = ["nli", "glossa/tls", "dep:glossa-nli", "glossa-nli/nli-coreml"]
 # `download-binaries` pulled in alongside it. Build with e.g.
 # `cargo build -p kb-eval --features nli-cuda` (bring an `onnxruntime-gpu` dll via
 # `ORT_DYLIB_PATH` at runtime).
-nli-cuda = ["glossa/nli-dynamic", "glossa/tls", "dep:glossa-nli", "glossa-nli/nli-cuda", "engine"]
-nli-rocm = ["glossa/nli-dynamic", "glossa/tls", "dep:glossa-nli", "glossa-nli/nli-rocm", "engine"]
+nli-cuda = ["glossa/nli-dynamic", "dep:glossa-nli", "glossa-nli/nli-cuda", "engine"]
+nli-rocm = ["glossa/nli-dynamic", "dep:glossa-nli", "glossa-nli/nli-rocm", "engine"]
 # Pure-Rust burn/wgpu engine (Plan 4) — a DIFFERENT engine, mutually exclusive with the ORT features
 # above. Pulls `glossa/nli-burn` (the burn adapter + resolve_scorer branch, no backend) and supplies
 # the backend on the shared glossa-nli instance: `nli-burn` = Vulkan/SPIR-V GPU (production, run with
