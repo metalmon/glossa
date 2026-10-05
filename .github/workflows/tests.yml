@@ -117,6 +117,7 @@ jobs:
       # are published now, so fetch them and let it actually run: this is the only check that the
       # burn engine SCORES correctly rather than merely compiling.
       - name: fetch burn NLI weights (parity fixtures)
+        shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/burn-nli"
           base=https://huggingface.co/metalmon80/rubert-nli-threeway-burn/resolve/main
