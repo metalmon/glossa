@@ -42,6 +42,14 @@ pub struct InstallOpts {
     /// for a weak reasoning reader — leave off for a general/display client.
     #[arg(long)]
     pub dedup: bool,
+    /// Path to a file holding the bearer token for this service's `/mcp` endpoint.
+    ///
+    /// The token is NOT taken as a value here on purpose: a service's command line is public (`ps`,
+    /// and a systemd unit is world-readable via `systemctl cat`), so a secret baked into `ExecStart`
+    /// leaks to every local user. Only this path is baked in; the file carries the secret, and
+    /// `kb` refuses to start if it is readable by group or other. Mirrors `kb mcp --auth-token-file`.
+    #[arg(long = "auth-token-file")]
+    pub auth_token_file: Option<PathBuf>,
 }
 
 /// `kb service <action>`: install a streamable-http MCP service, or manage one by name.
@@ -116,6 +124,11 @@ pub fn kb_service_spec(
     if opts.dedup {
         args.push("--dedup".to_string());
     }
+    // The PATH goes into ExecStart, never the token itself — see `InstallOpts::auth_token_file`.
+    if let Some(tf) = &opts.auth_token_file {
+        args.push("--auth-token-file".to_string());
+        args.push(tf.to_string_lossy().into_owned());
+    }
     args.push("--windows-service".to_string());
     args.push("--service-name".to_string());
     args.push(name.to_string());
@@ -179,6 +192,7 @@ mod tests {
             allowed_host: vec!["gw.internal".into()],
             vision: true,
             dedup: true,
+            auth_token_file: None,
         }
     }
 
@@ -251,5 +265,37 @@ mod tests {
             None,
         );
         assert!(e.is_err(), "neither corpus nor --root must error");
+    }
+
+    /// The point of `--auth-token-file`: a service's command line is public, so the PATH is what
+    /// gets baked into ExecStart. A test that only checked the flag is present would pass for a
+    /// version that also appended the secret, so assert the secret's absence too.
+    #[test]
+    fn the_spec_carries_the_token_file_path_and_never_a_token() {
+        let mut opts = opts(Some("/srv/corpus"));
+        opts.auth_token_file = Some(PathBuf::from("/etc/glossa/kb.env"));
+
+        let spec = kb_service_spec("kb", PathBuf::from("/usr/local/bin/kb"), &opts, &[], None, None)
+            .expect("spec");
+
+        let i = spec
+            .args
+            .iter()
+            .position(|a| a == "--auth-token-file")
+            .expect("the flag is passed to the served process");
+        assert_eq!(spec.args[i + 1], "/etc/glossa/kb.env");
+        assert!(
+            !spec.args.iter().any(|a| a == "--auth-token"),
+            "the token itself must never reach the command line: {:?}",
+            spec.args
+        );
+    }
+
+    #[test]
+    fn without_the_flag_the_service_is_unauthenticated_as_before() {
+        let spec = kb_service_spec("kb", PathBuf::from("/usr/local/bin/kb"), &opts(Some("/srv/corpus")), &[], None, None)
+            .expect("spec");
+
+        assert!(!spec.args.iter().any(|a| a.starts_with("--auth-token")));
     }
 }

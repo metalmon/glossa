@@ -407,6 +407,15 @@ enum Cmd {
         /// (the loopback default). Ignored for `--transport stdio` (a local subprocess).
         #[arg(long = "auth-token", env = "GLOSSA_MCP_TOKEN", hide_env_values = true)]
         auth_token: Option<String>,
+        /// Path to a file holding the bearer token, as an alternative to `--auth-token`. For a
+        /// service this is the form to use: the path is what lands in the unit's `ExecStart` and
+        /// in `ps`, never the secret. The file must not be readable by group or other.
+        #[arg(
+            long = "auth-token-file",
+            env = "GLOSSA_MCP_TOKEN_FILE",
+            conflicts_with = "auth_token"
+        )]
+        auth_token_file: Option<PathBuf>,
         /// Override the non-loopback+no-auth startup refusal (§3c). Logs a loud warning + audit event.
         /// `Option<bool>` with NO `default_value`: unset means "defer to config" — the effective default
         /// `false` lives in `config::defaults` (Plan E merges CLI > env > config-file > default). Resolve
@@ -2122,6 +2131,7 @@ fn main() -> anyhow::Result<()> {
             bind,
             allowed_hosts,
             auth_token,
+            auth_token_file,
             insecure,
             session_idle_secs,
             #[cfg(feature = "tls")]
@@ -2197,6 +2207,11 @@ fn main() -> anyhow::Result<()> {
                 );
                 // auth_token is env/flag ONLY (never c.server.*) — validate_static already rejected
                 // a token key in the file at load time, so there is nothing to merge here.
+                // `--auth-token-file` resolves here too: clap already refused both forms at once.
+                let auth_token = match auth_token_file {
+                    Some(ref p) => Some(glossa::serve_guard::read_token_file(p)?),
+                    None => auth_token,
+                };
                 let params = ServeParams {
                     roots: rr.roots,
                     state_base: rr.state_base,
