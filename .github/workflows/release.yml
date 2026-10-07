@@ -252,6 +252,56 @@ jobs:
           rm -rf "dist/${stem}"
           ls -la dist/*.tar.gz | sed 's/^/packaged: /'
 
+      - name: Package the NVIDIA runtime the cuda13 build needs (Windows cuda13)
+        # Windows half of the Linux step above: the same five libraries, as DLLs. ONNX Runtime
+        # travels inside the cuda13 archive; NVIDIA's own libraries do not, and a Windows host
+        # with a card but no CUDA toolkit has nowhere to get them.
+        if: matrix.engine == 'cuda13' && runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cuda_ver="13.4.2"
+          cudnn_ver="9.27.0"
+          base="https://developer.download.nvidia.com/compute"
+          work="$(mktemp -d)"
+          curl -fsSL -o "$work/cuda.json"  "$base/cuda/redist/redistrib_${cuda_ver}.json"
+          curl -fsSL -o "$work/cudnn.json" "$base/cudnn/redist/redistrib_${cudnn_ver}.json"
+          fetch() { # fetch <which> <jq-path>
+            rel="$(jq -r "$2.relative_path" "$work/$1.json")"
+            sha="$(jq -r "$2.sha256" "$work/$1.json")"
+            [ "$rel" != null ] || { echo "manifest has no $2" >&2; exit 1; }
+            echo "==> $rel"
+            curl -fsSL -o "$work/$(basename "$rel")" "$base/$1/redist/$rel"
+            echo "${sha}  $work/$(basename "$rel")" | sha256sum -c -
+            # The Windows redistributables are zips, not tarballs.
+            unzip -q -o "$work/$(basename "$rel")" -d "$work"
+          }
+          fetch cuda  '.cuda_cudart."windows-x86_64"'
+          fetch cuda  '.libcublas."windows-x86_64"'
+          fetch cuda  '.libcurand."windows-x86_64"'
+          fetch cudnn '.cudnn."windows-x86_64".cuda13'
+          tag="${GITHUB_REF_NAME#v}"; tag="${tag//\//-}"
+          stem="glossa-${tag}-${{ matrix.target }}-cuda13-nvidia-runtime"
+          mkdir -p "dist/${stem}"
+          find "$work" -path '*/bin/*' \( -name 'cudart64_*.dll' -o -name 'cublas64_*.dll' \
+            -o -name 'cublasLt64_*.dll' -o -name 'curand64_*.dll' -o -name 'cudnn*.dll' \) \
+            -exec cp {} "dist/${stem}/" \;
+          cat > "dist/${stem}/README.md" <<'EOF'
+          # NVIDIA runtime for the glossa `cuda13` build (Windows)
+
+          The `cuda13` archive carries ONNX Runtime but not NVIDIA's own libraries. These are them:
+          `cudart64_*`, `cublas64_*`, `cublasLt64_*`, `curand64_*` (CUDA 13 redistributables) and
+          `cudnn*` (cuDNN 9, the cuda13 build).
+
+          Unpack them next to `kb.exe`, or anywhere on `PATH`. The NVIDIA driver itself is not here:
+          it comes with the display driver installed on the machine.
+
+          To check it took: `kbx nli check <corpus>` reports `ep_active`.
+          EOF
+          powershell -NoProfile -Command "Compress-Archive -Path 'dist/${stem}' -DestinationPath 'dist/${stem}.zip' -Force"
+          rm -rf "dist/${stem}"
+          ls -la dist/*.zip | sed 's/^/packaged: /'
+
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
         run: |
