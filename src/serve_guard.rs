@@ -46,15 +46,25 @@ pub fn interlock_refuses(
 /// content is trimmed (an editor's trailing newline is not part of the token) and must be
 /// non-empty — an empty file means "no auth" by accident, which is exactly the footgun §3c closes.
 pub fn read_token_file(path: &Path) -> anyhow::Result<String> {
-    let token = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("cannot read the auth token file {}: {e}", path.display()))?;
+    // One handle for both the checks and the read: a path checked and then re-opened can be
+    // swapped in between (0644 at read time, 0600 at stat time). The regular-file check has to
+    // come before the read for a second reason — `read_to_string` on a FIFO blocks forever, which
+    // would hang the service at startup instead of failing it.
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| anyhow::anyhow!("cannot open the auth token file {}: {e}", path.display()))?;
+    let meta = file
+        .metadata()
+        .map_err(|e| anyhow::anyhow!("cannot stat the auth token file {}: {e}", path.display()))?;
+    anyhow::ensure!(
+        meta.is_file(),
+        "the auth token file {} is not a regular file",
+        path.display()
+    );
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(path)
-            .map_err(|e| anyhow::anyhow!("cannot stat the auth token file {}: {e}", path.display()))?
-            .permissions()
-            .mode();
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let mode = meta.permissions().mode();
         anyhow::ensure!(
             mode & 0o077 == 0,
             "the auth token file {} is readable by group or other (mode {:o}) — restrict it with \
@@ -63,8 +73,26 @@ pub fn read_token_file(path: &Path) -> anyhow::Result<String> {
             mode & 0o7777,
             path.display()
         );
+        // SAFETY: `geteuid` is a parameter-free process query.
+        let euid = unsafe { libc::geteuid() };
+        anyhow::ensure!(
+            meta.uid() == euid || meta.uid() == 0,
+            "the auth token file {} is owned by uid {}, not this user or root — its owner could \
+             read or replace the token",
+            path.display(),
+            meta.uid()
+        );
     }
-    let token = token.trim().to_string();
+    let mut token = String::new();
+    file.read_to_string(&mut token)
+        .map_err(|e| anyhow::anyhow!("cannot read the auth token file {}: {e}", path.display()))?;
+    // Only the trailing newline an editor leaves, and a BOM Notepad writes. Nothing else: the env
+    // var is not trimmed either, and a token that differs by a space between the two paths would
+    // be a silent 401 nobody could explain.
+    let token = token
+        .trim_start_matches('\u{feff}')
+        .trim_end_matches(['\n', '\r'])
+        .to_string();
     anyhow::ensure!(
         !token.is_empty(),
         "the auth token file {} is empty — write the token into it, or drop \
@@ -102,14 +130,45 @@ mod tests {
         assert!(!is_loopback_bind("not-an-addr"));
     }
 
+    /// Only the newline an editor leaves is stripped. A space is NOT: the env-var path does not
+    /// trim either, and a token that differed by a space between the two paths would be a 401
+    /// with no visible cause.
     #[test]
-    fn token_file_is_read_and_trimmed() {
+    fn only_the_trailing_newline_is_stripped() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tok");
-        std::fs::write(&path, "  s3cret\n").unwrap();
+        std::fs::write(&path, "s3cret\r\n").unwrap();
         restrict(&path);
 
         assert_eq!(read_token_file(&path).unwrap(), "s3cret");
+
+        std::fs::write(&path, " s3cret ").unwrap();
+        restrict(&path);
+        assert_eq!(read_token_file(&path).unwrap(), " s3cret ");
+    }
+
+    /// Notepad writes a \u{feff}; it is not whitespace, so without this it would become part of the
+    /// token and every request would 401 with nothing to see.
+    #[test]
+    fn a_byte_order_mark_is_not_part_of_the_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tok");
+        std::fs::write(&path, "\u{feff}s3cret\n").unwrap();
+        restrict(&path);
+
+        assert_eq!(read_token_file(&path).unwrap(), "s3cret");
+    }
+
+    /// A directory (or a FIFO) must be refused by the file-type check, not read.
+    #[test]
+    fn a_directory_is_refused_rather_than_read() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = read_token_file(dir.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("regular file") || err.contains("cannot"),
+            "{err}"
+        );
     }
 
     #[test]

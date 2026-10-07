@@ -186,6 +186,72 @@ jobs:
           vendor, and bundles nothing.
           EOF
 
+      - name: Package the NVIDIA runtime the cuda13 build needs (Linux cuda13)
+        # The glossa archive carries ONNX Runtime but not NVIDIA's own libraries (see the fetch
+        # step above), so the cuda13 build only runs where CUDA 13 + cuDNN 9 are already installed
+        # — a provisioning job nobody on an air-gapped site can do. So publish exactly the five
+        # libraries `objdump -p libonnxruntime_providers_cuda.so` asks for as their own asset:
+        #   libcudart, libcublas, libcublasLt, libcurand   (CUDA 13 redistributables)
+        #   libcudnn                                       (cuDNN 9, the cuda13 build)
+        # `libcuda.so.1` is deliberately NOT here: it ships with the driver and is tied to it.
+        # Separate archive on purpose — nothing is mixed into the upstream ONNX Runtime artifact,
+        # and whoever has a provisioned machine just does not download it. Unpruned for now:
+        # `nvprune` would cut libcublas by an order of magnitude, but only once the target GPU
+        # architecture is known.
+        if: matrix.engine == 'cuda13' && runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          cuda_ver="13.4.2"
+          cudnn_ver="9.27.0"
+          base="https://developer.download.nvidia.com/compute"
+          work="$(mktemp -d)"
+          # Resolve names and digests from the manifests instead of pinning URLs by hand: NVIDIA's
+          # component versions move independently of the CUDA version they ship with.
+          curl -fsSL -o "$work/cuda.json"  "$base/cuda/redist/redistrib_${cuda_ver}.json"
+          curl -fsSL -o "$work/cudnn.json" "$base/cudnn/redist/redistrib_${cudnn_ver}.json"
+          fetch() { # fetch <which> <jq-path>
+            rel="$(jq -r "$2.relative_path" "$work/$1.json")"
+            sha="$(jq -r "$2.sha256" "$work/$1.json")"
+            [ "$rel" != null ] || { echo "manifest has no $2" >&2; exit 1; }
+            echo "==> $rel"
+            curl -fsSL -o "$work/$(basename "$rel")" "$base/$1/redist/$rel"
+            echo "${sha}  $work/$(basename "$rel")" | sha256sum -c -
+            tar -xf "$work/$(basename "$rel")" -C "$work"
+          }
+          fetch cuda  '.cuda_cudart."linux-x86_64"'
+          fetch cuda  '.libcublas."linux-x86_64"'
+          fetch cuda  '.libcurand."linux-x86_64"'
+          fetch cudnn '.cudnn."linux-x86_64".cuda13'
+          tag="${GITHUB_REF_NAME#v}"; tag="${tag//\//-}"
+          stem="glossa-${tag}-${{ matrix.target }}-cuda13-nvidia-runtime"
+          mkdir -p "dist/${stem}"
+          # Only the shared objects the provider links against: the static libs, headers and docs
+          # in those archives are most of their bulk and none of the need. -P keeps the soname
+          # symlinks (libcublas.so.13 -> libcublas.so.13.x.y) the loader resolves through.
+          find "$work" -path '*/lib/*' \( -name 'libcudart.so*' -o -name 'libcublas.so*' \
+            -o -name 'libcublasLt.so*' -o -name 'libcurand.so*' -o -name 'libcudnn*.so*' \) \
+            -exec cp -P {} "dist/${stem}/" \;
+          cat > "dist/${stem}/README.md" <<'EOF'
+          # NVIDIA runtime for the glossa `cuda13` build
+
+          The `cuda13` archive carries ONNX Runtime but not NVIDIA's own libraries. These are them:
+          `libcudart`, `libcublas`, `libcublasLt`, `libcurand` (CUDA 13 redistributables) and
+          `libcudnn` (cuDNN 9, the cuda13 build).
+
+          Unpack beside `kb`, or anywhere on the loader path:
+
+              tar -xzf glossa-*-cuda13-nvidia-runtime.tar.gz
+              export LD_LIBRARY_PATH="$PWD/glossa-<version>-x86_64-unknown-linux-gnu-cuda13-nvidia-runtime:$LD_LIBRARY_PATH"
+
+          `libcuda.so.1` is NOT here on purpose: it comes with the NVIDIA driver and is tied to the
+          driver version on the machine.
+
+          To check it took: `kbx nli check <corpus>` reports `ep_active`.
+          EOF
+          tar -czf "dist/${stem}.tar.gz" -C dist "${stem}"
+          rm -rf "dist/${stem}"
+          ls -la dist/*.tar.gz | sed 's/^/packaged: /'
+
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
         run: |

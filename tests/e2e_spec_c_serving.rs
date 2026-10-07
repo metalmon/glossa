@@ -117,6 +117,103 @@ fn body_limit_rejects_oversized_post() {
     );
 }
 
+/// The point of `--auth-token-file`: the token the file carries must reach the auth middleware
+/// exactly as `--auth-token` would, or a service installed the safe way would serve wide open.
+#[test]
+fn a_token_file_gates_the_mcp_endpoint() {
+    let c = corpus();
+    let state = state_dir();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let token_path = dir.path().join("token");
+    std::fs::write(&token_path, "file-e2e
+").expect("write token");
+    restrict_to_owner(&token_path);
+
+    let server = ServerBuilder::new()
+        .root(c.root_arg("docs"))
+        .state_dir(state.path())
+        .arg("--auth-token-file")
+        .arg(token_path.to_string_lossy().into_owned())
+        .start();
+
+    let init_body = br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}"#;
+
+    let unauth = http_post(
+        server.base(),
+        "/mcp",
+        &[("Accept", MCP_ACCEPT), ("Content-Type", "application/json")],
+        init_body,
+    );
+    assert_eq!(unauth.status, 401, "expected 401, body: {:?}", unauth.body);
+
+    // The trailing newline in the file is not part of the token.
+    let ok = http_post(
+        server.base(),
+        "/mcp",
+        &[
+            ("Accept", MCP_ACCEPT),
+            ("Content-Type", "application/json"),
+            ("Authorization", "Bearer file-e2e"),
+        ],
+        init_body,
+    );
+    assert!(
+        ok.status == 200 || ok.status == 202,
+        "authorized initialize status: {} body: {:?}",
+        ok.status,
+        ok.body
+    );
+}
+
+/// The same token must also satisfy the startup interlock, or a non-loopback service installed
+/// with a token file would refuse to start. Proven by what the failure is NOT: the bind is already
+/// taken, so `kb` must get as far as binding — past the interlock — and fail there instead.
+#[test]
+fn the_startup_interlock_accepts_a_token_from_a_file() {
+    let c = corpus();
+    let state = state_dir();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let token_path = dir.path().join("token");
+    std::fs::write(&token_path, "file-e2e").expect("write token");
+    restrict_to_owner(&token_path);
+
+    let taken = std::net::TcpListener::bind("0.0.0.0:0").expect("hold a port");
+    let port = taken.local_addr().expect("addr").port();
+
+    let out = assert_cmd::Command::cargo_bin("kb")
+        .unwrap()
+        .arg("mcp")
+        .arg("--transport")
+        .arg("streamable-http")
+        .arg("--bind")
+        .arg(format!("0.0.0.0:{port}"))
+        .arg("--root")
+        .arg(c.root_arg("docs"))
+        .arg("--state-dir")
+        .arg(state.path())
+        .arg("--auth-token-file")
+        .arg(&token_path)
+        .output()
+        .expect("run kb");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("refusing to serve"),
+        "the interlock did not see the token from the file: {stderr}"
+    );
+}
+
+/// 0600 on Unix; a no-op elsewhere (the ownership/mode check is Unix-only).
+fn restrict_to_owner(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("chmod 600");
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 #[test]
 fn startup_interlock_refuses_nonloopback_without_auth() {
     // assert_cmd (no long-lived server): a non-loopback bind with no token/tls/insecure must refuse

@@ -3,6 +3,7 @@
 //! `kb`'s transport is hardcoded to `streamable-http` (there is no `--transport` flag), so a stdio
 //! service — which has no client/stdin under the SCM/systemd — is unrepresentable by construction.
 
+use crate::serve_guard::read_token_file as service_guard_read;
 use crate::service::{self, ServiceSpec};
 use clap::{Args, Subcommand};
 use std::path::{Path, PathBuf};
@@ -125,9 +126,17 @@ pub fn kb_service_spec(
         args.push("--dedup".to_string());
     }
     // The PATH goes into ExecStart, never the token itself — see `InstallOpts::auth_token_file`.
+    // Absolute, because the rendered unit sets no WorkingDirectory: a relative path would resolve
+    // against whatever the SCM/systemd happens to start the process in.
     if let Some(tf) = &opts.auth_token_file {
+        let abs = std::fs::canonicalize(tf).map_err(|e| {
+            anyhow::anyhow!("cannot use the auth token file {}: {e}", tf.display())
+        })?;
+        // Fail here, where the operator is looking, rather than at the service's first start where
+        // it shows up as a dead unit and a line in the journal.
+        service_guard_read(&abs)?;
         args.push("--auth-token-file".to_string());
-        args.push(tf.to_string_lossy().into_owned());
+        args.push(abs.to_string_lossy().into_owned());
     }
     args.push("--windows-service".to_string());
     args.push("--service-name".to_string());
@@ -272,8 +281,14 @@ mod tests {
     /// version that also appended the secret, so assert the secret's absence too.
     #[test]
     fn the_spec_carries_the_token_file_path_and_never_a_token() {
+        // A real file: install now validates it (and canonicalizes the path) instead of letting
+        // the service fail at its first start.
+        let dir = tempfile::tempdir().unwrap();
+        let token_path = dir.path().join("kb.env");
+        std::fs::write(&token_path, "s3cret").unwrap();
+        restrict(&token_path);
         let mut opts = opts(Some("/srv/corpus"));
-        opts.auth_token_file = Some(PathBuf::from("/etc/glossa/kb.env"));
+        opts.auth_token_file = Some(token_path.clone());
 
         let spec = kb_service_spec("kb", PathBuf::from("/usr/local/bin/kb"), &opts, &[], None, None)
             .expect("spec");
@@ -283,9 +298,17 @@ mod tests {
             .iter()
             .position(|a| a == "--auth-token-file")
             .expect("the flag is passed to the served process");
-        assert_eq!(spec.args[i + 1], "/etc/glossa/kb.env");
         assert!(
-            !spec.args.iter().any(|a| a == "--auth-token"),
+            std::path::Path::new(&spec.args[i + 1]).is_absolute(),
+            "the baked path must be absolute (the unit sets no WorkingDirectory): {}",
+            spec.args[i + 1]
+        );
+        assert!(spec.args[i + 1].ends_with("kb.env"), "{}", spec.args[i + 1]);
+        assert!(
+            !spec
+                .args
+                .iter()
+                .any(|a| a.starts_with("--auth-token") && a != "--auth-token-file"),
             "the token itself must never reach the command line: {:?}",
             spec.args
         );
@@ -297,5 +320,16 @@ mod tests {
             .expect("spec");
 
         assert!(!spec.args.iter().any(|a| a.starts_with("--auth-token")));
+    }
+
+    /// 0600 on Unix; a no-op elsewhere (the mode/ownership check is Unix-only).
+    fn restrict(path: &std::path::Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        #[cfg(not(unix))]
+        let _ = path;
     }
 }

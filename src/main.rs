@@ -409,12 +409,15 @@ enum Cmd {
         auth_token: Option<String>,
         /// Path to a file holding the bearer token, as an alternative to `--auth-token`. For a
         /// service this is the form to use: the path is what lands in the unit's `ExecStart` and
-        /// in `ps`, never the secret. The file must not be readable by group or other.
-        #[arg(
-            long = "auth-token-file",
-            env = "GLOSSA_MCP_TOKEN_FILE",
-            conflicts_with = "auth_token"
-        )]
+        /// in `ps`, never the secret. The file must not be readable by group or other, and must be
+        /// a regular file owned by this user or root. Wins over `--auth-token`/`GLOSSA_MCP_TOKEN`
+        /// when both are set. Read and validated even for `--transport stdio`, where the token is
+        /// then unused.
+        ///
+        /// NOT `conflicts_with = "auth_token"` on purpose: clap counts an env-provided value as
+        /// explicitly present, so an operator migrating off an exported `GLOSSA_MCP_TOKEN` — the
+        /// very path this flag exists for — would hit a hard error for a flag they never passed.
+        #[arg(long = "auth-token-file", env = "GLOSSA_MCP_TOKEN_FILE")]
         auth_token_file: Option<PathBuf>,
         /// Override the non-loopback+no-auth startup refusal (§3c). Logs a loud warning + audit event.
         /// `Option<bool>` with NO `default_value`: unset means "defer to config" — the effective default
@@ -2207,9 +2210,22 @@ fn main() -> anyhow::Result<()> {
                 );
                 // auth_token is env/flag ONLY (never c.server.*) — validate_static already rejected
                 // a token key in the file at load time, so there is nothing to merge here.
-                // `--auth-token-file` resolves here too: clap already refused both forms at once.
+                // `--auth-token-file` resolves here, before `ServeParams` — so the startup
+                // interlock and the auth middleware both see the token the file carries. The file
+                // wins over `--auth-token`/`GLOSSA_MCP_TOKEN`: the explicit path is the newer, more
+                // deliberate statement, and silently preferring the env var would make a migration
+                // look like it worked while still serving the old secret.
                 let auth_token = match auth_token_file {
-                    Some(ref p) => Some(glossa::serve_guard::read_token_file(p)?),
+                    Some(ref p) => {
+                        if auth_token.is_some() {
+                            ::tracing::warn!(
+                                path = %p.display(),
+                                "both a token value (--auth-token/GLOSSA_MCP_TOKEN) and \
+                                 --auth-token-file are set; using the file"
+                            );
+                        }
+                        Some(glossa::serve_guard::read_token_file(p)?)
+                    }
                     None => auth_token,
                 };
                 let params = ServeParams {
