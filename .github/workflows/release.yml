@@ -77,7 +77,16 @@ jobs:
           # NOTE: no x86_64-apple-darwin engine row — ort-sys ships no `download-binaries` ONNX
           # Runtime for Intel Mac ("no prebuilt binaries available for target x86_64-apple-darwin"),
           # so a self-contained build is impossible there. Intel Mac gets the `none` variant only.
-          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: cpu,      kb_flags: "--features nli",          kbx_flags: "--features nli", build_server: true }
+          # NOTE: no Linux `cpu` row. It is the one engine that LINKS ONNX Runtime at build time
+          # (`nli` -> ort's `download-binaries`), and the archive ort downloads is built against
+          # glibc 2.38: on 22.04 it fails to link (`undefined symbol: __isoc23_strtoll`), and built
+          # on 24.04 it demands 2.38 at runtime, which the deployment targets do not have. The
+          # shared ONNX Runtime from Microsoft's own release needs only 2.27, which is why every
+          # load-dynamic row below is fine. To bring this row back, build it load-dynamic
+          # (`glossa/nli-dynamic`, a provider-less `nli-dynamic` row in eval/) and bundle
+          # Microsoft's CPU `libonnxruntime.so` beside the binary the way cuda13 does. Until then
+          # `cuda13` covers the CPU case: with no card its provider fails to initialise and ONNX
+          # Runtime falls back to the CPU execution provider.
           # ONNX Runtime, LOAD-DYNAMIC: nothing is linked at build time, so the GPU-capable runtime
           # travels with the archive (cuda13, fetched below) or is supplied by the operator (rocm).
           - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: cuda13, kb_flags: "--features nli-cuda", kbx_flags: "--features nli-cuda", build_server: true }
