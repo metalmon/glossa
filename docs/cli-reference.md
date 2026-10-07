@@ -191,6 +191,7 @@ kb mcp dump-tz-tools [-d/--config-dir <DIR>]
 | `--bind <ADDR>` | `GLOSSA_MCP_BIND` | Bind address for `streamable-http`. Default `127.0.0.1:8080`. |
 | `--allowed-host <HOST>` (repeatable) | | Extra allowed `Host` header value(s) for `streamable-http` (DNS-rebind guard). Default permits loopback only. |
 | `--auth-token <TOKEN>` | `GLOSSA_MCP_TOKEN` | Bearer token guarding `/mcp`. Unset → unauthenticated (loopback-only default). Ignored for `stdio`. |
+| `--auth-token-file <PATH>` | `GLOSSA_MCP_TOKEN_FILE` | The same token, read from a file, so a service's command line carries the path and not the secret. Must be a regular file, owned by this user or root, mode 0600. Wins over `--auth-token` when both are set. |
 | `--insecure <true\|false>` | `GLOSSA_MCP_INSECURE` | Override the non-loopback+no-auth startup refusal. Takes a value — bare `--insecure` is a parse error. Logs a loud warning + audit event. |
 | `--tls-cert <PATH>` *(`tls` feature)* | `GLOSSA_TLS_CERT` | PEM certificate chain for native TLS. |
 | `--tls-key <PATH>` *(`tls` feature)* | `GLOSSA_TLS_KEY` | PEM private key matching `--tls-cert`. |

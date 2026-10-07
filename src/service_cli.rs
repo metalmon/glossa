@@ -129,9 +129,8 @@ pub fn kb_service_spec(
     // Absolute, because the rendered unit sets no WorkingDirectory: a relative path would resolve
     // against whatever the SCM/systemd happens to start the process in.
     if let Some(tf) = &opts.auth_token_file {
-        let abs = std::fs::canonicalize(tf).map_err(|e| {
-            anyhow::anyhow!("cannot use the auth token file {}: {e}", tf.display())
-        })?;
+        let abs = std::fs::canonicalize(tf)
+            .map_err(|e| anyhow::anyhow!("cannot use the auth token file {}: {e}", tf.display()))?;
         // Fail here, where the operator is looking, rather than at the service's first start where
         // it shows up as a dead unit and a line in the journal.
         service_guard_read(&abs)?;
@@ -290,8 +289,15 @@ mod tests {
         let mut opts = opts(Some("/srv/corpus"));
         opts.auth_token_file = Some(token_path.clone());
 
-        let spec = kb_service_spec("kb", PathBuf::from("/usr/local/bin/kb"), &opts, &[], None, None)
-            .expect("spec");
+        let spec = kb_service_spec(
+            "kb",
+            PathBuf::from("/usr/local/bin/kb"),
+            &opts,
+            &[],
+            None,
+            None,
+        )
+        .expect("spec");
 
         let i = spec
             .args
@@ -316,8 +322,15 @@ mod tests {
 
     #[test]
     fn without_the_flag_the_service_is_unauthenticated_as_before() {
-        let spec = kb_service_spec("kb", PathBuf::from("/usr/local/bin/kb"), &opts(Some("/srv/corpus")), &[], None, None)
-            .expect("spec");
+        let spec = kb_service_spec(
+            "kb",
+            PathBuf::from("/usr/local/bin/kb"),
+            &opts(Some("/srv/corpus")),
+            &[],
+            None,
+            None,
+        )
+        .expect("spec");
 
         assert!(!spec.args.iter().any(|a| a.starts_with("--auth-token")));
     }

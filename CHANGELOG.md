@@ -4,6 +4,32 @@ All notable changes to glossa are documented here. Release tags ship **`kb`**, *
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.5] — 2026-10-07
+
+### Added
+
+- **`--auth-token-file <path>` on `kb mcp` and `kb mcp service install`.** `mcp serve` could take a
+  bearer token, `service install` could not, so installing an authenticated service meant wiring the
+  token in by hand — and both obvious ways leak it. A command line is public (`ps` shows it to any
+  local user, and a systemd unit is world-readable through `systemctl cat`), and the config file is
+  closed off on purpose. Now the path is what gets baked into the service and the file carries the
+  secret: `kb` refuses a file that is not a regular file, is readable by group or other, or is owned
+  by anyone but this user or root, and refuses an empty one rather than silently serving open.
+  `--auth-token` and `GLOSSA_MCP_TOKEN` are unchanged; the file wins when both are set.
+- **The NVIDIA runtime the `cuda13` build needs, as its own release asset.** The `cuda13` archive
+  carries ONNX Runtime but, by licensing, not NVIDIA's libraries — so it only ran where CUDA 13 and
+  cuDNN 9 were already installed, which is not something an air-gapped site can arrange. The new
+  `glossa-<version>-x86_64-unknown-linux-gnu-cuda13-nvidia-runtime.tar.gz` holds exactly the five
+  the provider links against (`libcudart`, `libcublas`, `libcublasLt`, `libcurand`, `libcudnn`),
+  fetched from NVIDIA's redistributables with their manifest digests verified. `libcuda.so.1` is
+  not among them: it ships with the driver and is tied to it.
+
+### Fixed
+
+- **The published Linux binaries carry a glibc floor of 2.35 again.** 0.5.4 was tagged three hours
+  before the runner fix landed, so its Linux assets were built on Ubuntu 24.04 and demand
+  `GLIBC_2.39` — which Astra Linux 1.8 and Debian 12 do not have. This release is cut after it.
+
 ## [0.5.4] — 2026-10-05
 
 > **Upgrading from 0.5.3: reindex once, and do not compare retrieval numbers across this release.**

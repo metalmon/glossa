@@ -65,6 +65,7 @@ third, lowest-priority source: a [deployment config file](#deployment-config-fil
 | `--profile reader\|editor\|full` | — | `editor` |
 | `--allowed-host <h>` (repeatable) | — | loopback only |
 | `--auth-token <TOKEN>` (bearer on `/mcp`; 401 on miss) | `GLOSSA_MCP_TOKEN` | none (unauthenticated) |
+| `--auth-token-file <path>` (the same token from a file; the path, not the secret, goes into the service's command line) | `GLOSSA_MCP_TOKEN_FILE` | none |
 | `--insecure <true\|false>` (override the safety interlock; **takes a value**, not a bare flag — see below) | `GLOSSA_MCP_INSECURE` | `false` |
 | `--tls-cert <path>` (`tls` feature build) | `GLOSSA_TLS_CERT` | none (plaintext) |
 | `--tls-key <path>` (`tls` feature build) | `GLOSSA_TLS_KEY` | none |

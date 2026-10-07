@@ -125,8 +125,12 @@ fn a_token_file_gates_the_mcp_endpoint() {
     let state = state_dir();
     let dir = tempfile::tempdir().expect("tempdir");
     let token_path = dir.path().join("token");
-    std::fs::write(&token_path, "file-e2e
-").expect("write token");
+    std::fs::write(
+        &token_path,
+        "file-e2e
+",
+    )
+    .expect("write token");
     restrict_to_owner(&token_path);
 
     let server = ServerBuilder::new()

@@ -85,6 +85,9 @@ Restart=on-failure
 RestartSec=5
 
 # ONLY the bearer token belongs in this file -- never in ExecStart or a checked-in config.
+# A service installed with `kb mcp service install --auth-token-file <path>` needs no
+# EnvironmentFile at all: kb reads the token from that file itself, and only the path is
+# baked into ExecStart. This hand-written form stays the reference for a unit you own.
 # Contents (mode 0600, owned by the service user):
 #   GLOSSA_MCP_TOKEN=<generate with: openssl rand -hex 32>
 EnvironmentFile=/etc/glossa/roleA.env
