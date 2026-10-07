@@ -53,6 +53,12 @@ jobs:
       #                       no ROCm build of ONNX Runtime, so the operator supplies one.
       #   vulkan            — not ONNX Runtime at all: the pure-Rust burn engine on Vulkan/SPIR-V.
       #                       Needs only a driver, works on any vendor, bundles nothing.
+      #
+      # Every Linux row builds on ubuntu-22.04, NOT ubuntu-latest. The runner's glibc is the floor
+      # the binary demands: 24.04 emits GLIBC_2.39 references, and the deployment targets do not
+      # have it (Astra Linux 1.8 and Debian 12 carry 2.36 or less) — `kb` there dies with
+      # "weak version `GLIBC_2.39' not found" before it prints its own version. 22.04 means 2.35,
+      # below both. Do not move these rows to ubuntu-latest.
       matrix:
         include:
           # `engine` used to read `ort` on three rows that are three DIFFERENT engines (DirectML,
@@ -60,7 +66,7 @@ jobs:
           # engine instead.
           #
           # No engine at all: BM25 retrieval only. `kbi` cannot exist here — it has nothing to serve.
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
+          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
           - { os: macos-latest,   target: aarch64-apple-darwin,     archive: tar.gz, engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
           - { os: macos-latest,   target: x86_64-apple-darwin,      archive: tar.gz, engine: none, kb_flags: "--no-default-features", kbx_flags: "" }
@@ -71,23 +77,23 @@ jobs:
           # NOTE: no x86_64-apple-darwin engine row — ort-sys ships no `download-binaries` ONNX
           # Runtime for Intel Mac ("no prebuilt binaries available for target x86_64-apple-darwin"),
           # so a self-contained build is impossible there. Intel Mac gets the `none` variant only.
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: cpu,      kb_flags: "--features nli",          kbx_flags: "--features nli", build_server: true }
+          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: cpu,      kb_flags: "--features nli",          kbx_flags: "--features nli", build_server: true }
           # ONNX Runtime, LOAD-DYNAMIC: nothing is linked at build time, so the GPU-capable runtime
           # travels with the archive (cuda13, fetched below) or is supplied by the operator (rocm).
           - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: cuda13, kb_flags: "--features nli-cuda", kbx_flags: "--features nli-cuda", build_server: true }
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: cuda13, kb_flags: "--features nli-cuda", kbx_flags: "--features nli-cuda", build_server: true }
+          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: cuda13, kb_flags: "--features nli-cuda", kbx_flags: "--features nli-cuda", build_server: true }
           # ROCm ships no runtime of its own: Microsoft publishes NO ROCm build of ONNX Runtime for
           # any platform (the 1.28.2 release carries linux/win CUDA 12 and 13 and nothing else), so
           # this row is the binary only and the operator points `ORT_DYLIB_PATH` at a ROCm-enabled
           # ONNX Runtime they built. Linux only — AMD on Windows is DirectML's job, above.
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: rocm,   kb_flags: "--features nli-rocm", kbx_flags: "--features nli-rocm", build_server: true }
+          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: rocm,   kb_flags: "--features nli-rocm", kbx_flags: "--features nli-rocm", build_server: true }
           # The pure-Rust engine: burn with the Vulkan/SPIR-V backend. NOT ONNX Runtime at all, so
           # there is nothing to install or bundle — any vendor's card with a Vulkan driver. This is
           # the practical answer for AMD, where no ROCm runtime is published. `kb` names the backend
           # through glossa's own `nli-burn-vulkan` (its `nli-burn` is code-only); `kbx` gets it from
           # kb-eval's `nli-burn`. No `build_server` yet: `kbi` still holds concrete ORT types, so it
           # joins these rows with the change that makes the server engine-agnostic.
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: vulkan, kb_flags: "--features nli-burn-vulkan", kbx_flags: "--features nli-burn", build_server: true }
+          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu, archive: tar.gz, engine: vulkan, kb_flags: "--features nli-burn-vulkan", kbx_flags: "--features nli-burn", build_server: true }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,   archive: zip,    engine: vulkan, kb_flags: "--features nli-burn-vulkan", kbx_flags: "--features nli-burn", build_server: true }
     steps:
       - uses: actions/checkout@v4
