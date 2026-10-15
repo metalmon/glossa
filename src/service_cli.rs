@@ -51,9 +51,28 @@ pub struct InstallOpts {
     /// `kb` refuses to start if it is readable by group or other. Mirrors `kb mcp --auth-token-file`.
     #[arg(long = "auth-token-file")]
     pub auth_token_file: Option<PathBuf>,
+    /// PEM certificate chain: serve the streamable-http endpoint over TLS directly, instead of
+    /// terminating it at a reverse proxy. Set together with `--tls-key`.
+    ///
+    /// Only the PATHS are baked into the service command line — the same reasoning as
+    /// `--auth-token-file`, and the key never leaves its file.
+    #[cfg(feature = "tls")]
+    #[arg(long = "tls-cert", requires = "tls_key")]
+    pub tls_cert: Option<PathBuf>,
+    /// PEM private key matching `--tls-cert`.
+    #[cfg(feature = "tls")]
+    #[arg(long = "tls-key", requires = "tls_cert")]
+    pub tls_key: Option<PathBuf>,
+    /// PEM client-CA bundle: require and verify client certificates (mTLS). Needs `--tls-cert`.
+    #[cfg(feature = "tls")]
+    #[arg(long = "tls-client-ca", requires = "tls_cert")]
+    pub tls_client_ca: Option<PathBuf>,
 }
 
 /// `kb service <action>`: install a streamable-http MCP service, or manage one by name.
+// Parsed once per process and consumed immediately; `Install` is wide because it carries the whole
+// service description, and boxing it would mean hand-writing what `Subcommand` derives.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 pub enum ServiceAction {
     /// Install (register) a kb MCP service (always streamable-http).
@@ -137,6 +156,19 @@ pub fn kb_service_spec(
         args.push("--auth-token-file".to_string());
         args.push(abs.to_string_lossy().into_owned());
     }
+    // TLS paths, like the token file, are absolute: the rendered unit sets no WorkingDirectory.
+    #[cfg(feature = "tls")]
+    for (flag, path) in [
+        ("--tls-cert", opts.tls_cert.as_ref()),
+        ("--tls-key", opts.tls_key.as_ref()),
+        ("--tls-client-ca", opts.tls_client_ca.as_ref()),
+    ] {
+        let Some(p) = path else { continue };
+        let abs = std::fs::canonicalize(p)
+            .map_err(|e| anyhow::anyhow!("cannot use {flag} {}: {e}", p.display()))?;
+        args.push(flag.to_string());
+        args.push(abs.to_string_lossy().into_owned());
+    }
     args.push("--windows-service".to_string());
     args.push("--service-name".to_string());
     args.push(name.to_string());
@@ -201,7 +233,48 @@ mod tests {
             vision: true,
             dedup: true,
             auth_token_file: None,
+            #[cfg(feature = "tls")]
+            tls_cert: None,
+            #[cfg(feature = "tls")]
+            tls_key: None,
+            #[cfg(feature = "tls")]
+            tls_client_ca: None,
         }
+    }
+
+    /// A TLS service must carry the cert and key into `ExecStart`: the SCM/systemd process reads
+    /// its own command line, so a path that stays in the installer serves plaintext in silence.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn kb_service_spec_bakes_absolute_tls_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert = dir.path().join("leaf.crt.pem");
+        let key = dir.path().join("leaf.key.pem");
+        std::fs::write(
+            &cert,
+            "-----BEGIN CERTIFICATE-----
+",
+        )
+        .unwrap();
+        std::fs::write(
+            &key,
+            "-----BEGIN PRIVATE KEY-----
+",
+        )
+        .unwrap();
+        let mut o = opts(Some("C:/kb/base"));
+        o.tls_cert = Some(cert.clone());
+        o.tls_key = Some(key.clone());
+        let s = kb_service_spec("glossa-x", "C:/kb/kb.exe".into(), &o, &[], None, None).unwrap();
+        let i = s
+            .args
+            .iter()
+            .position(|a| a == "--tls-cert")
+            .expect("--tls-cert baked in");
+        assert!(std::path::Path::new(&s.args[i + 1]).is_absolute());
+        assert!(s.args.iter().any(|a| a == "--tls-key"));
+        // Не заданный клиентский корень не превращается в mTLS по недосмотру.
+        assert!(!s.args.iter().any(|a| a == "--tls-client-ca"));
     }
 
     #[test]

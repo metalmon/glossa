@@ -4,6 +4,21 @@ All notable changes to glossa are documented here. Release tags ship **`kb`**, *
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.6] — 2026-10-15
+
+### Added
+
+- **TLS on every released `kb`.** The feature existed but no release ever built it: the shipped
+  binaries had no `--tls-cert` at all, so a `kb` serving a corpus straight on a host could only
+  speak plaintext and the only https answer was a reverse proxy it does not have. Every row of the
+  release matrix now builds `kb` with `tls`; a from-source `cargo build` is unchanged and still
+  plaintext by default.
+- **`--tls-cert` / `--tls-key` / `--tls-client-ca` on `kb mcp service install`.** `mcp serve` took
+  them, `service install` did not, so an installer had to reach into the service's registry
+  `Environment` value (or a systemd drop-in) to hand the certificate paths over — the same detour
+  the token needed before 0.5.5. Only the paths are baked into the service command line, exactly
+  like `--auth-token-file`; the key stays in its file.
+
 ## [0.5.5] — 2026-10-07
 
 ### Added

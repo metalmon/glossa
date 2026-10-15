@@ -189,6 +189,10 @@ struct Cli {
     cmd: Cmd,
 }
 
+// The parsed command line, built once per process and dropped immediately: a wide variant costs
+// nothing here, and boxing one would mean hand-writing what `Subcommand` derives. The `tls` build
+// pushes `Mcp` over the lint's threshold by three paths.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Cmd {
     /// Search the knowledge base (BM25-ranked keywords over the index).
@@ -484,6 +488,9 @@ impl From<ImportModeArg> for glossa::graph::io::ImportMode {
     }
 }
 
+// Same reasoning as `Cmd`: a one-shot command line, and `Service` carries the whole service
+// description.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum McpAction {
     /// Regenerate TensorZero tool config from the live MCP tool definitions (one source of truth).
