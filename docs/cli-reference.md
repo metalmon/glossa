@@ -208,12 +208,13 @@ definitions (default `config_dir`: `eval/tensorzero/config`); equivalent to `jus
 `--vision`/`--dedup`/`--source-file`/`--no-graph`/`--trace`/`--session-idle-secs`/`--insecure`. The
 surface mirrors `kb mcp` one-for-one, so a command line that works interactively converts to a
 service unchanged — which matters most for the tool-surface switches, since they have no
-config-file form and a service only ever has what `install` carries. Two options state their cost
-and then obey: `--transport stdio` installs a service with no client or stdin under the
-SCM/systemd (it starts and stops), and `--auth-token` bakes the secret into a command line every
-local account can read via `ps` or `systemctl cat` — `--auth-token-file` bakes a path instead, and
-wins over the value if both are given. The global `--config`/`--state-dir`/`--root` are baked in
-too. Full guide:
+config-file form and a service only ever has what `install` carries. Parity is about getting an
+answer, not about obeying everything: `--transport stdio` is honoured with a warning (it installs
+a service with no client or stdin under the SCM/systemd — it starts and stops), while
+`--auth-token` is parsed and then **refused**, because honouring it would write the secret into a
+command line every local account can read via `ps` or `systemctl cat`. Pass `--auth-token-file`,
+which bakes only the path. The global `--config`/`--state-dir`/`--root` are baked in too.
+Full guide:
 [deploy/service.md](deploy/service.md#native-install-recommended--kb-mcp-service).
 
 Full tool table, profiles, and transports: [mcp.md](mcp.md). Deployment topology, TLS, systemd,

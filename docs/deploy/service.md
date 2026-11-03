@@ -47,9 +47,10 @@ kb mcp service uninstall glossa-editor
 - **The surface mirrors `kb mcp`:** every option of the serving command is accepted here, so an
   interactive command line converts to a service unchanged. `--transport` defaults to
   `streamable-http`; naming `stdio` installs a service with no client or stdin under the
-  SCM/systemd — it will start and stop — and `install` says so before doing it. `--auth-token`
-  bakes the secret into a world-readable command line and also says so; prefer
-  `--auth-token-file`, which bakes a path and wins over the value when both are given.
+  SCM/systemd — it will start and stop — and `install` says so before doing it. `--auth-token` is
+  the exception: it is accepted by the parser and then refused, because a service's command line is
+  readable by every local account, so installing a token value would disclose it for the life of
+  the service. Use `--auth-token-file`, which bakes only the path.
 
 ### Inference server (`kbi service`)
 

@@ -8,10 +8,14 @@
 //! switches have no deployment-config form to fall back on), and nothing said so; the operator just
 //! got "unexpected argument".
 //!
-//! Two options carry a real cost and are therefore loud rather than absent: `--transport stdio`
-//! installs a service with no client and no stdin under the SCM/systemd, and `--auth-token` bakes
-//! the secret into a command line every local account can read. Both state the cost at install time
-//! and then do what was asked — the operator decides, having been told.
+//! Parity is about the ANSWER, not about obeying everything. `--transport stdio` is a foot-gun and
+//! is honoured loudly: it installs a service with no client and no stdin under the SCM/systemd, and
+//! the only thing it costs is the operator's own time. `--auth-token` is parsed and then refused,
+//! because honouring it means writing the secret into a command line every local account can read
+//! (`ps`; `systemctl cat` renders the unit world-readable) for the life of the service — a cost
+//! paid by everyone, not just whoever typed it. It stays in the parser so that converting a
+//! `kb mcp` command line explains itself and names `--auth-token-file`, instead of failing with
+//! "unexpected argument".
 
 use crate::serve_guard::read_token_file as service_guard_read;
 use crate::service::{self, ServiceSpec};
@@ -86,14 +90,11 @@ pub struct InstallOpts {
     /// `install` says so out loud rather than refusing.
     #[arg(long = "transport")]
     pub transport: Option<String>,
-    /// Bearer token VALUE for this service's `/mcp` endpoint.
-    ///
-    /// COST, stated plainly: this is baked into the service's command line, and a service command
-    /// line is public — any local user can read it from `ps`, and `systemctl cat` renders the unit
-    /// world-readable. The token is therefore disclosed to every local account for the life of the
-    /// service. `--auth-token-file` exists to avoid exactly this: it bakes a PATH, and `kb` refuses
-    /// to start if that file is readable by group or other. If both are given, the file wins at
-    /// serve time, matching `kb mcp`.
+    /// Accepted for parity with `kb mcp`, and then REFUSED with an explanation: a service's
+    /// command line is public (`ps`; `systemctl cat` renders the unit world-readable), so there is
+    /// no way to honour a token VALUE here that is not a disclosure to every local account. Use
+    /// `--auth-token-file`, which bakes only the path. The flag exists so that converting a working
+    /// `kb mcp` command line says why, instead of "unexpected argument".
     #[arg(long = "auth-token")]
     pub auth_token: Option<String>,
     /// Path to a file holding the bearer token for this service's `/mcp` endpoint.
@@ -272,26 +273,21 @@ pub fn kb_service_spec(
     // `kb mcp` command line copies over verbatim. Baking a dead flag into ExecStart would outlive
     // the flag itself.
     //
-    // The token VALUE goes in only when the operator asks for it by name, and never quietly: a
-    // service command line is readable by every local account (`ps`; `systemctl cat` renders the
-    // unit world-readable), so this discloses the secret for the life of the service. The warning
-    // is the point — the capability exists, the cost is stated, and `--auth-token-file` is right
-    // there for anyone who would rather not pay it.
-    if let Some(tok) = &opts.auth_token {
-        crate::cli_fmt::note(
-            "--auth-token bakes the token VALUE into the service command line, which every local \
-             account can read (`ps`, and `systemctl cat` renders the unit world-readable). It is \
-             disclosed for the life of the service. `--auth-token-file` bakes a path instead, and \
-             `kb` refuses to start if that file is group- or world-readable.",
+    // `--auth-token` is accepted by the parser and refused here, on purpose. Accepted, so that
+    // converting a working `kb mcp` command line into a service gets an answer instead of clap's
+    // "unexpected argument" — not knowing WHY a flag is missing was the original complaint. Refused,
+    // because the only way to honour it is to write the secret into the service's command line,
+    // which every local account can read (`ps`; `systemctl cat` renders the unit world-readable)
+    // for the life of the service. There is no version of "install this token" that is not a
+    // disclosure, so the answer is the file, not a warning.
+    if opts.auth_token.is_some() {
+        anyhow::bail!(
+            "--auth-token cannot be installed: honouring it means writing the token into the \
+             service's command line, which every local account can read (`ps`, and `systemctl cat` \
+             renders the unit world-readable) for as long as the service exists. Put the token in a \
+             file and pass `--auth-token-file <path>` — only the path is baked in, and `kb` refuses \
+             to start if that file is readable by group or other."
         );
-        if opts.auth_token_file.is_some() {
-            crate::cli_fmt::note(
-                "both --auth-token and --auth-token-file are set: the FILE wins at serve time (as \
-                 with `kb mcp`), so the baked-in value is disclosed without ever being used.",
-            );
-        }
-        args.push("--auth-token".to_string());
-        args.push(tok.clone());
     }
     // The PATH goes into ExecStart, never the token itself — see `InstallOpts::auth_token_file`.
     // Absolute, because the rendered unit sets no WorkingDirectory: a relative path would resolve
@@ -573,15 +569,32 @@ mod tests {
         }
     }
 
-    /// The two options with a real cost are available, not blocked — the operator decides, having
-    /// been told. Here: they land where they were asked to land.
+    /// `--auth-token` is parsed and then refused: there is no way to install a token VALUE that is
+    /// not a disclosure, so the flag exists only to say so. The secret must never reach the spec.
     #[test]
-    fn kb_service_spec_honours_the_costly_options_when_asked() {
+    fn kb_service_spec_refuses_a_token_value_and_never_leaks_it() {
         let mut o = opts(Some("/srv/corpus"));
         o.auth_token = Some("s3cret".into());
+        let e = kb_service_spec("glossa-x", "C:/kb/kb.exe".into(), &o, &[], None, None)
+            .expect_err("a token value must not be installable");
+        let msg = e.to_string();
+        assert!(
+            msg.contains("--auth-token-file"),
+            "the refusal must point at the way that works: {msg}"
+        );
+        assert!(
+            !msg.contains("s3cret"),
+            "and must not echo the secret it refused: {msg}"
+        );
+    }
+
+    /// `--transport` is a foot-gun, not a hole: `stdio` is honoured, loudly, because a service
+    /// that starts and stops costs the operator nothing but their own time.
+    #[test]
+    fn kb_service_spec_honours_a_named_transport() {
+        let mut o = opts(Some("/srv/corpus"));
         o.transport = Some("stdio".into());
         let s = kb_service_spec("glossa-x", "C:/kb/kb.exe".into(), &o, &[], None, None).unwrap();
-        assert!(s.args.windows(2).any(|w| w == ["--auth-token", "s3cret"]));
         assert!(s.args.windows(2).any(|w| w == ["--transport", "stdio"]));
         assert!(
             !s.args
