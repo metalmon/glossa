@@ -44,8 +44,12 @@ kb mcp service uninstall glossa-editor
 - **Config parity with `kb mcp`:** the global `--config <role.toml>`, `--root label=path` (repeatable,
   in place of the positional `<corpus>`), and `--state-dir <dir>` all work here and are baked into the
   service command — a service is configured exactly like a direct `kb mcp` invocation.
-- **stdio is unrepresentable by design:** there is no `--transport` flag (a service has no client/stdin
-  under the SCM/systemd), so a service is always streamable-http.
+- **The surface mirrors `kb mcp`:** every option of the serving command is accepted here, so an
+  interactive command line converts to a service unchanged. `--transport` defaults to
+  `streamable-http`; naming `stdio` installs a service with no client or stdin under the
+  SCM/systemd — it will start and stop — and `install` says so before doing it. `--auth-token`
+  bakes the secret into a world-readable command line and also says so; prefer
+  `--auth-token-file`, which bakes a path and wins over the value when both are given.
 
 ### Inference server (`kbi service`)
 

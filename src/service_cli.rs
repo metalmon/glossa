@@ -1,7 +1,17 @@
-//! Shared `service {install|uninstall|start|stop|status}` CLI shape, reused by `kb` and
-//! `kbi`. The install options are a CURATED set that can only describe a valid service:
-//! `kb`'s transport is hardcoded to `streamable-http` (there is no `--transport` flag), so a stdio
-//! service — which has no client/stdin under the SCM/systemd — is unrepresentable by construction.
+//! Shared `service {install|uninstall|start|stop|status}` CLI shape, reused by `kb` and `kbi`.
+//!
+//! The install options mirror `kb mcp` one-for-one: a command line that works interactively turns
+//! into a service command line unchanged. That is a deliberate reversal of the original design,
+//! which curated the set down to what "can only describe a valid service" — curation kept being
+//! indistinguishable from omission, and the omissions were silent. `--source-file` was missing, so
+//! `get_source_file` could not be enabled for a service by any route at all (the tool-surface
+//! switches have no deployment-config form to fall back on), and nothing said so; the operator just
+//! got "unexpected argument".
+//!
+//! Two options carry a real cost and are therefore loud rather than absent: `--transport stdio`
+//! installs a service with no client and no stdin under the SCM/systemd, and `--auth-token` bakes
+//! the secret into a command line every local account can read. Both state the cost at install time
+//! and then do what was asked — the operator decides, having been told.
 
 use crate::serve_guard::read_token_file as service_guard_read;
 use crate::service::{self, ServiceSpec};
@@ -15,9 +25,10 @@ pub struct NameArg {
     pub service_name: String,
 }
 
-/// Curated `kb service install` options. There is deliberately NO `--transport`: transport is
-/// hardcoded to `streamable-http`, so a stdio service (which has no client/stdin under SCM/systemd)
-/// cannot be created by construction.
+/// `kb service install` options: the same surface as `kb mcp`, so a working interactive command
+/// line converts to a service unchanged. Defaults still describe a valid service — transport is
+/// `streamable-http` unless named otherwise — but nothing is withheld; see the module docs for the
+/// two options that state their cost before obeying.
 #[derive(Args, Debug)]
 pub struct InstallOpts {
     /// Unique service name (the SCM/systemd key). Repeat `install` with distinct names + ports to
@@ -66,6 +77,25 @@ pub struct InstallOpts {
     /// command line unchanged. Images are off unless `--vision` is given.
     #[arg(short = 'N', long = "noimage", hide = true)]
     pub no_image: bool,
+    /// Transport for the service process: `streamable-http` (the default and the only one a
+    /// service can actually run) or `stdio`.
+    ///
+    /// COST, stated plainly: a service has no client and no stdin under the SCM or systemd, so
+    /// `stdio` installs a service that starts, finds nothing to talk to, and stops. The flag is
+    /// here for command-line parity with `kb mcp`; choosing `stdio` is a deliberate act and
+    /// `install` says so out loud rather than refusing.
+    #[arg(long = "transport")]
+    pub transport: Option<String>,
+    /// Bearer token VALUE for this service's `/mcp` endpoint.
+    ///
+    /// COST, stated plainly: this is baked into the service's command line, and a service command
+    /// line is public — any local user can read it from `ps`, and `systemctl cat` renders the unit
+    /// world-readable. The token is therefore disclosed to every local account for the life of the
+    /// service. `--auth-token-file` exists to avoid exactly this: it bakes a PATH, and `kb` refuses
+    /// to start if that file is readable by group or other. If both are given, the file wins at
+    /// serve time, matching `kb mcp`.
+    #[arg(long = "auth-token")]
+    pub auth_token: Option<String>,
     /// Path to a file holding the bearer token for this service's `/mcp` endpoint.
     ///
     /// The token is NOT taken as a value here on purpose: a service's command line is public (`ps`,
@@ -180,9 +210,27 @@ pub fn kb_service_spec(
         args.push("--config".to_string());
         args.push(abs.to_string_lossy().into_owned());
     }
+    // Transport defaults to the only one a service can serve. An operator who names `stdio`
+    // anyway gets what they asked for and a plain statement of what it will do, because a service
+    // that starts and immediately stops is worth one line at install time.
+    let transport = match opts.transport.as_deref() {
+        None | Some("streamable-http") => "streamable-http",
+        Some("stdio") => {
+            crate::cli_fmt::note(
+                "--transport stdio: a service has no client and no stdin under the SCM/systemd, so \
+                 this one will start, find nothing to talk to, and stop. Install it only if you \
+                 know why you want it; `streamable-http` is what a service serves.",
+            );
+            "stdio"
+        }
+        Some(other) => anyhow::bail!(
+            "unknown --transport {other}: expected `streamable-http` (what a service serves) or \
+             `stdio`"
+        ),
+    };
     args.extend([
         "--transport".to_string(),
-        "streamable-http".to_string(),
+        transport.to_string(),
         "--profile".to_string(),
         opts.profile.clone(),
         "--bind".to_string(),
@@ -223,11 +271,27 @@ pub fn kb_service_spec(
     // `kb mcp` command line copies over verbatim. Baking a dead flag into ExecStart would outlive
     // the flag itself.
     //
-    // Two of `kb mcp`'s options stay out by construction, and neither is an oversight:
-    // `--transport`, because a service has no client or stdin under the SCM/systemd and a stdio
-    // service must stay unrepresentable; and `--auth-token`, because a service's command line is
-    // public (`ps`, and `systemctl cat` renders the unit world-readable), so the secret would leak
-    // to every local user — `--auth-token-file` carries the path instead.
+    // The token VALUE goes in only when the operator asks for it by name, and never quietly: a
+    // service command line is readable by every local account (`ps`; `systemctl cat` renders the
+    // unit world-readable), so this discloses the secret for the life of the service. The warning
+    // is the point — the capability exists, the cost is stated, and `--auth-token-file` is right
+    // there for anyone who would rather not pay it.
+    if let Some(tok) = &opts.auth_token {
+        crate::cli_fmt::note(
+            "--auth-token bakes the token VALUE into the service command line, which every local \
+             account can read (`ps`, and `systemctl cat` renders the unit world-readable). It is \
+             disclosed for the life of the service. `--auth-token-file` bakes a path instead, and \
+             `kb` refuses to start if that file is group- or world-readable.",
+        );
+        if opts.auth_token_file.is_some() {
+            crate::cli_fmt::note(
+                "both --auth-token and --auth-token-file are set: the FILE wins at serve time (as \
+                 with `kb mcp`), so the baked-in value is disclosed without ever being used.",
+            );
+        }
+        args.push("--auth-token".to_string());
+        args.push(tok.clone());
+    }
     // The PATH goes into ExecStart, never the token itself — see `InstallOpts::auth_token_file`.
     // Absolute, because the rendered unit sets no WorkingDirectory: a relative path would resolve
     // against whatever the SCM/systemd happens to start the process in.
@@ -322,6 +386,8 @@ mod tests {
             session_idle_secs: None,
             insecure: None,
             no_image: false,
+            transport: None,
+            auth_token: None,
             auth_token_file: None,
             #[cfg(feature = "tls")]
             tls_cert: None,
@@ -464,9 +530,14 @@ mod tests {
             "a deprecated no-op must not be written into ExecStart: {:?}",
             s.args
         );
-        // Out by construction, not by omission: a stdio service cannot exist, and a secret on a
-        // public command line is the thing `--auth-token-file` exists to avoid.
-        assert!(!s.args.iter().any(|a| a == "--auth-token"));
+        // The token VALUE and a non-default transport are available but never implied: neither
+        // appears unless the operator named it, which is what keeps the costly options costly only
+        // for whoever chose to pay.
+        assert!(
+            !s.args.iter().any(|a| a == "--auth-token"),
+            "the token value must not appear unasked: {:?}",
+            s.args
+        );
         assert_eq!(
             s.args
                 .windows(2)
@@ -474,7 +545,7 @@ mod tests {
                 .map(|w| w[1].as_str())
                 .collect::<Vec<_>>(),
             vec!["streamable-http"],
-            "transport is fixed, never operator-chosen: {:?}",
+            "a service serves streamable-http unless told otherwise: {:?}",
             s.args
         );
 
@@ -499,6 +570,31 @@ mod tests {
                 s.args
             );
         }
+    }
+
+    /// The two options with a real cost are available, not blocked — the operator decides, having
+    /// been told. Here: they land where they were asked to land.
+    #[test]
+    fn kb_service_spec_honours_the_costly_options_when_asked() {
+        let mut o = opts(Some("/srv/corpus"));
+        o.auth_token = Some("s3cret".into());
+        o.transport = Some("stdio".into());
+        let s = kb_service_spec("glossa-x", "C:/kb/kb.exe".into(), &o, &[], None, None).unwrap();
+        assert!(s.args.windows(2).any(|w| w == ["--auth-token", "s3cret"]));
+        assert!(s.args.windows(2).any(|w| w == ["--transport", "stdio"]));
+        assert!(
+            !s.args
+                .windows(2)
+                .any(|w| w[0] == "--transport" && w[1] == "streamable-http"),
+            "the chosen transport replaces the default, it does not join it: {:?}",
+            s.args
+        );
+
+        // A transport that is neither is a typo, not a choice.
+        let mut o = opts(Some("/srv/corpus"));
+        o.transport = Some("sse".into());
+        let e = kb_service_spec("glossa-x", "C:/kb/kb.exe".into(), &o, &[], None, None);
+        assert!(e.is_err(), "an unknown transport must not install");
     }
 
     /// A role file's `[corpus]` section is a complete corpus specification — `kb index` and
