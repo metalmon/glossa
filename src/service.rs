@@ -304,6 +304,47 @@ mod os {
         anyhow::Error::new(e)
     }
 
+    /// `start` is the one place where ERROR_ACCESS_DENIED does NOT mean "you are not elevated":
+    /// the manager and the service handle are already open by then, so the denial comes from the
+    /// SCM failing to LAUNCH the process — most often because the service's logon account cannot
+    /// read or execute the image. Routing it through the generic map sent an operator who was
+    /// already Administrator looking for a privilege they already had; observed against a service
+    /// whose binary sat under another user's profile, where the account simply had no ACL on it.
+    pub(super) fn map_start_err(name: &str, e: windows_service::Error) -> anyhow::Error {
+        if let windows_service::Error::Winapi(io) = &e {
+            match io.raw_os_error() {
+                // ERROR_ACCESS_DENIED, from the launch rather than from the handle.
+                Some(5) => {
+                    return anyhow::anyhow!(
+                    "access denied starting {name} — this is the service manager failing to launch \
+                     it, not a missing privilege on your side. Check that the service's logon \
+                     account can read and execute the image (`sc.exe qc {name}` prints \
+                     BINARY_PATH_NAME; a binary under another user's profile is the usual cause), \
+                     and that the account still holds `Log on as a service`."
+                )
+                }
+                // ERROR_SERVICE_LOGON_FAILED
+                Some(1069) => {
+                    return anyhow::anyhow!(
+                    "the logon account for {name} was rejected: wrong password (it is stored at \
+                     install time and does not follow a password change), or the account lacks \
+                     `Log on as a service` — secpol.msc, Local Policies, User Rights Assignment."
+                )
+                }
+                // ERROR_SERVICE_REQUEST_TIMEOUT
+                Some(1053) => {
+                    return anyhow::anyhow!(
+                    "{name} did not signal the service manager in time: the process launched but \
+                     did not come up — look for its own startup failure (an unreadable --config \
+                     path or corpus root will do it)."
+                )
+                }
+                _ => {}
+            }
+        }
+        map_err(e)
+    }
+
     pub fn install(spec: &ServiceSpec) -> anyhow::Result<()> {
         let mgr =
             ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE)
@@ -359,7 +400,8 @@ mod os {
         let svc = mgr
             .open_service(name, ServiceAccess::START)
             .map_err(map_err)?;
-        svc.start(&[] as &[&OsStr]).map_err(map_err)?;
+        svc.start(&[] as &[&OsStr])
+            .map_err(|e| map_start_err(name, e))?;
         Ok(())
     }
 
@@ -381,6 +423,49 @@ mod os {
             .map_err(map_err)?;
         let st = svc.query_status().map_err(map_err)?;
         Ok(format!("{:?}", st.current_state))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn winapi(code: i32) -> windows_service::Error {
+            windows_service::Error::Winapi(std::io::Error::from_raw_os_error(code))
+        }
+
+        /// A wrong diagnosis costs more than no diagnosis: "run elevated" sent an operator who was
+        /// already Administrator hunting a privilege they had, while the actual cause — the service
+        /// account having no ACL on the image — went unmentioned. Opening a handle and launching a
+        /// process fail with the same code and mean different things.
+        #[test]
+        fn access_denied_on_start_does_not_blame_elevation() {
+            let msg = map_start_err("glossa-x", winapi(5)).to_string();
+            assert!(
+                !msg.contains("run elevated"),
+                "the handle is already open by then: {msg}"
+            );
+            assert!(
+                msg.contains("read and execute the image") && msg.contains("glossa-x"),
+                "it must name the likely cause and the service: {msg}"
+            );
+            // Opening a handle is the case where elevation IS the answer — unchanged.
+            assert!(map_err(winapi(5)).to_string().contains("run elevated"));
+        }
+
+        #[test]
+        fn logon_failure_and_timeout_are_named_rather_than_raw() {
+            let msg = map_start_err("glossa-x", winapi(1069)).to_string();
+            assert!(
+                msg.contains("Log on as a service") && msg.contains("password"),
+                "{msg}"
+            );
+            let msg = map_start_err("glossa-x", winapi(1053)).to_string();
+            assert!(msg.contains("did not signal"), "{msg}");
+            // Anything unrecognised still falls through to the shared mapping.
+            assert!(map_start_err("glossa-x", winapi(1060))
+                .to_string()
+                .contains("no such service"));
+        }
     }
 }
 
