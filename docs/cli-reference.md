@@ -205,7 +205,9 @@ definitions (default `config_dir`: `eval/tensorzero/config`); equivalent to `jus
 `kb mcp service install|uninstall|start|stop|status` installs and manages `kb` as an OS service
 (Windows SCM / Linux systemd), always streamable-http. `install` takes `--service-name`, a corpus
 (positional or the global `--root`), `--bind`, `--profile`, repeatable `--allowed-host`, and
-`--vision`/`--dedup`; the global `--config`/`--state-dir` are baked in too. Full guide:
+`--vision`/`--dedup`/`--source-file`/`--no-graph` (the tool-surface switches have no config-file
+form, so a service only has what `install` carries); the global `--config`/`--state-dir` are baked
+in too. Full guide:
 [deploy/service.md](deploy/service.md#native-install-recommended--kb-mcp-service).
 
 Full tool table, profiles, and transports: [mcp.md](mcp.md). Deployment topology, TLS, systemd,

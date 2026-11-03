@@ -28,6 +28,8 @@ kb mcp service install --service-name glossa-editor <corpus> \
     --profile editor --bind 127.0.0.1:8081 \
     --allowed-host kb.example.com --allowed-host 127.0.0.1 \
     --vision            # enable image output in `read`; add --dedup for the anti-loop guard
+    --source-file       # expose `get_source_file` (hands back the original file, not extracted text)
+    # --no-graph        # serve without the graph tools
 
 kb mcp service start   glossa-editor
 kb mcp service status  glossa-editor      # → Running

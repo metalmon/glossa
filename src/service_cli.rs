@@ -43,6 +43,13 @@ pub struct InstallOpts {
     /// for a weak reasoning reader — leave off for a general/display client.
     #[arg(long)]
     pub dedup: bool,
+    /// Expose the `get_source_file` tool (hands a client the original file, not extracted text).
+    /// Mirrors `kb mcp --source-file`.
+    #[arg(long = "source-file")]
+    pub source_file: bool,
+    /// Serve without the graph tools. Mirrors `kb mcp --no-graph`.
+    #[arg(long = "no-graph")]
+    pub no_graph: bool,
     /// Path to a file holding the bearer token for this service's `/mcp` endpoint.
     ///
     /// The token is NOT taken as a value here on purpose: a service's command line is public (`ps`,
@@ -175,6 +182,16 @@ pub fn kb_service_spec(
     if opts.dedup {
         args.push("--dedup".to_string());
     }
+    // The tool-surface switches have no route through the deployment config — unlike bind, hosts,
+    // limits or TLS, there is no `[tools]` section — so whatever `install` does not carry, a service
+    // cannot have. `--source-file` and `--no-graph` were missing, which left `get_source_file`
+    // unreachable from a service by any means at all.
+    if opts.source_file {
+        args.push("--source-file".to_string());
+    }
+    if opts.no_graph {
+        args.push("--no-graph".to_string());
+    }
     // The PATH goes into ExecStart, never the token itself — see `InstallOpts::auth_token_file`.
     // Absolute, because the rendered unit sets no WorkingDirectory: a relative path would resolve
     // against whatever the SCM/systemd happens to start the process in.
@@ -263,6 +280,8 @@ mod tests {
             allowed_host: vec!["gw.internal".into()],
             vision: true,
             dedup: true,
+            source_file: false,
+            no_graph: false,
             auth_token_file: None,
             #[cfg(feature = "tls")]
             tls_cert: None,
@@ -365,6 +384,39 @@ mod tests {
         // --root supersedes the positional: no bare corpus token after `mcp`.
         assert_eq!(s.args.first().map(String::as_str), Some("mcp"));
         assert_eq!(s.args.get(1).map(String::as_str), Some("--root"));
+    }
+
+    /// The tool-surface switches have no `[tools]` section in the deployment config to fall back
+    /// on, so a flag `install` does not carry is a capability a service cannot have at all. That
+    /// is how `get_source_file` ended up unreachable from a service: `kb mcp` took
+    /// `--source-file`, `install` did not.
+    #[test]
+    fn kb_service_spec_bakes_the_tool_surface_switches() {
+        let mut o = opts(Some("/srv/corpus"));
+        o.source_file = true;
+        o.no_graph = true;
+        let s = kb_service_spec("glossa-x", "C:/kb/kb.exe".into(), &o, &[], None, None).unwrap();
+        for flag in ["--vision", "--dedup", "--source-file", "--no-graph"] {
+            assert!(
+                s.args.iter().any(|a| a == flag),
+                "{flag} must reach ExecStart: {:?}",
+                s.args
+            );
+        }
+
+        // ...and each one stays off unless asked for: a service must not quietly hand out the
+        // original file bytes because the installer was generous.
+        let mut o = opts(Some("/srv/corpus"));
+        o.vision = false;
+        o.dedup = false;
+        let s = kb_service_spec("glossa-x", "C:/kb/kb.exe".into(), &o, &[], None, None).unwrap();
+        for flag in ["--vision", "--dedup", "--source-file", "--no-graph"] {
+            assert!(
+                !s.args.iter().any(|a| a == flag),
+                "{flag} must not appear unasked: {:?}",
+                s.args
+            );
+        }
     }
 
     /// A role file's `[corpus]` section is a complete corpus specification — `kb index` and
