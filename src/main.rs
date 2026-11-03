@@ -1595,7 +1595,20 @@ fn main() -> anyhow::Result<()> {
             .logging
             .level
             .as_deref()
-            .and_then(|v| tracing_subscriber::EnvFilter::try_new(v).ok())
+            .and_then(|v| {
+                // A bare level from `[logging].level` must not silently re-enable the library
+                // targets the built-in default quiets: `try_new` REPLACES the whole directive
+                // set, so `level = "info"` turns tantivy's per-segment chatter back on and
+                // buries `kb index`'s own output under it. Compose instead of replace; a value
+                // that already names targets (contains '=') is the operator being explicit and
+                // is taken verbatim.
+                let spec = if v.contains('=') {
+                    v.to_string()
+                } else {
+                    format!("{v},tantivy=warn,pdf_oxide=error")
+                };
+                tracing_subscriber::EnvFilter::try_new(spec).ok()
+            })
             .unwrap_or_else(|| {
                 tracing_subscriber::EnvFilter::new("info,tantivy=warn,pdf_oxide=error")
             })
@@ -1907,6 +1920,9 @@ fn main() -> anyhow::Result<()> {
                     rr.roots.len()
                 );
             }
+            // The destructive-rebuild guard is NOT here: `index_dir_at_locked` refuses a force or
+            // schema-migration rebuild while any root is unreadable, so the MCP `index` tool and
+            // the unattended post-upgrade migration are covered by the same check as this CLI.
 
             let started = std::time::Instant::now();
             if let Some(rel) = file {
@@ -1947,11 +1963,32 @@ fn main() -> anyhow::Result<()> {
             }
             // Seed a default whitelist `.ignore` on a corpus that has none, so a first index doesn't
             // slurp installers/archives/temp files as text. Never clobbers an existing ignore setup.
-            if let Some(p) = glossa::default_ignore::seed_if_absent(&rr.root) {
-                eprintln!(
-                    "wrote default {} (whitelist of supported types) — edit it to tune what's indexed",
-                    p.display()
-                );
+            // Per ROOT, not just the primary one: the whitelist is what keeps the walk off binaries,
+            // and a multi-root corpus used to seed only `rr.root`, silently leaving every other root
+            // — typically the big shared one — walking everything. A root that cannot be written
+            // (a share mounted read-only) says so once: it still indexes, just without the filter.
+            for r in &rr.roots {
+                let named = if r.label.is_empty() {
+                    r.path.display().to_string()
+                } else {
+                    format!("{}={}", r.label, r.path.display())
+                };
+                match glossa::default_ignore::seed_if_absent(&r.path) {
+                    Some(p) => eprintln!(
+                        "wrote default {} (whitelist of supported types) — edit it to tune what's indexed",
+                        p.display()
+                    ),
+                    None if !r.path.join(".ignore").exists()
+                        && !r.path.join(".gitignore").exists() =>
+                    {
+                        glossa::cli_fmt::note(&format!(
+                            "no .ignore could be written under {named} (read-only root?) — that \
+                             root is indexed WITHOUT the default type whitelist; add one from a \
+                             host that can write there to tune what gets indexed"
+                        ));
+                    }
+                    None => {}
+                }
             }
             let stats = glossa::index::store::index_dir_at(&rr.roots, &rr.state_base, force)?;
             if !stats.errors.is_empty() {

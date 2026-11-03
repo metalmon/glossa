@@ -1992,11 +1992,44 @@ pub fn index_dir_at_locked(
     // the auto-* graph (structural + lexical) so stale entries (deleted files, or docs previously
     // indexed under a different path form) cannot linger. The agent/curated reasoning graph in
     // graph.sqlite is PRESERVED — a reindex must not destroy hand/agent-built knowledge.
-    let mut manifest = if force {
-        Manifest::default()
-    } else {
-        Manifest::load(state_base)
-    };
+    // Both resets below throw away the "previously populated" state the empty-mount guard needs —
+    // `force` starts from an empty Manifest, and a schema migration clears `manifest.files` — so a
+    // root that cannot be read right now contributes nothing to the rebuild and its documents just
+    // cease to exist: no diff, no `removed` count, nothing left to hold. Refuse while any root is
+    // unreachable; a rebuild is only correct when the whole corpus can actually be seen. The check
+    // lives here rather than in the CLI because `kb index --force` is not the only way in: the MCP
+    // `index` tool takes `force=true` straight from a client, and the schema migration fires
+    // unattended on the first pass after an upgrade — the two cases nobody is watching.
+    // `!files.is_empty()` matters: a first index (and a fresh state dir) has nothing to lose, and
+    // its manifest reads as a schema migration because the version starts at 0. Refusing there
+    // would block the useful partial first pass — index the roots you can reach, name the ones you
+    // cannot — which is exactly what an operator wants while still wiring up a share.
+    let stored = Manifest::load(state_base);
+    if (force || stored.index_schema_version < INDEX_SCHEMA_VERSION) && !stored.files.is_empty() {
+        let unreadable = crate::root::unreadable_roots(roots);
+        if !unreadable.is_empty() {
+            let named = unreadable
+                .iter()
+                .map(|(label, path, err)| {
+                    if label.is_empty() {
+                        format!("{} ({err})", path.display())
+                    } else {
+                        format!("{label}={} ({err})", path.display())
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            anyhow::bail!(
+                "refusing a full rebuild while {} of {} corpus roots cannot be read: {named} — \
+                 a rebuild starts from an empty manifest, so those roots' documents would be \
+                 dropped from the index with nothing left to compare against. Restore access, or \
+                 drop the root from the corpus if it is meant to be gone.",
+                unreadable.len(),
+                roots.len()
+            );
+        }
+    }
+    let mut manifest = if force { Manifest::default() } else { stored };
     let schema_migrate = manifest.index_schema_version < INDEX_SCHEMA_VERSION;
     if force {
         let _ = std::fs::remove_dir_all(state_base.join(".glossa").join("index"));
@@ -2583,9 +2616,20 @@ fn scan_scoped_delta_at(
     // catches this at the ROOT level — as opposed to "some dirs churned" — is: did this pass end up
     // removing EVERY manifest doc previously known under a given label? A PARTIAL removal (some of
     // the root's docs still present in `d.next.files`) is a legitimate, ordinary deletion and must
-    // drop normally; only a COMPLETE wipe of a previously-populated root, with the root directory
-    // still physically present (mount up, just empty — a genuinely vanished/renamed root path is a
-    // different failure mode and is not held), is treated as suspicious.
+    // drop normally; only a COMPLETE wipe of a previously-populated root is treated as suspicious.
+    //
+    // Dropping every doc under a root is the one irreversible-looking thing this pass does, so it
+    // requires POSITIVE evidence that the files are gone: the root reads back as a present, empty
+    // directory. Any other outcome — permission denied, a share that stopped answering, a path that
+    // is no longer there — is absence of evidence, and holds. This used to be gated on
+    // `abs_root(&r.path).is_dir()`, which reads as "the root is still physically present"; but
+    // `is_dir()` answers false for EVERY stat failure, so the guard switched itself off in exactly
+    // the situation it exists for (an unreachable network share), and the root's docs were wiped
+    // with no log line, no metric and no exit code — observed end-to-end against an SMB corpus whose
+    // service account had lost access. The asymmetry decides it: holding a root that was genuinely
+    // deleted costs a stale index until `kb index --force` (the documented escape hatch, which
+    // resets the manifest so an intentional emptying sticks), while dropping an unreachable one
+    // costs the corpus. Prefer the stale index.
     for r in roots {
         if held_labels.contains(&r.label) {
             continue; // this root's own dirs were deadline-held this pass — not evaluated yet
@@ -2606,7 +2650,7 @@ fn scan_scoped_delta_at(
             })
             .filter(|k| d.next.files.contains_key(*k))
             .count();
-        if survivors == 0 && abs_root(&r.path).is_dir() {
+        if survivors == 0 {
             for (k, sig) in &manifest.files {
                 let (label, _) = split_doc_key(k, roots);
                 if label == r.label {
@@ -2614,7 +2658,12 @@ fn scan_scoped_delta_at(
                 }
             }
             d.empty_mount_roots.push(r.label.clone());
-            tracing::warn!(root = %r.label, "scoped rescan would remove every doc under a previously-populated root; holding stale index (possible unmounted network share)");
+            let reason = match std::fs::metadata(abs_root(&r.path)) {
+                Ok(m) if m.is_dir() => "root is readable but came back empty".to_string(),
+                Ok(_) => "root path is no longer a directory".to_string(),
+                Err(e) => format!("root is not readable: {e}"),
+            };
+            tracing::warn!(root = %r.label, reason = %reason, "scoped rescan would remove every doc under a previously-populated root; holding stale index (`kb index --force` makes an intentional emptying stick)");
         }
     }
     d.removed = manifest
@@ -7184,6 +7233,121 @@ mod store_root_tests {
             "force makes the genuinely-empty state stick: {:?}",
             manifest.files
         );
+    }
+
+    /// The empty-mount guard used to require `abs_root(&r.path).is_dir()` — "the root is still
+    /// physically present". `is_dir()` answers false for EVERY stat failure, so an unreachable
+    /// root (share offline, credentials rejected, path renamed) switched the guard off and the
+    /// scoped rescan removed every doc under it — silently: no `removed` count the operator sees,
+    /// no metric, and `/ready` kept answering ready. Observed end-to-end against an SMB corpus
+    /// whose service account could not reach the share. Dropping a whole root now requires the
+    /// root to read back as a present, empty directory; anything else holds.
+    #[test]
+    fn reindex_scoped_rescan_holds_root_when_root_path_is_unreachable() {
+        use crate::root::Root;
+        let parent = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let root_path = parent.path().join("corpus");
+        std::fs::create_dir_all(&root_path).unwrap();
+        std::fs::write(root_path.join("one.md"), "delta one\n").unwrap();
+        std::fs::write(root_path.join("two.md"), "delta two\n").unwrap();
+        let roots = vec![Root {
+            label: String::new(),
+            path: root_path.clone(),
+        }];
+        index_dir_at(&roots, state.path(), true).unwrap(); // seed manifest with 2 entries
+
+        // The root itself stops resolving — the share's stand-in for "mount went away". The files
+        // are NOT deleted from the corpus; they are simply out of reach this pass.
+        std::fs::rename(&root_path, parent.path().join("corpus-moved")).unwrap();
+
+        let stats =
+            freshen_blocking_at(&roots, state.path(), std::time::Duration::from_secs(3)).unwrap();
+        assert_eq!(
+            stats.removed, 0,
+            "an unreachable root must not read as a mass delete: {stats:?}"
+        );
+        assert_eq!(
+            stats.empty_mount_holds, 1,
+            "the hold must be observable, not silent: {stats:?}"
+        );
+        let manifest = Manifest::load(state.path());
+        assert_eq!(
+            manifest.files.len(),
+            2,
+            "both docs survive while the root is unreachable: {:?}",
+            manifest.files
+        );
+
+        // Back in reach: the hold clears on its own, nothing was lost.
+        std::fs::rename(parent.path().join("corpus-moved"), &root_path).unwrap();
+        filetime::set_file_mtime(
+            &root_path,
+            filetime::FileTime::from_system_time(
+                std::time::SystemTime::now() + std::time::Duration::from_secs(30),
+            ),
+        )
+        .unwrap();
+        let stats =
+            freshen_blocking_at(&roots, state.path(), std::time::Duration::from_secs(3)).unwrap();
+        assert_eq!(
+            stats.empty_mount_holds, 0,
+            "the hold clears once the root answers again: {stats:?}"
+        );
+        assert_eq!(
+            Manifest::load(state.path()).files.len(),
+            2,
+            "and the docs are still there"
+        );
+    }
+
+    /// A rebuild starts from an empty manifest, which is exactly what leaves an unreachable root's
+    /// documents with nothing to compare against — they just stop existing. The refusal lives in
+    /// `index_dir_at_locked` and not in the CLI because the MCP `index` tool passes `force=true`
+    /// from a client, and the post-upgrade schema migration runs with nobody watching.
+    #[test]
+    fn force_rebuild_refuses_while_a_root_is_unreachable() {
+        use crate::root::Root;
+        let parent = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let near = parent.path().join("near");
+        let far = parent.path().join("far");
+        std::fs::create_dir_all(&near).unwrap();
+        std::fs::create_dir_all(&far).unwrap();
+        std::fs::write(near.join("one.md"), "epsilon one\n").unwrap();
+        std::fs::write(far.join("two.md"), "epsilon two\n").unwrap();
+        let roots = vec![
+            Root {
+                label: "near".into(),
+                path: near.clone(),
+            },
+            Root {
+                label: "far".into(),
+                path: far.clone(),
+            },
+        ];
+        index_dir_at(&roots, state.path(), true).unwrap();
+        assert_eq!(Manifest::load(state.path()).files.len(), 2);
+
+        std::fs::rename(&far, parent.path().join("far-moved")).unwrap();
+        let err = index_dir_at(&roots, state.path(), true)
+            .expect_err("a rebuild that cannot see the whole corpus must refuse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refusing a full rebuild") && msg.contains("far="),
+            "the refusal must name the root: {msg}"
+        );
+        assert_eq!(
+            Manifest::load(state.path()).files.len(),
+            2,
+            "and must not have dropped anything on its way out"
+        );
+
+        // Nothing to lose, nothing to refuse: a rebuild into a FRESH state dir still indexes the
+        // roots it can reach, so wiring up a share incrementally is not blocked.
+        let fresh = tempfile::tempdir().unwrap();
+        let stats = index_dir_at(&roots, fresh.path(), true).unwrap();
+        assert_eq!(stats.added, 1, "the reachable root still indexes: {stats:?}");
     }
 
     #[test]

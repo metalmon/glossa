@@ -114,17 +114,48 @@ pub fn kb_service_spec(
     } else if let Some(c) = &opts.corpus {
         args.push(c.to_string_lossy().into_owned());
     } else {
-        anyhow::bail!(
-            "provide a <corpus> positional or one or more `--root label=path` for the service"
-        );
+        // A `--config` role file carries `[corpus].roots`, and the launched `kb mcp` resolves them
+        // from it with the same flag > env > file precedence as an interactive run — so a config
+        // alone IS a complete corpus specification and must not be rejected here. Requiring
+        // `--root` on top of it split the one file that is supposed to drive both `kb index` and
+        // `kb mcp`, which is how a service ends up addressing the corpus differently from the pass
+        // that indexed it (different labels, hence different document keys).
+        //
+        // But accept it only after confirming the file actually names roots: with no corpus from
+        // ANY source, `kb mcp` falls back to discovery — walking up from its working directory,
+        // which for a service is whatever the SCM or systemd happened to start it in. That turns a
+        // typo'd section name into a service quietly serving some unrelated `.glossa` it found, or
+        // a dead unit explaining nothing. Fail here, where the operator is looking.
+        let named_roots = match config {
+            Some(cfg) => !crate::config::load(cfg)?.corpus.roots.is_empty(),
+            None => false,
+        };
+        if !named_roots {
+            anyhow::bail!(
+                "provide a <corpus> positional, one or more `--root label=path`, or a `--config` \
+                 role file whose [corpus] section names at least one root"
+            );
+        }
     }
     if let Some(sd) = state_dir {
         args.push("--state-dir".to_string());
         args.push(sd.to_string_lossy().into_owned());
     }
     if let Some(cfg) = config {
+        // Absolute, for the same reason as the token file below: the rendered unit sets no
+        // WorkingDirectory, so a relative path would resolve against whatever directory the SCM or
+        // systemd starts the process in — and this file is what tells the service which corpus it
+        // serves. Already-absolute paths are passed through untouched (no canonicalization: the
+        // file is read at every start, and resolving symlinks now would pin today's target).
+        let abs = if cfg.is_absolute() {
+            cfg.to_path_buf()
+        } else {
+            std::path::absolute(cfg).map_err(|e| {
+                anyhow::anyhow!("cannot resolve the config path {}: {e}", cfg.display())
+            })?
+        };
         args.push("--config".to_string());
-        args.push(cfg.to_string_lossy().into_owned());
+        args.push(abs.to_string_lossy().into_owned());
     }
     args.extend([
         "--transport".to_string(),
@@ -311,13 +342,16 @@ mod tests {
     #[test]
     fn kb_service_spec_bakes_root_state_dir_and_config_globals() {
         // No positional corpus — globals supply --root/--state-dir/--config (Change 3).
+        // An ABSOLUTE config path (a temp dir gives one that is absolute on every platform — a
+        // bare "/etc/..." is not, on Windows) so the spec bakes it through unchanged.
+        let (_d, cfg) = role_file("[corpus]\nroots = [\"docs=/srv/a\"]\n");
         let s = kb_service_spec(
             "glossa-x",
             "C:/kb/kb.exe".into(),
             &opts(None),
             &["docs=/a".to_string(), "specs=/b".to_string()],
             Some(Path::new("/var/lib/glossa/x")),
-            Some(Path::new("/etc/glossa/role.toml")),
+            Some(&cfg),
         )
         .unwrap();
         assert!(s.args.windows(2).any(|w| w == ["--root", "docs=/a"]));
@@ -326,13 +360,60 @@ mod tests {
             .args
             .windows(2)
             .any(|w| w == ["--state-dir", "/var/lib/glossa/x"]));
-        assert!(s
-            .args
-            .windows(2)
-            .any(|w| w == ["--config", "/etc/glossa/role.toml"]));
+        let baked = cfg.to_string_lossy().into_owned();
+        assert!(s.args.windows(2).any(|w| w == ["--config", baked.as_str()]));
         // --root supersedes the positional: no bare corpus token after `mcp`.
         assert_eq!(s.args.first().map(String::as_str), Some("mcp"));
         assert_eq!(s.args.get(1).map(String::as_str), Some("--root"));
+    }
+
+    /// A role file's `[corpus]` section is a complete corpus specification — `kb index` and
+    /// `kb mcp` both resolve roots from it — so `service install --config role.toml` must not
+    /// demand `--root` on top. Requiring it forced the operator to state the roots twice, in two
+    /// places that can drift apart; and roots that drift re-key every document.
+    /// Writes a role file and hands back its path (kept alive by the returned dir).
+    fn role_file(body: &str) -> (tempfile::TempDir, PathBuf) {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("role.toml");
+        std::fs::write(&p, body).unwrap();
+        (d, p)
+    }
+
+    #[test]
+    fn kb_service_spec_accepts_a_config_as_the_whole_corpus_spec() {
+        let (_d, cfg) = role_file("[corpus]\nroots = [\"docs=/srv/a\"]\n");
+        let s = kb_service_spec(
+            "glossa-x",
+            "C:/kb/kb.exe".into(),
+            &opts(None),
+            &[],
+            None,
+            Some(&cfg),
+        )
+        .expect("a --config role file naming roots must be accepted");
+        let baked = cfg.to_string_lossy().into_owned();
+        assert!(s.args.windows(2).any(|w| w == ["--config", baked.as_str()]));
+        assert!(
+            !s.args.iter().any(|a| a == "--root"),
+            "nothing to bake: the roots live in the config: {:?}",
+            s.args
+        );
+    }
+
+    /// Fail CLOSED: a config with no roots is not a corpus specification. Accepting it would leave
+    /// the service to fall back on discovery from whatever directory the SCM started it in.
+    #[test]
+    fn kb_service_spec_rejects_a_config_that_names_no_roots() {
+        let (_d, cfg) = role_file("[server]\nbind = \"127.0.0.1:8080\"\n");
+        let e = kb_service_spec(
+            "glossa-x",
+            "C:/kb/kb.exe".into(),
+            &opts(None),
+            &[],
+            None,
+            Some(&cfg),
+        );
+        assert!(e.is_err(), "a rootless config must not pass for a corpus");
     }
 
     #[test]
