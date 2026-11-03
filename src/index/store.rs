@@ -2008,25 +2008,74 @@ pub fn index_dir_at_locked(
     if (force || stored.index_schema_version < INDEX_SCHEMA_VERSION) && !stored.files.is_empty() {
         let unreadable = crate::root::unreadable_roots(roots);
         if !unreadable.is_empty() {
-            let named = unreadable
+            // Paths and OS error text go to the log, which is the operator's side of the fence;
+            // the returned error carries labels only. This error crosses the MCP boundary verbatim
+            // (the `index` tool returns it to a client), and a corpus root's absolute path plus the
+            // OS's reason for refusing it — often naming an account or a host — is not something a
+            // client needs in order to learn that a rebuild was declined. The CLI still shows the
+            // full detail: `kb index` prints a per-root note before it gets here.
+            for (label, path, err) in &unreadable {
+                tracing::warn!(root = %label, path = %path.display(), error = %err, "corpus root unreadable; refusing a full rebuild");
+            }
+            let labels = unreadable
                 .iter()
-                .map(|(label, path, err)| {
+                .map(|(label, _, _)| {
                     if label.is_empty() {
-                        format!("{} ({err})", path.display())
+                        "<unlabeled>"
                     } else {
-                        format!("{label}={} ({err})", path.display())
+                        label.as_str()
                     }
                 })
                 .collect::<Vec<_>>()
-                .join("; ");
+                .join(", ");
             anyhow::bail!(
-                "refusing a full rebuild while {} of {} corpus roots cannot be read: {named} — \
+                "refusing a full rebuild while {} of {} corpus roots cannot be read ({}) — \
                  a rebuild starts from an empty manifest, so those roots' documents would be \
                  dropped from the index with nothing left to compare against. Restore access, or \
-                 drop the root from the corpus if it is meant to be gone.",
+                 drop the root from the corpus if it is meant to be gone; the log names each one.",
                 unreadable.len(),
-                roots.len()
+                roots.len(),
+                labels
             );
+        }
+        // A root that is mounted but lists NOTHING is the other half of the same failure: readable,
+        // so the check above passes, yet it contributes no files and the reset leaves its documents
+        // with nothing to compare against. `force` is the documented escape hatch for a genuinely
+        // emptied root, so it keeps its meaning — but a SCHEMA MIGRATION never asked to empty
+        // anything. It fires by itself on the first pass after a version bump, which is exactly
+        // when a share may still be coming up, and there is no operator present to notice.
+        if !force {
+            let vanished: Vec<String> = roots
+                .iter()
+                .filter(|r| {
+                    stored
+                        .files
+                        .keys()
+                        .any(|k| split_doc_key(k, roots).0 == r.label)
+                })
+                .filter(|r| {
+                    std::fs::read_dir(abs_root(&r.path))
+                        .map(|mut it| it.next().is_none())
+                        .unwrap_or(false)
+                })
+                .map(|r| {
+                    if r.label.is_empty() {
+                        "<unlabeled>".to_string()
+                    } else {
+                        r.label.clone()
+                    }
+                })
+                .collect();
+            if !vanished.is_empty() {
+                anyhow::bail!(
+                    "refusing the index schema migration: {} previously-populated corpus root(s) \
+                     now list no entries at all ({}) — a migration rebuilds from an empty manifest, \
+                     so their documents would be dropped. Check the mount, then re-run; \
+                     `kb index --force` is the way to make a deliberate emptying stick.",
+                    vanished.len(),
+                    vanished.join(", ")
+                );
+            }
         }
     }
     let mut manifest = if force { Manifest::default() } else { stored };
@@ -7334,8 +7383,14 @@ mod store_root_tests {
             .expect_err("a rebuild that cannot see the whole corpus must refuse");
         let msg = err.to_string();
         assert!(
-            msg.contains("refusing a full rebuild") && msg.contains("far="),
+            msg.contains("refusing a full rebuild") && msg.contains("far"),
             "the refusal must name the root: {msg}"
+        );
+        // The message crosses the MCP boundary verbatim, so it names the LABEL and nothing else —
+        // no absolute path, no OS error text. Those go to the log instead.
+        assert!(
+            !msg.contains(&far.display().to_string()),
+            "the error must not carry server paths: {msg}"
         );
         assert_eq!(
             Manifest::load(state.path()).files.len(),
@@ -7348,6 +7403,47 @@ mod store_root_tests {
         let fresh = tempfile::tempdir().unwrap();
         let stats = index_dir_at(&roots, fresh.path(), true).unwrap();
         assert_eq!(stats.added, 1, "the reachable root still indexes: {stats:?}");
+    }
+
+    /// The other half of the same failure: a root that is MOUNTED but lists nothing passes the
+    /// readability check, yet a reset still leaves its documents with nothing to compare against.
+    /// `--force` keeps its documented meaning (it is how a deliberate emptying sticks), but the
+    /// schema migration never asked to empty anything — it fires by itself after a version bump,
+    /// which is exactly when a share may still be coming up and nobody is watching.
+    #[test]
+    fn schema_migration_refuses_while_a_populated_root_lists_nothing() {
+        use crate::root::Root;
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("one.md"), "zeta one\n").unwrap();
+        let roots = vec![Root {
+            label: String::new(),
+            path: root.path().into(),
+        }];
+        index_dir_at(&roots, state.path(), true).unwrap();
+
+        // Pin the manifest to an older schema so the next pass is a migration, and empty the root
+        // the way a share that answers but has not mounted its content would.
+        let mut old = Manifest::load(state.path());
+        old.index_schema_version = 0;
+        old.save(state.path()).unwrap();
+        std::fs::remove_file(root.path().join("one.md")).unwrap();
+
+        let err = index_dir_at(&roots, state.path(), false)
+            .expect_err("an unattended migration must not rebuild over an empty root");
+        assert!(
+            err.to_string().contains("refusing the index schema migration"),
+            "{err}"
+        );
+        assert_eq!(
+            Manifest::load(state.path()).files.len(),
+            1,
+            "the doc is still on the books"
+        );
+
+        // `--force` is the operator saying they meant it, and still goes through.
+        index_dir_at(&roots, state.path(), true).unwrap();
+        assert!(Manifest::load(state.path()).files.is_empty());
     }
 
     #[test]
