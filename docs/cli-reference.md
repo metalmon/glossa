@@ -203,7 +203,7 @@ kb mcp dump-tz-tools [-d/--config-dir <DIR>]
 definitions (default `config_dir`: `eval/tensorzero/config`); equivalent to `just tools`.
 
 `kb mcp service install|uninstall|start|stop|status` installs and manages `kb` as an OS service
-(Windows SCM / Linux systemd), always streamable-http. `install` takes `--service-name`, a corpus
+(Windows SCM / Linux systemd), streamable-http by default. `install` takes `--service-name`, a corpus
 (positional or the global `--root`), `--bind`, `--profile`, repeatable `--allowed-host`, and
 `--vision`/`--dedup`/`--source-file`/`--no-graph`/`--trace`/`--session-idle-secs`/`--insecure`. The
 surface mirrors `kb mcp` one-for-one, so a command line that works interactively converts to a

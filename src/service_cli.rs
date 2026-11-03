@@ -128,7 +128,7 @@ pub struct InstallOpts {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 pub enum ServiceAction {
-    /// Install (register) a kb MCP service (always streamable-http).
+    /// Install (register) a kb MCP service (streamable-http unless `--transport` says otherwise).
     Install(InstallOpts),
     /// Remove a service.
     Uninstall(NameArg),
@@ -140,7 +140,8 @@ pub enum ServiceAction {
     Status(NameArg),
 }
 
-/// Build the [`ServiceSpec`] for a kb MCP service: transport is ALWAYS `streamable-http`, plus the
+/// Build the [`ServiceSpec`] for a kb MCP service: transport is `streamable-http` unless the
+/// operator named another, plus the
 /// profile/bind/allowed-host/vision/dedup options and the `--windows-service`/`--service-name` flags
 /// the SCM/systemd-launched process routes on. `program` is the `kb` executable path.
 ///
