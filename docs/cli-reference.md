@@ -205,9 +205,13 @@ definitions (default `config_dir`: `eval/tensorzero/config`); equivalent to `jus
 `kb mcp service install|uninstall|start|stop|status` installs and manages `kb` as an OS service
 (Windows SCM / Linux systemd), always streamable-http. `install` takes `--service-name`, a corpus
 (positional or the global `--root`), `--bind`, `--profile`, repeatable `--allowed-host`, and
-`--vision`/`--dedup`/`--source-file`/`--no-graph` (the tool-surface switches have no config-file
-form, so a service only has what `install` carries); the global `--config`/`--state-dir` are baked
-in too. Full guide:
+`--vision`/`--dedup`/`--source-file`/`--no-graph`/`--trace`/`--session-idle-secs`/`--insecure` —
+every `kb mcp` option except two, and the tool-surface switches have no config-file form, so a
+service only has what `install` carries. The two left out are left out by construction:
+`--transport`, because a service has no client or stdin under the SCM/systemd and a stdio service
+must stay unrepresentable, and `--auth-token`, because a service's command line is public (`ps`,
+and `systemctl cat` renders the unit world-readable) — pass `--auth-token-file` instead. The global
+`--config`/`--state-dir`/`--root` are baked in too. Full guide:
 [deploy/service.md](deploy/service.md#native-install-recommended--kb-mcp-service).
 
 Full tool table, profiles, and transports: [mcp.md](mcp.md). Deployment topology, TLS, systemd,

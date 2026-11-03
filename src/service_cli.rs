@@ -50,6 +50,22 @@ pub struct InstallOpts {
     /// Serve without the graph tools. Mirrors `kb mcp --no-graph`.
     #[arg(long = "no-graph")]
     pub no_graph: bool,
+    /// Log every tool call to `<root>/.glossa/traces/*.jsonl`. Mirrors `kb mcp --trace`.
+    #[arg(short = 't', long)]
+    pub trace: bool,
+    /// Drop an MCP session after this many idle seconds; `0` disables the timeout. Mirrors
+    /// `kb mcp --session-idle-secs` (and `[server].session_idle_secs`).
+    #[arg(long = "session-idle-secs")]
+    pub session_idle_secs: Option<u64>,
+    /// Override the startup interlock that refuses a non-loopback bind with no authentication.
+    /// Mirrors `kb mcp --insecure` (and `[server].insecure`): the server still warns loudly and
+    /// emits an audit event — this only decides whether it refuses to start.
+    #[arg(long = "insecure")]
+    pub insecure: Option<bool>,
+    /// Deprecated no-op, accepted so a working `kb mcp` command line can be turned into a service
+    /// command line unchanged. Images are off unless `--vision` is given.
+    #[arg(short = 'N', long = "noimage", hide = true)]
+    pub no_image: bool,
     /// Path to a file holding the bearer token for this service's `/mcp` endpoint.
     ///
     /// The token is NOT taken as a value here on purpose: a service's command line is public (`ps`,
@@ -192,6 +208,26 @@ pub fn kb_service_spec(
     if opts.no_graph {
         args.push("--no-graph".to_string());
     }
+    if opts.trace {
+        args.push("--trace".to_string());
+    }
+    if let Some(secs) = opts.session_idle_secs {
+        args.push("--session-idle-secs".to_string());
+        args.push(secs.to_string());
+    }
+    if let Some(v) = opts.insecure {
+        args.push("--insecure".to_string());
+        args.push(v.to_string());
+    }
+    // `--noimage` is deliberately NOT forwarded: it is a deprecated no-op, accepted here only so a
+    // `kb mcp` command line copies over verbatim. Baking a dead flag into ExecStart would outlive
+    // the flag itself.
+    //
+    // Two of `kb mcp`'s options stay out by construction, and neither is an oversight:
+    // `--transport`, because a service has no client or stdin under the SCM/systemd and a stdio
+    // service must stay unrepresentable; and `--auth-token`, because a service's command line is
+    // public (`ps`, and `systemctl cat` renders the unit world-readable), so the secret would leak
+    // to every local user — `--auth-token-file` carries the path instead.
     // The PATH goes into ExecStart, never the token itself — see `InstallOpts::auth_token_file`.
     // Absolute, because the rendered unit sets no WorkingDirectory: a relative path would resolve
     // against whatever the SCM/systemd happens to start the process in.
@@ -282,6 +318,10 @@ mod tests {
             dedup: true,
             source_file: false,
             no_graph: false,
+            trace: false,
+            session_idle_secs: None,
+            insecure: None,
+            no_image: false,
             auth_token_file: None,
             #[cfg(feature = "tls")]
             tls_cert: None,
@@ -395,14 +435,48 @@ mod tests {
         let mut o = opts(Some("/srv/corpus"));
         o.source_file = true;
         o.no_graph = true;
+        o.trace = true;
+        o.session_idle_secs = Some(900);
+        o.insecure = Some(true);
+        o.no_image = true;
         let s = kb_service_spec("glossa-x", "C:/kb/kb.exe".into(), &o, &[], None, None).unwrap();
-        for flag in ["--vision", "--dedup", "--source-file", "--no-graph"] {
+        for flag in [
+            "--vision",
+            "--dedup",
+            "--source-file",
+            "--no-graph",
+            "--trace",
+        ] {
             assert!(
                 s.args.iter().any(|a| a == flag),
                 "{flag} must reach ExecStart: {:?}",
                 s.args
             );
         }
+        assert!(s
+            .args
+            .windows(2)
+            .any(|w| w == ["--session-idle-secs", "900"]));
+        assert!(s.args.windows(2).any(|w| w == ["--insecure", "true"]));
+        // Accepted so a `kb mcp` command line copies over, but never baked: it is a dead flag.
+        assert!(
+            !s.args.iter().any(|a| a == "--noimage"),
+            "a deprecated no-op must not be written into ExecStart: {:?}",
+            s.args
+        );
+        // Out by construction, not by omission: a stdio service cannot exist, and a secret on a
+        // public command line is the thing `--auth-token-file` exists to avoid.
+        assert!(!s.args.iter().any(|a| a == "--auth-token"));
+        assert_eq!(
+            s.args
+                .windows(2)
+                .filter(|w| w[0] == "--transport")
+                .map(|w| w[1].as_str())
+                .collect::<Vec<_>>(),
+            vec!["streamable-http"],
+            "transport is fixed, never operator-chosen: {:?}",
+            s.args
+        );
 
         // ...and each one stays off unless asked for: a service must not quietly hand out the
         // original file bytes because the installer was generous.
@@ -410,7 +484,15 @@ mod tests {
         o.vision = false;
         o.dedup = false;
         let s = kb_service_spec("glossa-x", "C:/kb/kb.exe".into(), &o, &[], None, None).unwrap();
-        for flag in ["--vision", "--dedup", "--source-file", "--no-graph"] {
+        for flag in [
+            "--vision",
+            "--dedup",
+            "--source-file",
+            "--no-graph",
+            "--trace",
+            "--session-idle-secs",
+            "--insecure",
+        ] {
             assert!(
                 !s.args.iter().any(|a| a == flag),
                 "{flag} must not appear unasked: {:?}",

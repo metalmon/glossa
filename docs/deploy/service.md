@@ -30,6 +30,9 @@ kb mcp service install --service-name glossa-editor <corpus> \
     --vision            # enable image output in `read`; add --dedup for the anti-loop guard
     --source-file       # expose `get_source_file` (hands back the original file, not extracted text)
     # --no-graph        # serve without the graph tools
+    # --trace           # log every tool call to <root>/.glossa/traces/*.jsonl
+    # --session-idle-secs 900   # drop an idle MCP session; 0 disables
+    # --insecure true   # only to allow a non-loopback bind with no authentication
 
 kb mcp service start   glossa-editor
 kb mcp service status  glossa-editor      # → Running
