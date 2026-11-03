@@ -7402,7 +7402,10 @@ mod store_root_tests {
         // roots it can reach, so wiring up a share incrementally is not blocked.
         let fresh = tempfile::tempdir().unwrap();
         let stats = index_dir_at(&roots, fresh.path(), true).unwrap();
-        assert_eq!(stats.added, 1, "the reachable root still indexes: {stats:?}");
+        assert_eq!(
+            stats.added, 1,
+            "the reachable root still indexes: {stats:?}"
+        );
     }
 
     /// The other half of the same failure: a root that is MOUNTED but lists nothing passes the
@@ -7432,7 +7435,8 @@ mod store_root_tests {
         let err = index_dir_at(&roots, state.path(), false)
             .expect_err("an unattended migration must not rebuild over an empty root");
         assert!(
-            err.to_string().contains("refusing the index schema migration"),
+            err.to_string()
+                .contains("refusing the index schema migration"),
             "{err}"
         );
         assert_eq!(
