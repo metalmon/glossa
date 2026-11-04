@@ -575,9 +575,12 @@ mod tests {
     fn kb_service_spec_refuses_a_token_value_and_never_leaks_it() {
         let mut o = opts(Some("/srv/corpus"));
         o.auth_token = Some("s3cret".into());
-        let e = kb_service_spec("glossa-x", "C:/kb/kb.exe".into(), &o, &[], None, None)
-            .expect_err("a token value must not be installable");
-        let msg = e.to_string();
+        // Matched rather than `expect_err`: that needs `Debug` on the Ok type, and a spec that
+        // would carry a secret is the last struct to start printing itself in a panic message.
+        let msg = match kb_service_spec("glossa-x", "C:/kb/kb.exe".into(), &o, &[], None, None) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a token value must not be installable"),
+        };
         assert!(
             msg.contains("--auth-token-file"),
             "the refusal must point at the way that works: {msg}"
