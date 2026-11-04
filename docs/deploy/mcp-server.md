@@ -369,18 +369,42 @@ Change detection has two tiers, and both have a blind spot worth knowing about:
 Both cases are rare in practice (most editors and sync tools bump mtime and/or size on save), but
 when the served result looks stale and neither has caught up: **`kb index --force`** does a full,
 unscoped rebuild that re-stats every file regardless of the dirsig/manifest state, and is the
-escape hatch for both of these plus a stuck empty-mount hold (below).
+escape hatch for both of these plus a stuck empty-mount hold (below). It refuses to run while any
+root is unreadable — a rebuild that cannot see the whole corpus would drop what it cannot see.
 
 ### Empty-mount guard
 
-If a root's walk succeeds (no I/O error) but returns **zero files** for a root that previously had
-files, that's treated as a possibly-unmounted share rather than a corpus-side mass delete: the
-root's previously-indexed content is held at its last-known state instead of being erased, a
-warning is logged (`root walk returned zero files but was previously populated; holding stale
-index`), and `glossa_index_empty_mount_holds` (see [Ops endpoints](#ops-endpoints-streamable-http))
-goes non-zero. The hold clears automatically once the mount comes back and the walk finds files
-again. If the root was genuinely emptied on purpose, `kb index --force` resets the manifest before
-scanning (no "previously populated" state to compare against), so the empty state sticks.
+Dropping every document under a root is the one thing an indexing pass does that looks
+irreversible, so it requires **positive evidence that the files are gone**: the root reads back as
+a present, empty directory. Any other outcome — permission denied, a share that stopped answering,
+a path that is no longer there — is absence of evidence, and holds. The root's previously-indexed
+content stays at its last-known state instead of being erased, a warning naming the root and the
+reason is logged, and `glossa_index_empty_mount_holds` (see
+[Ops endpoints](#ops-endpoints-streamable-http)) goes non-zero. The hold clears by itself once the
+root answers again.
+
+Earlier versions gated this on "the root directory is still physically present", which reads as the
+right test and is not: the check answers *false* for every stat failure, so the guard switched
+itself off in exactly the situation it exists for — an unreachable share — and the root's documents
+were erased with no metric, no exit code and nothing in the log, while `/ready` kept answering
+`ready`. If you are on a build before this changed, treat a sudden drop in
+`glossa_index_chunks` after a service restart as that.
+
+**A rebuild is refused while any root is unreadable.** `kb index --force` starts from an empty
+manifest — which is precisely what disarms the guard, since there is no "previously populated"
+state left to compare against — so it now stops before touching the index and names the roots it
+could not read. The same refusal covers the two unattended paths: the MCP `index` tool's
+`force=true` (a client can ask for it) and the index-schema migration that runs by itself on the
+first pass after a version upgrade. The schema migration additionally refuses when a
+previously-populated root comes back **empty but readable** — `--force` is the operator saying they
+meant it, a migration never asked to empty anything.
+
+So the escape hatch still exists and still works: if a root was genuinely emptied or removed on
+purpose, make it reachable (or drop it from the corpus) and run `kb index --force` — the reset then
+makes the empty state stick.
+
+Refusals that cross the MCP boundary name the root **label** only; the absolute path and the OS
+error text go to the log, where the operator is.
 
 ### Scoped rescan
 

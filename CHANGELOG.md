@@ -4,6 +4,61 @@ All notable changes to glossa are documented here. Release tags ship **`kb`**, *
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.7] — 2026-11-04
+
+### Fixed
+
+- **A corpus root that cannot be read no longer loses its documents from the index.** Found end to
+  end against an SMB-hosted corpus: a service whose logon account could not reach the share erased
+  every document of that root from the index and the manifest — silently. No metric moved, no exit
+  code, nothing an operator sees in the log; `/ready` still answered `ready` and
+  `glossa_index_warm` stayed `1`, while search over the network half of the corpus returned
+  nothing. The empty-mount guard was gated on "the root directory is still physically present",
+  which reads as the right test and is not: it answers *false* for every stat failure, so the guard
+  switched itself off in exactly the situation it was written for. Dropping a whole root now
+  requires positive evidence that the files are gone — the root reads back as a present, empty
+  directory — and anything else holds the index and logs the reason. Holding a genuinely deleted
+  root costs a stale index until `kb index --force`; dropping an unreachable one costs the corpus.
+- **A full rebuild refuses while any root is unreadable.** `--force` starts from an empty manifest,
+  which is what disarms the guard, so it now stops before touching the index and names the roots it
+  could not read. The check lives in the indexing path rather than the CLI, because `kb index
+  --force` is not the only way in: the MCP `index` tool takes `force=true` from a client, and the
+  index-schema migration runs by itself on the first pass after an upgrade. The migration also
+  refuses when a previously-populated root comes back empty but readable — `--force` is the operator
+  saying they meant it, a migration never asked to empty anything. A manifest with nothing in it is
+  exempt, so a first pass still indexes the roots it can reach and names the ones it cannot.
+- **Refusals that cross the MCP boundary no longer carry server paths.** The error named absolute
+  root paths and the OS's reason for refusing them, which can name an account or a host. It now
+  carries labels; the detail goes to the log.
+- **`kb mcp service install` accepts a `--config` role file as the whole corpus specification.** It
+  demanded `--root` on top, which meant stating the corpus twice in two places that drift — and
+  roots that drift re-key every document. The file is now read at install time and must name at
+  least one root, rather than leaving the service to fall back on discovery from whatever directory
+  the service manager started it in.
+- **`kb mcp service start` no longer blames elevation for a start the service manager refused.** It
+  answered "run elevated (Administrator)" from an already-elevated console; the real cause was the
+  service's logon account having no access to the image. Opening a handle and launching a process
+  both fail with `ERROR_ACCESS_DENIED` and mean different things. The message now names the likely
+  cause and `sc.exe qc`; `1069` (logon rejected — the password is stored at install time and does
+  not follow a password change) and `1053` (started but never signalled) get their own lines.
+- **`.ignore` is seeded under every corpus root, not just the primary one.** On a multi-root corpus
+  every other root — typically the big shared one — was walking without the default type whitelist.
+  A root that cannot be written says so once instead of looking like a root that already had one.
+- **`[logging] level = "info"` no longer un-quiets the noisy library targets.** `EnvFilter`
+  replaces the whole directive set, so a bare level turned the indexer library's per-segment
+  chatter back on and buried `kb index`'s own output under it.
+
+### Added
+
+- **`kb mcp service install` mirrors `kb mcp` one-for-one.** `--source-file`, `--no-graph`,
+  `--trace`, `--session-idle-secs` and `--insecure` were missing, and the tool-surface switches have
+  no deployment-config form to fall back on — so `get_source_file` could not be enabled for a
+  service by any route at all, and the operator just got "unexpected argument". `--transport` is
+  accepted too: `stdio` installs a service with no client or stdin under the SCM/systemd, and
+  `install` says so before doing it. `--auth-token` is accepted and then **refused** with the reason
+  and the route that works: honouring a token value means writing it into a command line every local
+  account can read, for the life of the service — `--auth-token-file` bakes only the path.
+
 ## [0.5.6] — 2026-10-15
 
 ### Added
