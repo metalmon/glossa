@@ -43,6 +43,15 @@ pub fn walk_files(
     let mut wb = WalkBuilder::new(root);
     wb.standard_filters(respect_ignore);
     wb.require_git(!respect_ignore);
+    // Ignore patterns match without regard to case, because the seeded `.ignore` is a WHITELIST
+    // (`default_ignore.rs`): every supported type is re-included by one `!*.ext` line, and with
+    // case-sensitive matching `!*.pdf` does not re-include `REPORT.PDF`, so `*` keeps it and the
+    // file is never walked at all — silently, since the walk is what drops it and no extractor is
+    // ever asked. Found in our own `kb-abac`: four `.PDF` certificates on disk, absent from the
+    // manifest for years. The trade is that a corpus's own hand-written exclusion becomes
+    // case-insensitive too; that is the right way round, since the alternative loses documents, and
+    // it matches the filesystem on the Windows deployments anyway.
+    wb.ignore_case_insensitive(true);
     wb.filter_entry(|e| e.file_name() != ".glossa" && !is_junk_file(e.file_name()));
     for result in wb.build() {
         let entry = match result {
@@ -90,6 +99,34 @@ pub fn collect_chunks(
 #[cfg(test)]
 mod cover_tests {
     use super::*;
+
+    /// The seeded `.ignore` is a whitelist, so a case-sensitive match drops an UPPERCASE extension
+    /// before any extractor is asked — the walk is what loses it, silently. Four `.PDF` files in
+    /// `kb-abac` were missing from its manifest for exactly this reason.
+    #[test]
+    fn whitelisted_extension_is_matched_regardless_of_case() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".ignore"),
+            crate::default_ignore::DEFAULT_IGNORE,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("lower.md"), b"# a\nalpha\n").unwrap();
+        std::fs::write(dir.path().join("UPPER.MD"), b"# b\nbeta\n").unwrap();
+
+        let mut seen: Vec<String> = Vec::new();
+        walk_files(dir.path(), None, true, &mut |p| {
+            seen.push(p.file_name().unwrap().to_string_lossy().into_owned());
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(seen.contains(&"lower.md".to_string()), "got: {seen:?}");
+        assert!(
+            seen.contains(&"UPPER.MD".to_string()),
+            "an uppercase extension must be whitelisted too, got: {seen:?}"
+        );
+    }
 
     #[test]
     fn collect_indexes_text_json_code_and_images() {
