@@ -9,16 +9,17 @@ use crate::graph::ontology::Ontology;
 // out of the box rerank reorders the same 50 hits rather than pooling deeper.
 pub const DEFAULT_POOL_SIZE: usize = 50;
 
-/// How many hits the AGENT's `search` tool returns when the call names no `limit` and the corpus
-/// configures none — the depth a reader actually sees in production. Named rather than repeated so
-/// a harness measuring "what can production surface" reads that depth instead of picking its own.
-/// (`kb search -l` defaults higher: it prints to a human, who scrolls.)
+/// How many hits a `search` returns when the call names no `limit` and the corpus configures none
+/// — the depth a reader actually sees in production. Named rather than repeated so a harness
+/// measuring "what can production surface" reads that depth instead of picking its own. `kb search`
+/// uses this same default: its own larger one widened the rerank pool via `pool_size.max(limit)`
+/// and made the CLI and the agent tool rank different candidate sets.
 pub const DEFAULT_SEARCH_LIMIT: usize = 50;
 
 /// Per-corpus `[retrieval].search_limit` (env `GLOSSA_SEARCH_LIMIT`), or `None` when the corpus
-/// sets none. Returned as an `Option` on purpose: each entry point keeps its OWN fallback — the
-/// agent tool's is [`DEFAULT_SEARCH_LIMIT`], the human CLI's is deliberately larger — so adding
-/// this knob changes nothing for a corpus that does not set it.
+/// sets none. Returned as an `Option` on purpose: the entry point supplies the fallback, so adding
+/// this knob changes nothing for a corpus that does not set it. Both the agent tool and
+/// `kb search` fall back to [`DEFAULT_SEARCH_LIMIT`] — they must agree, or rerank pools differ.
 pub fn resolve_search_limit(glossa_dir: &Path) -> Option<usize> {
     env_usize("GLOSSA_SEARCH_LIMIT")
         .or_else(|| {
@@ -169,9 +170,41 @@ impl RerankConfig {
     }
 }
 
+/// The search depth an entry point uses when its caller named no `limit`: the corpus's
+/// `[retrieval].search_limit`, else [`DEFAULT_SEARCH_LIMIT`].
+///
+/// Every entry point MUST go through this rather than keeping a fallback of its own. The depth is
+/// not merely how many rows come back: `retrieve_with` sizes the rerank pool as
+/// `pool_size.max(limit)`, so an entry point with a larger fallback silently reranks a larger
+/// candidate set and returns a different TOP ordering for the same query and index. That is exactly
+/// what `kb search` (fallback 100) did against the agent's `search` tool (fallback 50) until both
+/// were routed here.
+pub fn search_limit_or_default(glossa_dir: &Path) -> usize {
+    resolve_search_limit(glossa_dir).unwrap_or(DEFAULT_SEARCH_LIMIT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The CLI and the agent tool must resolve the same depth from the same corpus, or rerank
+    /// reorders different candidate pools and their top hits disagree.
+    #[test]
+    fn search_depth_falls_back_to_the_one_shared_default() {
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("GLOSSA_SEARCH_LIMIT");
+        let dir = tempfile::tempdir().unwrap();
+        let glossa_dir = dir.path().join(".glossa");
+        std::fs::create_dir_all(&glossa_dir).unwrap();
+        assert_eq!(resolve_search_limit(&glossa_dir), None);
+        assert_eq!(
+            search_limit_or_default(&glossa_dir),
+            DEFAULT_SEARCH_LIMIT,
+            "an unconfigured corpus must give every entry point the same depth"
+        );
+    }
 
     #[test]
     fn defaults_off_when_no_ontology() {

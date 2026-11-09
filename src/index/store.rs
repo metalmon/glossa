@@ -1787,11 +1787,12 @@ pub fn index_file_into(
     doc_key: &str,
     abs_path: &Path,
     links: &mut Vec<(String, String)>,
-    // `Some` ONLY on the full-coverage (`--force`) rebuild, which accumulates the grounding DF
-    // table over EVERY document. Incremental/single-file/scoped passes pass `None`: a DfTable has
-    // no per-source decrement, so merging just the changed docs into the existing sidecar would
-    // double-count modified files and never subtract removed ones, inflating df/n_chunks over a
-    // long-lived server's uptime. The sidecar is therefore refreshed only by `kb index --force`.
+    // `Some` ONLY on a full-coverage rebuild — `--force` or a schema migration — which accumulates
+    // the grounding DF table over EVERY document. Incremental/single-file/scoped passes pass `None`:
+    // a DfTable has no per-source decrement, so merging just the changed docs into the existing
+    // sidecar would double-count modified files and never subtract removed ones, inflating
+    // df/n_chunks over a long-lived server's uptime. The sidecar is therefore refreshed only by
+    // those two passes.
     mut df: Option<&mut crate::gate::df::DfTable>,
 ) -> anyhow::Result<Option<FileSig>> {
     // A stat error propagates (rather than being swallowed to `Ok(None)`): the caller's
@@ -2089,17 +2090,29 @@ pub fn index_dir_at_locked(
     }
     let idx = DocIndex::open_or_create_at(roots, state_base)?;
     let graph = crate::graph::store::GraphStore::open(state_base)?;
-    if force {
+    // Both full-coverage passes drop the auto layer wholesale and let the walk rebuild it. A schema
+    // migration needs this as much as `--force` does, and for a reason easy to miss: the branch
+    // above clears `manifest.files` BEFORE the delta is computed, so `delta.removed` (manifest files
+    // no longer on disk) comes back EMPTY. Without this, every migration strands the auto Sections
+    // and edges of files deleted since the last pass — dangling nodes that `graph doctor`/`prune`
+    // then act on. Coverage is sound either way: with the manifest cleared, the pass re-extracts and
+    // re-builds every document.
+    if force || schema_migrate {
         graph.delete_auto()?;
     }
     let df_path = crate::gate::df::DfTable::sidecar_path(&state_base.join(".glossa"));
-    // The grounding DF sidecar is (re)built ONLY on the full-coverage `--force` rebuild, which
-    // re-extracts EVERY document (delta.changed = all files, since the manifest was reset above) so
-    // the table accumulates over the whole corpus. Incremental passes leave `df = None` and never
-    // touch the sidecar: DfTable has no per-source decrement, so merging only the changed docs would
-    // double-count edits and never subtract removals, inflating df/n_chunks over uptime. A stale
-    // sidecar is corrected by `kb index --force` (see the note in that command's help).
-    let mut df = if force {
+    // The grounding DF sidecar is (re)built on a full-coverage pass, which re-extracts EVERY
+    // document (delta.changed = all files, since the manifest was reset above) so the table
+    // accumulates over the whole corpus. That is `--force` AND a schema migration: the migration
+    // branch above clears `manifest.files`/`notes` and drops the index directory, so its coverage is
+    // identical to force's — and it is the pass that exists precisely because stored bodies changed.
+    // Without it a migration rewrote every chunk body while leaving df/n_chunks describing the OLD
+    // corpus, which is the stale-prior bug a bump is supposed to prevent.
+    // Incremental passes leave `df = None` and never touch the sidecar: DfTable has no per-source
+    // decrement, so merging only the changed docs would double-count edits and never subtract
+    // removals, inflating df/n_chunks over uptime. A stale sidecar is corrected by
+    // `kb index --force` (see the note in that command's help).
+    let mut df = if force || schema_migrate {
         Some(crate::gate::df::DfTable::new())
     } else {
         None
@@ -2307,8 +2320,8 @@ pub fn index_dir_at_locked(
     write_dirsig(state_base, &settled_dirsig(&cur, &stored, &unsettled));
     // Sidecar serialization is a distinct, potentially slow phase on a large vocabulary — flag it
     // explicitly rather than let it pass silently inside the (already-finished) index loop above.
-    // Only the full `--force` rebuild produced a DF table (`Some`); incremental passes leave the
-    // existing sidecar untouched (see the `df` binding above).
+    // Only a full-coverage pass produced a DF table (`Some`) — `--force` or a schema migration;
+    // incremental passes leave the existing sidecar untouched (see the `df` binding above).
     if let Some(df) = &df {
         eprintln!(
             "writing DF sidecar: {} tokens over {} chunks...",
@@ -2911,7 +2924,8 @@ pub fn reindex_dirs_at_locked(
         // Skip (don't abort the freshen on) a single corrupt/unreadable file — mirrors the
         // resilience of the `kb index` walk.
         let res = with_read_retry(max_retries, backoff, || {
-            // Freshen never touches the DF sidecar (df: None) — only `kb index --force` rebuilds it.
+            // Freshen never touches the DF sidecar (df: None) — only a full-coverage pass
+            // (`kb index --force`, or a schema migration) rebuilds it.
             index_file_into(&idx, &graph, &writer, doc_key_str, abs, &mut links, None)
         });
         match res {
@@ -6022,6 +6036,13 @@ mod tests {
         assert!(idx.index.schema().get_field("body_trigrams").is_ok());
         let hits = idx.search("hello", 5).unwrap();
         assert!(!hits.is_empty());
+        // A migration re-extracts every document, so the grounding DF sidecar it leaves behind must
+        // describe the NEW bodies. It used to be built only under `--force`, which left the gate's
+        // rarity priors describing the pre-migration corpus forever.
+        assert!(
+            crate::gate::df::DfTable::sidecar_path(&dir.path().join(".glossa")).exists(),
+            "a schema migration must rebuild the DF sidecar, not just the index"
+        );
     }
 
     #[test]
