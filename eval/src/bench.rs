@@ -960,9 +960,11 @@ mod tests {
     #[test]
     fn an_unmeasured_peak_rss_says_so_rather_than_showing_zero() {
         // On Windows there is no peak RSS; a row showing "0 MiB" would be a false claim.
+        // The cell is matched whole — a bare `contains("0 MiB")` also matches the largest-file
+        // column's "16.0 MiB", which is how the first version of this assertion failed.
         let row = sample_report().to_markdown_row();
-        assert!(row.contains("not measured"), "{row}");
-        assert!(!row.contains("0 MiB |"), "{row}");
+        assert!(row.contains("| not measured |"), "{row}");
+        assert!(!row.contains("| 0 MiB |"), "{row}");
     }
 
     #[test]
