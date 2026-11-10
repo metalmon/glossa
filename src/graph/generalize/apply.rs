@@ -10,7 +10,7 @@
 
 use super::{centrality, closure, community, linkpred, merge, similarity, Triple};
 use crate::graph::ontology::Ontology;
-use crate::graph::store::{Edge, GraphStore, NodeMeta, Provenance};
+use crate::graph::store::{Edge, GraphStore, Node, NodeMeta, Provenance};
 use std::collections::{HashMap, HashSet};
 
 const SIMILAR: &str = "SIMILAR";
@@ -200,12 +200,22 @@ pub fn generalize(g: &GraphStore, opts: &Opts) -> anyhow::Result<Report> {
             })
             .or_insert(s);
     };
-    for (a, b, s) in linkpred::jaccard_pairs(&edges, opts.similar_threshold) {
-        bump(a, b, s);
-    }
-    let labels: Vec<(String, String)> = nodes
+    // Both SIMILAR arms pair REASONING nodes only. The ontology's structural types carry no
+    // reasoning, and a SIMILAR edge between two sections is noise retrieval already de-weights
+    // (`[retrieval].sim_weight`) — while the pairing loop is quadratic in whatever it is given, and
+    // a document corpus has one `Section` per chunk. Measured before this filter reached the
+    // topology arm: 11.8 s at 10k nodes and 289 s at 37k, for 4 to 64 section-to-section edges.
+    let reasoning_nodes: Vec<&Node> = nodes
         .iter()
         .filter(|n| !opts.structural.iter().any(|s| s == &n.node_type))
+        .collect();
+    let pairable: std::collections::HashSet<String> =
+        reasoning_nodes.iter().map(|n| n.id.clone()).collect();
+    for (a, b, s) in linkpred::jaccard_pairs(&edges, opts.similar_threshold, &pairable) {
+        bump(a, b, s);
+    }
+    let labels: Vec<(String, String)> = reasoning_nodes
+        .iter()
         .map(|n| (n.id.clone(), n.label.clone()))
         .collect();
     for (a, b, s) in similarity::label_bm25(&labels, opts.bm25_min_ratio, opts.bm25_top_k)? {

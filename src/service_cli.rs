@@ -314,9 +314,11 @@ pub fn kb_service_spec(
         args.push(flag.to_string());
         args.push(abs.to_string_lossy().into_owned());
     }
-    args.push("--windows-service".to_string());
-    args.push("--service-name".to_string());
-    args.push(name.to_string());
+    // `--windows-service`/`--service-name` are NOT baked here: they are what an SCM-launched
+    // process routes on, and `ServiceSpec::scm_launch_args` adds them at install time on Windows.
+    // A systemd unit must not carry them — the flag tells `run_serve` not to handle signals, which
+    // drops the SIGHUP handler, and `docs/deploy/mcp-server.md` already documents the flag as
+    // SCM-only ("only the SCM should launch that flag").
     Ok(ServiceSpec {
         name: name.to_string(),
         display_name: format!("Glossa MCP ({name})"),
@@ -454,11 +456,13 @@ mod tests {
         // --vision and --dedup are baked when requested.
         assert!(s.args.iter().any(|a| a == "--vision"));
         assert!(s.args.iter().any(|a| a == "--dedup"));
-        assert!(s.args.iter().any(|a| a == "--windows-service"));
-        assert!(s
-            .args
-            .windows(2)
-            .any(|w| w == ["--service-name", "glossa-x"]));
+        // The SCM flags are not baked into the spec — they are added per-platform at install
+        // time, so a systemd unit's ExecStart is the plain serve command line.
+        assert!(!s.args.iter().any(|a| a == "--windows-service"));
+        assert!(!s.args.iter().any(|a| a == "--service-name"));
+        let scm = s.scm_launch_args();
+        assert!(scm.iter().any(|a| a == "--windows-service"));
+        assert!(scm.windows(2).any(|w| w == ["--service-name", "glossa-x"]));
     }
 
     #[test]

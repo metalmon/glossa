@@ -87,6 +87,13 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Measure what extraction costs: index one corpus with an already-built `kb`, time it per
+    /// file, read back what it left in the index, and emit one `docs/benchmarks.md` row. Drives the
+    /// binary as a child process on purpose — the thing measured is the thing shipped.
+    Bench {
+        #[command(subcommand)]
+        cmd: BenchCmd,
+    },
     /// Score a dataset against a corpus (`run`), or calibrate the answer-grounding gate's
     /// verify-threshold from a past run (`calibrate`).
     Eval {
@@ -808,6 +815,75 @@ fn run_download(
 /// `kbx eval` subcommands: `run` is the former flat `kbx eval <path>` (BREAKING: now `kbx eval run
 /// <path>`), added alongside `calibrate` (the answer-grounding gate's verify-threshold sweep,
 /// `kb_eval::calibrate::run`) so `eval` can host both without a name clash.
+/// `bench` hosts the measurement verbs. Today only `extract`, which is phase 1 of the
+/// omnivorous-extraction design: a baseline every later phase reports its delta against.
+#[derive(Subcommand)]
+enum BenchCmd {
+    /// Index a corpus with an already-built `kb` and report what it cost.
+    Extract(BenchExtractArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct BenchExtractArgs {
+    /// Corpus to measure. Pass a COPY of a real corpus: a `--force` pass rebuilds its index, and
+    /// on a corpus whose manifest predates the current schema it also migrates it.
+    corpus: PathBuf,
+    /// The `kb` binary to measure — a CI artifact, not a local build.
+    #[arg(long)]
+    bin: PathBuf,
+    /// Generate a synthetic corpus at `corpus` first, with this many documents.
+    #[arg(long)]
+    generate: Option<usize>,
+    /// Seed for `--generate`. The same seed must give a byte-identical corpus, or a phase-to-phase
+    /// delta measures the corpus instead of the code.
+    #[arg(long, default_value_t = 1)]
+    seed: u64,
+    /// With `--generate`, append five files doubling from 1 MiB to 16 MiB — the per-file-size
+    /// ceiling, and the memory evidence on platforms where peak RSS is not measured.
+    #[arg(long)]
+    ladder: bool,
+    /// Ladder sizes in MiB instead of the default doubling, e.g. `--ladder-sizes 8,10,12,14,16` to
+    /// bisect a step one doubling jumped over, or `32,64` to go past the top of it. Implies
+    /// `--ladder`; sizes need not double, and `--generate 0 --ladder-sizes …` measures the ladder
+    /// alone, which is what a replication of one large file costs least as.
+    #[arg(long, value_delimiter = ',')]
+    ladder_sizes: Vec<u64>,
+    /// How many distinct words the generated prose draws from, Zipf-weighted. The default 32 makes
+    /// a corpus with enormous posting lists and near-duplicate text — a pathological shape for an
+    /// inverted index, and the reason the first tail measurements could not be told apart from a
+    /// corpus-size effect. Pass something realistic (tens of thousands) to separate the two: the
+    /// byte count and chunk count do not change.
+    #[arg(long)]
+    vocab: Option<usize>,
+    /// Token to sample `df(token)/n_chunks` for, repeatable. Supplied rather than discovered so
+    /// successive phases compare the same ratio; defaults to the generator's planted markers.
+    ///
+    /// ASCII only, in practice: a non-ASCII argument does not survive argv to a native Windows
+    /// binary (it arrives as one replacement char per cp1251 byte). Use `--df-tokens-file` for a
+    /// Russian corpus — which is most of them.
+    #[arg(long = "df-token")]
+    df_tokens: Vec<String>,
+    /// Read the tokens from a UTF-8 file instead, one per line (`#` comments and blanks skipped).
+    /// This is the only way to sample a Cyrillic token on Windows.
+    #[arg(long)]
+    df_tokens_file: Option<PathBuf>,
+    /// How many `kb read` calls to time. The spec requires the read path, not only indexing.
+    #[arg(long, default_value_t = 20)]
+    reads: usize,
+    /// Index incrementally instead of with `--force`.
+    #[arg(long)]
+    no_force: bool,
+    /// Write a tiny `zz-tail-sentinel/tiny.md` into the corpus first, so that every file it already
+    /// holds gets a real per-file duration and the row's Tail is the finalize alone. **Only on a
+    /// corpus that exists to be measured** — a generated one, or a copy from `just bench-copy`: it
+    /// adds a document and a chunk.
+    #[arg(long)]
+    tail_sentinel: bool,
+    /// Write the full JSON report here as well as printing the markdown row.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
 #[derive(Subcommand)]
 enum EvalCmd {
     /// Score a dataset against a corpus (the former `kbx eval <path>`).
@@ -873,6 +949,9 @@ fn main() -> Result<()> {
             cli_fmt::summary(&[("workspace", paths.kbx_dir.display().to_string())]);
             Ok(())
         }
+        Cmd::Bench {
+            cmd: BenchCmd::Extract(args),
+        } => run_bench_extract(args),
         Cmd::Eval {
             cmd: EvalCmd::Run(args),
         } => run_eval(args),
@@ -1522,6 +1601,112 @@ fn verdict_score(v: Verdict) -> f32 {
         Verdict::Partial => 0.5,
         Verdict::Wrong | Verdict::Unscored => 0.0,
     }
+}
+
+fn run_bench_extract(args: BenchExtractArgs) -> Result<()> {
+    if let Some(files) = args.generate {
+        let ladder_mib = if !args.ladder_sizes.is_empty() {
+            args.ladder_sizes.clone()
+        } else if args.ladder {
+            kb_eval::bench::DEFAULT_LADDER_MIB.to_vec()
+        } else {
+            Vec::new()
+        };
+        let stats = kb_eval::bench::generate_corpus(
+            &args.corpus,
+            &kb_eval::bench::CorpusSpec {
+                files,
+                seed: args.seed,
+                ladder_mib,
+                vocab_words: args.vocab.unwrap_or(kb_eval::bench::DEFAULT_VOCAB_WORDS),
+            },
+        )?;
+        cli_fmt::summary(&[
+            ("generated", stats.files.to_string()),
+            ("bytes", stats.bytes.to_string()),
+            ("largest", stats.largest.to_string()),
+        ]);
+    }
+
+    if args.tail_sentinel {
+        let n = kb_eval::bench::write_tail_sentinel(&args.corpus)?;
+        cli_fmt::summary(&[("tail sentinel", format!("{n} bytes"))]);
+    }
+
+    // A file wins over repeated flags: it is the only path that carries a Cyrillic token intact.
+    let from_file: Vec<String> = match &args.df_tokens_file {
+        Some(p) => std::fs::read_to_string(p)
+            .with_context(|| format!("read {}", p.display()))?
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(str::to_string)
+            .collect(),
+        None => Vec::new(),
+    };
+
+    // Default to the markers the generator plants, so a generated corpus needs no flags and a real
+    // corpus is told explicitly which of its own terms to track.
+    let df_tokens: Vec<String> = if !from_file.is_empty() {
+        from_file
+    } else if args.df_tokens.is_empty() {
+        kb_eval::bench::PLANTED_TOKENS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        args.df_tokens
+    };
+
+    let report = kb_eval::bench::measure(&kb_eval::bench::BenchOpts {
+        bin: args.bin,
+        corpus: args.corpus,
+        df_tokens,
+        reads: args.reads,
+        force: !args.no_force,
+    })?;
+
+    if let Some(out) = &args.out {
+        std::fs::write(out, report.to_json())
+            .with_context(|| format!("write {}", out.display()))?;
+    }
+
+    // The header goes to stderr and the row to stdout, so appending a row to the benchmarks log is
+    // a plain shell redirect while the human still sees what the columns mean.
+    eprintln!("{}", kb_eval::bench::BenchReport::markdown_header());
+    println!("{}", report.to_markdown_row());
+
+    // The tail, by name, on stderr: a p95 without the file behind it cannot be acted on, and the
+    // table has no room for a path. Tokens are echoed with their ratios for the same reason — a
+    // per-token number is only trustworthy next to the token it was computed for, and a non-ASCII
+    // one does not survive argv on Windows.
+    if !report.slowest.is_empty() {
+        eprintln!(
+            "
+slowest files:"
+        );
+        for (key, ms) in &report.slowest {
+            eprintln!("  {ms:>7} ms  {key}");
+        }
+    }
+    if !report.df_ratio_sample.is_empty() {
+        eprintln!(
+            "
+df(token)/n_chunks:"
+        );
+        for (tok, ratio) in &report.df_ratio_sample {
+            eprintln!("  {ratio:>12.6}  {tok}");
+        }
+    }
+
+    if !report.exit_ok {
+        eprintln!(
+            "\nthe measured run FAILED; last stderr lines:\n{}",
+            report.stderr_tail
+        );
+        anyhow::bail!("kb index exited non-zero — the row above is marked FAILED, not a baseline");
+    }
+    Ok(())
 }
 
 fn run_eval(args: EvalArgs) -> Result<()> {

@@ -258,9 +258,10 @@ enum Cmd {
     Index {
         /// Knowledge-base directory (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
-        /// Full rebuild from scratch. This is also the ONLY pass that (re)builds the answer-grounding
-        /// DF sidecar (`.glossa/df`): incremental indexing never refreshes it, so run `--force` after
-        /// large corpus changes to keep the `verify` gate's rarity counts accurate.
+        /// Full rebuild from scratch. This and a schema migration are the only passes that
+        /// (re)build the answer-grounding DF sidecar (`.glossa/df`): incremental indexing never
+        /// refreshes it, so run `--force` after large corpus changes to keep the `verify` gate's
+        /// rarity counts accurate.
         #[arg(long)]
         force: bool,
         /// Reindex just this one document (path relative to the corpus root) — picks up an in-place
@@ -1656,12 +1657,15 @@ fn main() -> anyhow::Result<()> {
         } => {
             let rr = resolve_inputs(path, &root_flags, state_dir.clone())?;
             let glossa_dir = rr.state_base.join(".glossa");
-            // `-l` wins; then the corpus's `[retrieval].search_limit`; then this command's own
-            // default, which stays larger than the agent tool's — this output goes to a human who
-            // scrolls, not into a context window.
-            let limit = limit.unwrap_or_else(|| {
-                glossa::retrieve::config::resolve_search_limit(&glossa_dir).unwrap_or(100)
-            });
+            // `-l` wins; then the corpus's `[retrieval].search_limit`; then the SAME default the
+            // agent's `search` tool uses. This used to be a larger number (100) on the grounds that
+            // the CLI prints to a human who scrolls — but `retrieve_with` sizes the rerank pool as
+            // `pool_size.max(limit)`, so a bigger display limit silently reranked a bigger candidate
+            // set and `kb search` returned a different TOP ordering than the MCP tool for the same
+            // query and index. The depth is a retrieval property, not a display one; a human who
+            // wants more rows passes `-l`, which widens the pool deliberately on both paths.
+            let limit = limit
+                .unwrap_or_else(|| glossa::retrieve::config::search_limit_or_default(&glossa_dir));
             let pretty = match format {
                 OutputFormat::Pretty => true,
                 OutputFormat::Rg => false,

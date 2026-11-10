@@ -1316,8 +1316,7 @@ fn collect_dir_mtimes(
     map: &mut BTreeMap<String, u128>,
 ) {
     let mut wb = WalkBuilder::new(base);
-    wb.standard_filters(respect_ignore);
-    wb.require_git(!respect_ignore);
+    crate::walk::configure_ignore(&mut wb, respect_ignore);
     wb.filter_entry(|e| e.file_name() != ".glossa");
     for result in wb.build() {
         let entry = match result {
@@ -1787,11 +1786,12 @@ pub fn index_file_into(
     doc_key: &str,
     abs_path: &Path,
     links: &mut Vec<(String, String)>,
-    // `Some` ONLY on the full-coverage (`--force`) rebuild, which accumulates the grounding DF
-    // table over EVERY document. Incremental/single-file/scoped passes pass `None`: a DfTable has
-    // no per-source decrement, so merging just the changed docs into the existing sidecar would
-    // double-count modified files and never subtract removed ones, inflating df/n_chunks over a
-    // long-lived server's uptime. The sidecar is therefore refreshed only by `kb index --force`.
+    // `Some` ONLY on a full-coverage rebuild — `--force` or a schema migration — which accumulates
+    // the grounding DF table over EVERY document. Incremental/single-file/scoped passes pass `None`:
+    // a DfTable has no per-source decrement, so merging just the changed docs into the existing
+    // sidecar would double-count modified files and never subtract removed ones, inflating
+    // df/n_chunks over a long-lived server's uptime. The sidecar is therefore refreshed only by
+    // those two passes.
     mut df: Option<&mut crate::gate::df::DfTable>,
 ) -> anyhow::Result<Option<FileSig>> {
     // A stat error propagates (rather than being swallowed to `Ok(None)`): the caller's
@@ -2089,17 +2089,29 @@ pub fn index_dir_at_locked(
     }
     let idx = DocIndex::open_or_create_at(roots, state_base)?;
     let graph = crate::graph::store::GraphStore::open(state_base)?;
-    if force {
+    // Both full-coverage passes drop the auto layer wholesale and let the walk rebuild it. A schema
+    // migration needs this as much as `--force` does, and for a reason easy to miss: the branch
+    // above clears `manifest.files` BEFORE the delta is computed, so `delta.removed` (manifest files
+    // no longer on disk) comes back EMPTY. Without this, every migration strands the auto Sections
+    // and edges of files deleted since the last pass — dangling nodes that `graph doctor`/`prune`
+    // then act on. Coverage is sound either way: with the manifest cleared, the pass re-extracts and
+    // re-builds every document.
+    if force || schema_migrate {
         graph.delete_auto()?;
     }
     let df_path = crate::gate::df::DfTable::sidecar_path(&state_base.join(".glossa"));
-    // The grounding DF sidecar is (re)built ONLY on the full-coverage `--force` rebuild, which
-    // re-extracts EVERY document (delta.changed = all files, since the manifest was reset above) so
-    // the table accumulates over the whole corpus. Incremental passes leave `df = None` and never
-    // touch the sidecar: DfTable has no per-source decrement, so merging only the changed docs would
-    // double-count edits and never subtract removals, inflating df/n_chunks over uptime. A stale
-    // sidecar is corrected by `kb index --force` (see the note in that command's help).
-    let mut df = if force {
+    // The grounding DF sidecar is (re)built on a full-coverage pass, which re-extracts EVERY
+    // document (delta.changed = all files, since the manifest was reset above) so the table
+    // accumulates over the whole corpus. That is `--force` AND a schema migration: the migration
+    // branch above clears `manifest.files`/`notes` and drops the index directory, so its coverage is
+    // identical to force's — and it is the pass that exists precisely because stored bodies changed.
+    // Without it a migration rewrote every chunk body while leaving df/n_chunks describing the OLD
+    // corpus, which is the stale-prior bug a bump is supposed to prevent.
+    // Incremental passes leave `df = None` and never touch the sidecar: DfTable has no per-source
+    // decrement, so merging only the changed docs would double-count edits and never subtract
+    // removals, inflating df/n_chunks over uptime. A stale sidecar is corrected by
+    // `kb index --force` (see the note in that command's help).
+    let mut df = if force || schema_migrate {
         Some(crate::gate::df::DfTable::new())
     } else {
         None
@@ -2252,7 +2264,20 @@ pub fn index_dir_at_locked(
     }
     // Links that still don't resolve (target not an indexed doc yet) ride along in the manifest so
     // a later pass that adds the target can pick the edge back up.
+    //
+    // Bracketed on stderr like the sidecar below: everything from here to the end of the pass runs
+    // after the last per-file progress line, so without these markers a long silent pause at the
+    // end of `kb index` is unattributable — to an operator watching it, and to the measurement
+    // harness, which could only report the whole tail as one lump.
+    eprintln!(
+        "resolving cross-document references: {} links...",
+        links.len()
+    );
     next.unresolved_links = resolve_reference_links(&idx.roots, &graph, &next.files, &links);
+    eprintln!(
+        "references resolved ({} still unresolved)",
+        next.unresolved_links.len()
+    );
     // Notebook notes: index every changed note as a single `"note"` chunk (delete-by-path is
     // idempotent, so a note that was also written through in-process re-adds cleanly), and drop
     // removed notes. Notes never create graph nodes (§6 of the spec) — only search chunks.
@@ -2288,7 +2313,9 @@ pub fn index_dir_at_locked(
     // Commit under the bounded transient-FS retry — the commit writes+renames `meta.json`, the same
     // frame that flakes on Windows (Defender / a racing reader briefly holds it). Idempotent: the
     // writer's pending ops stay staged, so re-committing after a transient failure is safe.
+    eprintln!("committing index...");
     with_writer_retry(|| writer.commit())?;
+    eprintln!("index committed");
     next.index_schema_version = INDEX_SCHEMA_VERSION;
     next.save(state_base)?;
     // Advance dirsig, holding back any dir whose file changed mid-pass so a full index can't poison
@@ -2307,8 +2334,8 @@ pub fn index_dir_at_locked(
     write_dirsig(state_base, &settled_dirsig(&cur, &stored, &unsettled));
     // Sidecar serialization is a distinct, potentially slow phase on a large vocabulary — flag it
     // explicitly rather than let it pass silently inside the (already-finished) index loop above.
-    // Only the full `--force` rebuild produced a DF table (`Some`); incremental passes leave the
-    // existing sidecar untouched (see the `df` binding above).
+    // Only a full-coverage pass produced a DF table (`Some`) — `--force` or a schema migration;
+    // incremental passes leave the existing sidecar untouched (see the `df` binding above).
     if let Some(df) = &df {
         eprintln!(
             "writing DF sidecar: {} tokens over {} chunks...",
@@ -2473,10 +2500,12 @@ fn resolve_dir_key(key: &str, roots: &[crate::root::Root]) -> Option<(PathBuf, S
 /// Depth-1 scan of the immediate files in one directory (subdirectories are tracked by their OWN
 /// `dir_mtime_map_at` entry and, if they changed, appear as their own key in `changed`/`added` — so a
 /// depth-1 listing per key is sufficient). Uses `ignore::WalkBuilder` capped at `max_depth(1)` rather
-/// than a bare `std::fs::read_dir` — with the SAME `standard_filters`/`require_git(false)`/junk-file
-/// filtering `walk::walk_files` (and `collect_dir_mtimes`) use for the full-corpus walk, so a
-/// gitignored or OS/editor-junk file in a re-scanned dir is excluded here exactly as it would be by a
-/// full walk (a bare `read_dir` would silently index it — a real regression this closed). Applies the
+/// than a bare `std::fs::read_dir` — configured through the one shared `walk::configure_ignore`
+/// helper that `walk::walk_files` and `collect_dir_mtimes` also use, so a gitignored or
+/// OS/editor-junk file in a re-scanned dir is excluded here exactly as it would be by a full walk
+/// (a bare `read_dir` would silently index it — a real regression this closed). The settings are
+/// NOT restated here: when a copy of them drifted from the full walk's, a file the walk indexed was
+/// deleted again by the next freshen of its directory. Applies the
 /// SAME per-file classification `scan_delta_at` does (changed vs. unchanged, transient stat →
 /// `stat_failed` + carried-forward sig) into the shared `Delta` accumulator. Reuses
 /// `file_sig`/`is_transient`/`doc_key` — no new classification logic.
@@ -2490,8 +2519,11 @@ fn scan_dir_delta_into(
     #[cfg(test)]
     rescan_probe::record(dir_abs);
     let mut wb = WalkBuilder::new(dir_abs);
-    wb.standard_filters(true);
-    wb.require_git(false);
+    // Same configuration as the full-corpus walk, via the one helper — NOT a second copy. When this
+    // scan's ignore rules differ from `walk::walk_files`', the file set differs too, and the
+    // carry-forward loop below reads "scanned this dir, did not see it" as REMOVED: a file the full
+    // walk indexes is deleted again by the next freshen of its directory.
+    crate::walk::configure_ignore(&mut wb, true);
     wb.max_depth(Some(1));
     wb.filter_entry(|e| e.file_name() != ".glossa" && !crate::walk::is_junk_file(e.file_name()));
     for result in wb.build() {
@@ -2911,7 +2943,8 @@ pub fn reindex_dirs_at_locked(
         // Skip (don't abort the freshen on) a single corrupt/unreadable file — mirrors the
         // resilience of the `kb index` walk.
         let res = with_read_retry(max_retries, backoff, || {
-            // Freshen never touches the DF sidecar (df: None) — only `kb index --force` rebuilds it.
+            // Freshen never touches the DF sidecar (df: None) — only a full-coverage pass
+            // (`kb index --force`, or a schema migration) rebuilds it.
             index_file_into(&idx, &graph, &writer, doc_key_str, abs, &mut links, None)
         });
         match res {
@@ -3008,6 +3041,9 @@ pub fn reindex_dirs_at_locked(
     next.unresolved_links = resolve_reference_links(&idx.roots, &graph, &next.files, &all);
 
     // Bounded transient-FS retry around the `meta.json`-writing commit (see index_dir_at_locked).
+    // Deliberately NOT bracketed with the phase markers the full pass prints: `freshen_blocking_at`
+    // routes here, so a running server would log two lines per freshen cycle — for a pass that is
+    // scoped and short by construction. The markers exist for the pass that goes quiet for minutes.
     with_writer_retry(|| writer.commit())?;
     // Carry the schema version forward as-is: this is not a schema-migrating path (that's
     // `index_dir_at_locked`'s job), so resetting it to `Manifest::default()`'s value would make
@@ -6001,6 +6037,59 @@ mod tests {
         assert_eq!(paths, vec!["a.md".to_string()]);
     }
 
+    /// The scoped per-directory rescan behind the MCP freshen path must see exactly what the
+    /// full-corpus walk sees. When it did not — `walk_files` matched ignore rules
+    /// case-insensitively and this scan still did not — a `REPORT.PDF` indexed by `kb index` came
+    /// back as REMOVED on the next freshen of its directory, so the service deleted it again.
+    #[test]
+    fn scoped_rescan_agrees_with_the_full_walk_on_an_uppercase_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".ignore"),
+            crate::default_ignore::DEFAULT_IGNORE,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("UPPER.MD"), b"# b\nbeta\n").unwrap();
+
+        // The full walk indexes it.
+        index_dir(dir.path(), false).unwrap();
+        let manifest = Manifest::load(dir.path());
+        assert!(
+            manifest.files.contains_key("UPPER.MD"),
+            "full walk must index it: {:?}",
+            manifest.files.keys().collect::<Vec<_>>()
+        );
+
+        // The scoped rescan of its directory must NOT report it as removed.
+        let roots = [crate::root::Root {
+            label: String::new(),
+            path: dir.path().to_path_buf(),
+        }];
+        // The key for an unlabeled root's own directory is exactly "c:" (`collect_dir_mtimes`
+        // prefix "c" + an empty relative path). Anything `resolve_dir_key` cannot parse makes
+        // `scan_scoped_delta_at` fall back to a FULL walk, which would exercise the already-fixed
+        // path and prove nothing.
+        assert!(
+            resolve_dir_key("c:", &roots).is_some(),
+            "test would silently fall back to a full walk"
+        );
+        let d = scan_scoped_delta_at(
+            &roots,
+            dir.path(),
+            &manifest,
+            &["c:".to_string()],
+            &[],
+            &[],
+            None,
+        )
+        .unwrap();
+        assert!(
+            !d.removed.iter().any(|r| r.ends_with("UPPER.MD")),
+            "scoped rescan deleted a file the full walk indexed: removed={:?}",
+            d.removed
+        );
+    }
+
     #[test]
     fn index_schema_migration_rebuilds() {
         let dir = tempfile::tempdir().unwrap();
@@ -6022,6 +6111,13 @@ mod tests {
         assert!(idx.index.schema().get_field("body_trigrams").is_ok());
         let hits = idx.search("hello", 5).unwrap();
         assert!(!hits.is_empty());
+        // A migration re-extracts every document, so the grounding DF sidecar it leaves behind must
+        // describe the NEW bodies. It used to be built only under `--force`, which left the gate's
+        // rarity priors describing the pre-migration corpus forever.
+        assert!(
+            crate::gate::df::DfTable::sidecar_path(&dir.path().join(".glossa")).exists(),
+            "a schema migration must rebuild the DF sidecar, not just the index"
+        );
     }
 
     #[test]
