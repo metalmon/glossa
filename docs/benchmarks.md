@@ -132,6 +132,8 @@ makes the numbers readable; their names are not.
 | corpus A (copy, + sentinel), SIMILAR fix | kb 0.5.7 (none) | windows | 39 | 34086 ms | 58 / 5046 ms | 6098 ms (commit 113, links 0, df 20) | not measured | 2350 | 69 | 39.6 MiB | schema 5→5 | 13 / 16 ms | x1.01 / x1.35 | ok |
 | corpus A (copy, + sentinel), **directml** | kb 0.5.7 (ort-directml) | windows | 39 | 28580 ms | 34 / 5139 ms | 5245 ms (commit 110, links 0, df 14) | not measured | 2350 | 82 | 39.6 MiB | schema 5→5 | 22 / 31 ms | x1.00 / x3.24 | ok |
 | corpus B (copy, + sentinel), **directml** | kb 0.5.7 (ort-directml) | windows | 12 | 2250 ms | 126 / 460 ms | 125 ms (commit 74, links 0, df 3) | not measured | 174 | 77 | 0.6 MiB | schema 5→5 | 21 / 25 ms | x1.01 / x1.06 | ok |
+| corpus A (copy, + sentinel), candidate generation | kb 0.5.7 (none) | windows | 39 | 25189 ms | 46 / 4279 ms | 4337 ms (commit 98, links 0, df 12) | not measured | 2350 | 93 | 39.6 MiB | schema 5→5 | 12 / 14 ms | x1.00 / x1.17 | ok |
+| corpus A (copy, + sentinel), + empty-case short circuit | kb 0.5.7 (none) | windows | 39 | 25903 ms | 47 / 4885 ms | 4403 ms (commit 90, links 0, df 17) | not measured | 2350 | 91 | 39.6 MiB | schema 5→5 | 11 / 12 ms | x1.00 / x1.14 | ok |
 **2026-11-10 — first baseline, taken before any omnivorous-extraction change.** Measured with the
 CI artifact `glossa-x86_64-pc-windows-msvc-none` from the `release.yml` dispatch on
 `fix/full-coverage-pass-and-one-search-depth`. The `none` engine is `--no-default-features`: no ONNX
@@ -378,6 +380,43 @@ scores anything. **The read path roughly doubles**, 13→22 and 11→21 ms at p5
 invocations, so that is ONNX-runtime process start-up, not per-query inference: a `kb read` on the
 shipped build pays about 10 ms more before it does anything. In-process MCP reads pay that once per
 server, not once per call — so this number is a floor for the CLI and says nothing about serving.
+
+### 2026-11-11, sixth pass — the pairing loop itself
+
+Excluding structural nodes stopped the pass charging for sections, but the loop was still quadratic
+in reasoning nodes, and on the corpus that has a real reasoning graph that is 10.2 s. A pair with no
+common neighbour scores zero, and the loop computed the intersection of every pair precisely to
+discard those — so candidates now come from each node's neighbourhood instead. Exactly the same
+pairs, the ones that cannot qualify never visited.
+
+`kb graph generalize` standalone, across all four states of this loop:
+
+| Corpus | every node | reasoning only | + candidates | + empty-case |
+|---|---|---|---|---|
+| bisect 8→16 MiB (37 161 chunks) | 288 667 ms | 1 602 ms | 2 503 ms | **964 ms** |
+| corpus A (2 350 chunks) | 12 712 ms | 10 245 ms | 6 926 ms | **3 146 ms** |
+| corpus A: SIMILAR edges | 9 356 | 9 151 | 9 151 | 9 151 |
+| corpus A: communities | 91 | 91 | 91 | 91 |
+
+**The output has not moved since the structural exclusion** — not one edge across three subsequent
+changes — which is what the unit test pins against the naive loop at five thresholds, and what these
+two real-graph numbers confirm independently.
+
+**One step was a regression I shipped and then measured.** Candidate generation made the structural
+corpus *slower* (1 602 → 2 503 ms): the walk visits every node's neighbourhood to filter it, so a
+corpus with no reasoning layer paid for the whole walk to produce nothing. Returning early when
+nothing is pairable — before the adjacency map is even built — is what takes it to 964 ms, better
+than either previous state.
+
+**Attribution, honestly bounded.** Corpus A's 6 926 → 3 146 ms is larger than reusing one buffer
+plausibly explains, and the early return does not apply to that corpus at all; part of that step is
+run-to-run variance, which this log has already documented as wide. What is solid: identical output,
+and the pass down from 12.7 s to ~3 s, roughly 4x.
+
+**What remains quadratic.** A graph where one hub is pointed at by every reasoning node collapses
+back to the old cost, since that hub's neighbourhood alone yields every pair. `similar_threshold`
+does not bound it. That case is a measurement away rather than a guess, so nothing guards against it
+yet.
 
 ### DF ratios (`df(token)/n_chunks`, what the `verify` gate compares against)
 
