@@ -22,6 +22,7 @@ kb_bin       := if os() == "windows" { "./" + bin + "/kb.exe" } else { "./" + bi
 kb_train_bin := if os() == "windows" { "./" + bin + "/kb-train.exe" } else { "./" + bin + "/kb-train" }
 kb_eval_bin  := if os() == "windows" { "./" + bin + "/kb-eval.exe" } else { "./" + bin + "/kb-eval" }
 kb_dump_episode_bin := if os() == "windows" { "./" + bin + "/kb-dump-episode.exe" } else { "./" + bin + "/kb-dump-episode" }
+kbx_bin      := if os() == "windows" { "./" + bin + "/kbx.exe" } else { "./" + bin + "/kbx" }
 kb_eval_constraint_bin := if os() == "windows" { "./" + bin + "/kb-eval-constraint.exe" } else { "./" + bin + "/kb-eval-constraint" }
 
 work    := "kb-test"                              # corpus root: index + reasoning graph live here
@@ -48,6 +49,9 @@ build-train force="":
     {{preface}}b='{{kb_train_bin}}'; if [[ -z "{{force}}" && "${FORCE_BUILD:-}" != "1" ]] && [[ -x "$b" ]]; then echo "kb-train: already built"; else cargo build {{release}} -p kb-eval --bin kb-train --locked; fi
 build-train-offline force="":
     {{preface}}b='{{kb_train_bin}}'; if [[ -z "{{force}}" && "${FORCE_BUILD:-}" != "1" ]] && [[ -x "$b" ]]; then echo "kb-train: already built"; else cargo build {{release}} -p kb-eval --bin kb-train --locked --offline; fi
+build-kbx force="":
+    {{preface}}b='{{kbx_bin}}'; if [[ -z "{{force}}" && "${FORCE_BUILD:-}" != "1" ]] && [[ -x "$b" ]]; then echo "kbx: already built"; else cargo build {{release}} -p kb-eval --bin kbx --locked; fi
+
 build-eval force="":
     {{preface}}b='{{kb_eval_bin}}'; if [[ -z "{{force}}" && "${FORCE_BUILD:-}" != "1" ]] && [[ -x "$b" ]]; then echo "kb-eval: already built"; else cargo build {{release}} -p kb-eval --bin kb-eval --locked; fi
 # Opt-in: builds `kb` WITH the CSP/marking-schema solver (glossa-constraint). The default
@@ -274,3 +278,29 @@ ch sql:
 
 last-episode:
     @just ch "SELECT episode_id FROM tensorzero.ChatInference WHERE function_name='enrich' ORDER BY timestamp DESC LIMIT 1 FORMAT TabSeparatedRaw"
+
+# ── measure ─────────────────────────────────────────────────────────────────
+# Extraction baseline — phase 1 of docs/superpowers/specs/2026-11-10-omnivorous-extraction-design.md.
+#
+# The MEASURED `kb` is passed in and never built here: a baseline taken on a local build measures a
+# binary nobody ships. Get one from CI — `gh workflow run release.yml --ref <branch>`, then
+# `gh run download` — and pass its path. `kbx` itself is a tool, not the subject, so it builds
+# locally like every other tool in this file.
+#
+# Corpora are measured as COPIES. A `--force` pass rebuilds a corpus's index, and on a corpus whose
+# manifest predates the current schema it migrates it too — kb-abac sits at version 3 against a
+# current 5, so measuring it in place would move the eval baseline underneath us.
+bench_dir := env_var_or_default("GLOSSA_BENCH_DIR", "../glossa-bench")
+
+# Copy one corpus for measuring (index and graph come along: the point is to measure a real one).
+bench-copy src dst:
+    {{preface}}mkdir -p '{{bench_dir}}'; rm -rf '{{bench_dir}}/{{dst}}'; cp -r '{{src}}' '{{bench_dir}}/{{dst}}'; echo "copied {{src}} -> {{bench_dir}}/{{dst}}"
+
+# Measure one corpus. `kb` is the path to the CI-built binary.
+bench-extract kb corpus *extra: build-kbx
+    {{preface}}{{kbx_bin}} bench extract '{{corpus}}' --bin '{{kb}}' --out '{{corpus}}.bench.json' {{extra}}
+
+# The whole baseline: both real corpora as copies, plus a generated corpus with the size ladder.
+# Rows go to stdout (the column header goes to stderr), so append them where you want them.
+bench-baseline kb: build-kbx
+    {{preface}}set -e;       just bench-copy kb-abac kb-abac-copy;       just bench-copy kb-gost kb-gost-copy;       rm -rf '{{bench_dir}}/synth';       just bench-extract '{{kb}}' '{{bench_dir}}/kb-abac-copy';       just bench-extract '{{kb}}' '{{bench_dir}}/kb-gost-copy';       just bench-extract '{{kb}}' '{{bench_dir}}/synth' --generate 2000 --seed 1 --ladder

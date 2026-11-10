@@ -3,6 +3,11 @@
 Curated record of agent-eval runs (the `kbx eval` harness). Raw `eval-*.json` reports are git-ignored;
 this file is the durable, human-readable history. One row per meaningful run. Append, don't rewrite.
 
+Two kinds of number live here, and they answer different questions. **Retrieval quality** (below) is
+what the engine finds. **Extraction cost** (at the end) is what indexing and reading a corpus costs
+in time and memory — added 2026-11-10, because the omnivorous-extraction work needs every phase to
+report a delta against a measured baseline rather than a guess.
+
 ## Reference targets — HotpotQA (distractor setting), Answer EM / F1
 
 | Reference | Regime | EM | F1 |
@@ -54,3 +59,32 @@ Same 50 questions, identical glossa retrieval; only the reader changes:
   4. **Graph A/B** (graph OFF vs ON) once a graph-off query mode exists — the multihop claim.
 - Caveat: these benches are English-Wikipedia clean text; they validate the multihop/retrieval engine,
   not glossa's product edge (office/pdf/legacy encodings/offline/agentic graph).
+
+## Extraction cost — indexing and read, per corpus
+
+Produced by `just bench-baseline <path-to-ci-built-kb>` (`kbx bench extract`). One row per corpus
+per run; append, don't rewrite.
+
+**How to read a row, and what it does not cover.**
+
+- The measured binary is a **CI artifact**, never a local build — a baseline taken on a binary
+  nobody ships measures the wrong thing. Its `kb --version` is in the row.
+- Corpora are measured as **copies**. `--force` rebuilds a corpus's index, and on a corpus whose
+  manifest predates the current schema it migrates it as well, so the `Migration` column says which
+  side of that the row is. `kb-abac` sits at schema 3 against a current 5: a row reading
+  `schema 3→5` measured migrated bodies; one reading `schema 5→5` measured a corpus already there.
+- **Peak RSS is Linux-only.** On Windows the cell reads `not measured`, not a zero: the Win32 route
+  needs a new direct dependency, and polling a shell through a multi-minute run would steal CPU
+  from the process being measured. On that platform the memory evidence is the **Largest file**
+  column together with the generated corpus's size ladder (1→16 MiB), which is where a per-file
+  ceiling shows up as degradation.
+- **Per-file p50/p95 come from timestamping `kb index`'s own progress lines**, so they include that
+  file's extraction, chunking, index write and graph write — not extraction alone.
+- **read p50/p95 are CLI invocations**, so each carries process startup. They are a floor for the
+  serving path, not a measurement of in-process MCP reads.
+- **No network mount has been measured.** Every row here is local disk, and the extraction design's
+  cost reasoning about SMB/NFS is therefore unverified by these numbers.
+- There is **no regression gate**. A slower row is a finding to explain, not a build failure.
+
+| Corpus | kb | Platform | Files | Wall | per-file p50/p95 | Peak RSS | Chunks | Chunks/s | Largest file | Migration | read p50/p95 | Run |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
