@@ -10,7 +10,7 @@
 
 use super::{centrality, closure, community, linkpred, merge, similarity, Triple};
 use crate::graph::ontology::Ontology;
-use crate::graph::store::{Edge, GraphStore, NodeMeta, Provenance};
+use crate::graph::store::{Edge, GraphStore, Node, NodeMeta, Provenance};
 use std::collections::{HashMap, HashSet};
 
 const SIMILAR: &str = "SIMILAR";
@@ -205,7 +205,7 @@ pub fn generalize(g: &GraphStore, opts: &Opts) -> anyhow::Result<Report> {
     // (`[retrieval].sim_weight`) — while the pairing loop is quadratic in whatever it is given, and
     // a document corpus has one `Section` per chunk. Measured before this filter reached the
     // topology arm: 11.8 s at 10k nodes and 289 s at 37k, for 4 to 64 section-to-section edges.
-    let reasoning_nodes: Vec<&crate::graph::Node> = nodes
+    let reasoning_nodes: Vec<&Node> = nodes
         .iter()
         .filter(|n| !opts.structural.iter().any(|s| s == &n.node_type))
         .collect();
