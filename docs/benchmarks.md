@@ -121,6 +121,11 @@ makes the numbers readable; their names are not.
 | corpus A (copy) | kb 0.5.7 (none) | windows | 38 | 26769 ms | 35 / 4250 ms | 7145 ms (df 11) | not measured | 2349 | 88 | 39.6 MiB | schema 5→5 | 12 / 15 ms | x1.00 / x1.07 | ok |
 | corpus B (copy) | kb 0.5.7 (none) | windows | 11 | 1955 ms | 100 / 368 ms | 208 ms (df 4) | not measured | 173 | 88 | 0.6 MiB | schema 5→5 | 12 / 14 ms | x1.00 / x1.18 | ok |
 | ladder 1→16 MiB + sentinel (repeat) | kb 0.5.7 (none) | windows | 6 | 78168 ms | 1562 / 11981 ms | 59209 ms (df 1) | not measured | 19206 | 246 | 16.0 MiB | schema 5→5 | 11 / 15 ms | x1.00 / x1.08 | ok |
+| 16 MiB alone, 50k-word vocab | kb 0.5.7 (none) | windows | 2 | 20546 ms | 6404 / 6404 ms | 14057 ms (df 15) | not measured | 8991 | 438 | 16.0 MiB | schema 1→5 | 15 / 16 ms | x0.98 / x1.55 | ok |
+| ladder 1→16 MiB, 50k-word vocab | kb 0.5.7 (none) | windows | 6 | 56614 ms | 1566 / 6604 ms | 44009 ms (df 20) | not measured | 17426 | 308 | 16.0 MiB | schema 1→5 | 11 / 12 ms | x1.00 / x1.29 | ok |
+| bisect 8/10/12/14/16 MiB, 50k-word vocab | kb 0.5.7 (none) | windows | 6 | 219316 ms | 6458 / 10625 ms | 188292 ms (df 17) | not measured | 33726 | 154 | 16.0 MiB | schema 1→5 | 11 / 12 ms | x1.00 / x1.25 | ok |
+| corpus A (copy, + sentinel) | kb 0.5.7 (none) | windows | 39 | 27339 ms | 36 / 4024 ms | 7126 ms (df 13) | not measured | 2350 | 86 | 39.6 MiB | schema 5→5 | 13 / 17 ms | x1.00 / x1.11 | ok |
+| corpus B (copy, + sentinel) | kb 0.5.7 (none) | windows | 12 | 1888 ms | 103 / 368 ms | 138 ms (df 4) | not measured | 174 | 92 | 0.6 MiB | schema 5→5 | 11 / 14 ms | x1.01 / x1.01 | ok |
 **2026-11-10 — first baseline, taken before any omnivorous-extraction change.** Measured with the
 CI artifact `glossa-x86_64-pc-windows-msvc-none` from the `release.yml` dispatch on
 `fix/full-coverage-pass-and-one-search-depth`. The `none` engine is `--no-default-features`: no ONNX
@@ -224,6 +229,42 @@ that would settle it is a generated corpus with a realistic vocabulary at severa
 tail 61.6 s and 59.2 s (4%), but the 16 MiB file itself 8 402 ms and 11 981 ms. Chunk counts were
 identical (19 206). So a whole-corpus figure here is repeatable and a single file's figure is not —
 read one file's cost as a factor, never as a number.
+
+### 2026-11-10, third pass — is the finalize about corpus size or corpus shape?
+
+The second pass left the near-quadratic finalize with an obvious suspect: the generator drew from 32
+words, so a few terms carried enormous posting lists over near-duplicate text — nothing like a
+document corpus. `--vocab 50000` draws Zipf-weighted from generated pseudo-words instead, leaving
+the byte count and the ladder identical, and the real corpora were re-run with `--tail-sentinel` so
+their finalize is separated from the last document's own cost.
+
+**The vocabulary was not it.** Three matched pairs:
+
+| Chunks | Tail @ 32 words | Chunks | Tail @ 50k words | ratio |
+|---|---|---|---|---|
+| 9 911 | 18 892 ms | 8 991 | 14 057 ms | 0.74 |
+| 19 206 | 61 561 ms | 17 426 | 44 009 ms | 0.71 |
+| 37 161 | 244 537 ms | 33 726 | 188 292 ms | 0.77 |
+
+A realistic vocabulary is a flat ~0.74x constant and leaves the growth alone: the exponent against
+chunk count is 1.79 / 2.09 at 32 words and 1.72 / 2.20 at 50 000. Per-file cost drops with it too
+(the 16 MiB file: 8 402 → 6 604 ms), which fits — fewer repeated terms, shorter posting lists per
+term. **So the finalize is ~quadratic in index size within one corpus family, and the synthetic
+vocabulary did not cause that.**
+
+**But chunk count does not predict its level, so do not extrapolate it.** With a sentinel in the
+copy, corpus A's finalize is 7 126 ms at 2 350 chunks — the generated curve at that chunk count
+predicts ~960 ms, a factor of 7 out. The sentinel barely moved it (7 145 → 7 126 ms), so that tail
+was already the finalize and not the last PDF. The 16×1 MiB versus 1×16 MiB control says the same
+from the other side: identical chunk counts, finalize 9 368 ms against 18 892 ms. Something other
+than chunk count is in there, and a figure like "N minutes at 100k chunks" cannot be read off these
+rows in either direction.
+
+**What is ruled out:** the DF sidecar. It is timed separately now and costs 1–20 ms everywhere,
+including 13 ms on the real corpus. The remaining candidates inside the tail are cross-document link
+resolution and the tantivy commit with its merges — which is why the next step is to have `kb index`
+bracket those two phases on stderr the way it already brackets the sidecar, so a row names the
+quadratic phase instead of leaving two suspects.
 
 ### DF ratios (`df(token)/n_chunks`, what the `verify` gate compares against)
 

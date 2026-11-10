@@ -376,12 +376,24 @@ pub struct RunOutcome {
     /// is the one named phase inside the run's tail — on a real corpus's vocabulary it can dominate
     /// it, while the generated corpus's 32-word vocabulary makes it free.
     pub df_write: Option<Duration>,
+    /// Cross-document `REFERENCES` resolution, a second named phase inside the tail.
+    pub links_resolve: Option<Duration>,
+    /// The tantivy commit, where the writer's staged segments are serialized and merged — the third
+    /// named phase, and the one the synthetic corpus's near-quadratic tail most likely is.
+    pub commit: Option<Duration>,
 }
 
-/// The stderr lines `kb index` brackets its DF sidecar write with (`src/index/store.rs`). Matched
-/// as prefixes: both carry counts after them.
-const DF_WRITE_BEGIN: &str = "writing DF sidecar:";
-const DF_WRITE_END: &str = "DF sidecar written";
+/// The stderr lines `kb index` brackets each finalize phase with (`src/index/store.rs`), matched as
+/// prefixes. Everything they bracket happens after the last per-file progress line, which is what
+/// the row's tail is made of — so these are what turn that tail from a lump into named numbers.
+const PHASES: [(&str, &str); 3] = [
+    ("writing DF sidecar:", "DF sidecar written"),
+    (
+        "resolving cross-document references:",
+        "references resolved",
+    ),
+    ("committing index...", "index committed"),
+];
 
 /// Parse the canonical summary block (`key: value` pairs, whitespace-separated).
 pub fn parse_summary(line: &str) -> BTreeMap<String, String> {
@@ -437,18 +449,20 @@ pub fn run_index(bin: &Path, corpus: &Path, force: bool) -> Result<RunOutcome> {
 
     let stderr = child.stderr.take().expect("stderr was piped");
     let mut ticks = Vec::new();
-    let mut df_started: Option<Duration> = None;
-    let mut df_write: Option<Duration> = None;
+    let mut phase_started: [Option<Duration>; PHASES.len()] = [None; PHASES.len()];
+    let mut phase_took: [Option<Duration>; PHASES.len()] = [None; PHASES.len()];
     let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     for line in BufReader::new(stderr).lines() {
         let Ok(line) = line else { break };
         if let Some(t) = parse_progress(&line, started.elapsed()) {
             ticks.push(t);
         }
-        if line.starts_with(DF_WRITE_BEGIN) {
-            df_started = Some(started.elapsed());
-        } else if line.starts_with(DF_WRITE_END) {
-            df_write = df_started.map(|b| started.elapsed().saturating_sub(b));
+        for (i, (begin, end)) in PHASES.iter().enumerate() {
+            if line.starts_with(begin) {
+                phase_started[i] = Some(started.elapsed());
+            } else if line.starts_with(end) {
+                phase_took[i] = phase_started[i].map(|b| started.elapsed().saturating_sub(b));
+            }
         }
         tail.push_back(line);
         if tail.len() > 20 {
@@ -479,7 +493,9 @@ pub fn run_index(bin: &Path, corpus: &Path, force: bool) -> Result<RunOutcome> {
         summary,
         exit_ok: status.success(),
         stderr_tail: tail.into_iter().collect::<Vec<_>>().join("\n"),
-        df_write,
+        df_write: phase_took[0],
+        links_resolve: phase_took[1],
+        commit: phase_took[2],
     })
 }
 
@@ -788,8 +804,13 @@ pub struct BenchReport {
     /// The last file's own work plus the run's finalize, which no progress line separates. Read it
     /// against `chunks`, not against the last file's size.
     pub tail_ms: Option<u64>,
-    /// The DF sidecar write, the one named phase inside `tail_ms`. `None` when the run wrote none.
+    /// The DF sidecar write, a named phase inside `tail_ms`. `None` when the run wrote none.
     pub df_write_ms: Option<u64>,
+    /// Cross-document reference resolution, a named phase inside `tail_ms`.
+    pub links_resolve_ms: Option<u64>,
+    /// The tantivy commit, a named phase inside `tail_ms` — the one a growing corpus is expected to
+    /// show up in, so a row where the tail grew and this did not is saying something.
+    pub commit_ms: Option<u64>,
     pub peak_rss_bytes: Option<u64>,
     /// Machine contention during the run. A row taken at factor 1.0 is comparable with another at
     /// 1.0; one taken at 3.0 is a different experiment.
@@ -836,12 +857,26 @@ impl BenchReport {
             .largest_file_bytes
             .map(|b| format!("{:.1} MiB", b as f64 / (1024.0 * 1024.0)))
             .unwrap_or_else(|| "—".into());
-        // The tail is a lump of several phases; name the one the run timed, rather than leave a
-        // reader of a long tail to guess which phase it was.
-        let tail_cell = match (self.tail_ms, self.df_write_ms) {
-            (Some(t), Some(df)) => format!("{t} ms (df {df})"),
-            (Some(t), None) => format!("{t} ms"),
-            (None, _) => "—".to_string(),
+        // The tail is a lump of several phases; name the ones the run timed, rather than leave a
+        // reader of a long tail to guess which phase it was. A phase the run did not report is
+        // left out instead of printed as 0: an incremental pass writes no sidecar at all.
+        let tail_cell = match self.tail_ms {
+            None => "—".to_string(),
+            Some(t) => {
+                let named: Vec<String> = [
+                    ("commit", self.commit_ms),
+                    ("links", self.links_resolve_ms),
+                    ("df", self.df_write_ms),
+                ]
+                .into_iter()
+                .filter_map(|(name, v)| v.map(|ms| format!("{name} {ms}")))
+                .collect();
+                if named.is_empty() {
+                    format!("{t} ms")
+                } else {
+                    format!("{t} ms ({})", named.join(", "))
+                }
+            }
         };
         format!(
             "| {} | {} | {} | {} | {} ms | {} / {} ms | {} | {} | {} | {} | {} | schema {}→{} | {} / {} ms | x{:.2} / x{:.2} | {} |",
@@ -926,6 +961,8 @@ pub fn measure(opts: &BenchOpts) -> Result<BenchReport> {
         per_file_p95_ms: percentile(&durations, 0.95).map(|d| d.as_millis() as u64),
         tail_ms: tail(&run.ticks, run.wall).map(|d| d.as_millis() as u64),
         df_write_ms: run.df_write.map(|d| d.as_millis() as u64),
+        links_resolve_ms: run.links_resolve.map(|d| d.as_millis() as u64),
+        commit_ms: run.commit.map(|d| d.as_millis() as u64),
         peak_rss_bytes: run.peak_rss_bytes,
         contention: run.contention,
         chunks: figures.chunks,
@@ -1367,6 +1404,8 @@ mod tests {
             per_file_p95_ms: Some(900),
             tail_ms: Some(15632),
             df_write_ms: Some(11),
+            links_resolve_ms: Some(40),
+            commit_ms: Some(14900),
             peak_rss_bytes: None,
             contention: Contention {
                 baseline_us: 10_000,
@@ -1467,13 +1506,26 @@ mod tests {
     }
 
     #[test]
-    fn the_row_names_the_df_phase_inside_the_tail() {
+    fn the_row_names_every_finalize_phase_the_run_timed() {
         let row = sample_report().to_markdown_row();
-        assert!(row.contains("15632 ms (df 11)"), "{row}");
-        // A run that wrote no sidecar says nothing about one, rather than claiming 0 ms.
+        assert!(
+            row.contains("15632 ms (commit 14900, links 40, df 11)"),
+            "{row}"
+        );
+        // A phase the run never reported is left out, not shown as 0 — an incremental pass writes
+        // no sidecar at all, and "df 0" would be a claim about a phase that did not run.
         let mut r = sample_report();
         r.df_write_ms = None;
-        assert!(r.to_markdown_row().contains("| 15632 ms |"));
+        assert!(
+            r.to_markdown_row().contains("(commit 14900, links 40)"),
+            "{}",
+            r.to_markdown_row()
+        );
+        let mut none = sample_report();
+        none.df_write_ms = None;
+        none.links_resolve_ms = None;
+        none.commit_ms = None;
+        assert!(none.to_markdown_row().contains("| 15632 ms |"));
     }
 
     #[test]

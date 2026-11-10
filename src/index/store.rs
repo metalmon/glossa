@@ -2264,7 +2264,20 @@ pub fn index_dir_at_locked(
     }
     // Links that still don't resolve (target not an indexed doc yet) ride along in the manifest so
     // a later pass that adds the target can pick the edge back up.
+    //
+    // Bracketed on stderr like the sidecar below: everything from here to the end of the pass runs
+    // after the last per-file progress line, so without these markers a long silent pause at the
+    // end of `kb index` is unattributable — to an operator watching it, and to the measurement
+    // harness, which could only report the whole tail as one lump.
+    eprintln!(
+        "resolving cross-document references: {} links...",
+        links.len()
+    );
     next.unresolved_links = resolve_reference_links(&idx.roots, &graph, &next.files, &links);
+    eprintln!(
+        "references resolved ({} still unresolved)",
+        next.unresolved_links.len()
+    );
     // Notebook notes: index every changed note as a single `"note"` chunk (delete-by-path is
     // idempotent, so a note that was also written through in-process re-adds cleanly), and drop
     // removed notes. Notes never create graph nodes (§6 of the spec) — only search chunks.
@@ -2300,7 +2313,9 @@ pub fn index_dir_at_locked(
     // Commit under the bounded transient-FS retry — the commit writes+renames `meta.json`, the same
     // frame that flakes on Windows (Defender / a racing reader briefly holds it). Idempotent: the
     // writer's pending ops stay staged, so re-committing after a transient failure is safe.
+    eprintln!("committing index...");
     with_writer_retry(|| writer.commit())?;
+    eprintln!("index committed");
     next.index_schema_version = INDEX_SCHEMA_VERSION;
     next.save(state_base)?;
     // Advance dirsig, holding back any dir whose file changed mid-pass so a full index can't poison
@@ -3023,10 +3038,20 @@ pub fn reindex_dirs_at_locked(
             all.push((src.clone(), target.clone()));
         }
     }
+    eprintln!(
+        "resolving cross-document references: {} links...",
+        all.len()
+    );
     next.unresolved_links = resolve_reference_links(&idx.roots, &graph, &next.files, &all);
+    eprintln!(
+        "references resolved ({} still unresolved)",
+        next.unresolved_links.len()
+    );
 
     // Bounded transient-FS retry around the `meta.json`-writing commit (see index_dir_at_locked).
+    eprintln!("committing index...");
     with_writer_retry(|| writer.commit())?;
+    eprintln!("index committed");
     // Carry the schema version forward as-is: this is not a schema-migrating path (that's
     // `index_dir_at_locked`'s job), so resetting it to `Manifest::default()`'s value would make
     // the NEXT `kb index` think a migration is still pending and force a full rebuild.
