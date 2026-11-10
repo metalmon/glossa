@@ -3038,20 +3038,13 @@ pub fn reindex_dirs_at_locked(
             all.push((src.clone(), target.clone()));
         }
     }
-    eprintln!(
-        "resolving cross-document references: {} links...",
-        all.len()
-    );
     next.unresolved_links = resolve_reference_links(&idx.roots, &graph, &next.files, &all);
-    eprintln!(
-        "references resolved ({} still unresolved)",
-        next.unresolved_links.len()
-    );
 
     // Bounded transient-FS retry around the `meta.json`-writing commit (see index_dir_at_locked).
-    eprintln!("committing index...");
+    // Deliberately NOT bracketed with the phase markers the full pass prints: `freshen_blocking_at`
+    // routes here, so a running server would log two lines per freshen cycle — for a pass that is
+    // scoped and short by construction. The markers exist for the pass that goes quiet for minutes.
     with_writer_retry(|| writer.commit())?;
-    eprintln!("index committed");
     // Carry the schema version forward as-is: this is not a schema-migrating path (that's
     // `index_dir_at_locked`'s job), so resetting it to `Manifest::default()`'s value would make
     // the NEXT `kb index` think a migration is still pending and force a full rebuild.
