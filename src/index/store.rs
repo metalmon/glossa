@@ -1316,8 +1316,7 @@ fn collect_dir_mtimes(
     map: &mut BTreeMap<String, u128>,
 ) {
     let mut wb = WalkBuilder::new(base);
-    wb.standard_filters(respect_ignore);
-    wb.require_git(!respect_ignore);
+    crate::walk::configure_ignore(&mut wb, respect_ignore);
     wb.filter_entry(|e| e.file_name() != ".glossa");
     for result in wb.build() {
         let entry = match result {
@@ -2486,10 +2485,12 @@ fn resolve_dir_key(key: &str, roots: &[crate::root::Root]) -> Option<(PathBuf, S
 /// Depth-1 scan of the immediate files in one directory (subdirectories are tracked by their OWN
 /// `dir_mtime_map_at` entry and, if they changed, appear as their own key in `changed`/`added` — so a
 /// depth-1 listing per key is sufficient). Uses `ignore::WalkBuilder` capped at `max_depth(1)` rather
-/// than a bare `std::fs::read_dir` — with the SAME `standard_filters`/`require_git(false)`/junk-file
-/// filtering `walk::walk_files` (and `collect_dir_mtimes`) use for the full-corpus walk, so a
-/// gitignored or OS/editor-junk file in a re-scanned dir is excluded here exactly as it would be by a
-/// full walk (a bare `read_dir` would silently index it — a real regression this closed). Applies the
+/// than a bare `std::fs::read_dir` — configured through the one shared `walk::configure_ignore`
+/// helper that `walk::walk_files` and `collect_dir_mtimes` also use, so a gitignored or
+/// OS/editor-junk file in a re-scanned dir is excluded here exactly as it would be by a full walk
+/// (a bare `read_dir` would silently index it — a real regression this closed). The settings are
+/// NOT restated here: when a copy of them drifted from the full walk's, a file the walk indexed was
+/// deleted again by the next freshen of its directory. Applies the
 /// SAME per-file classification `scan_delta_at` does (changed vs. unchanged, transient stat →
 /// `stat_failed` + carried-forward sig) into the shared `Delta` accumulator. Reuses
 /// `file_sig`/`is_transient`/`doc_key` — no new classification logic.
@@ -2503,8 +2504,11 @@ fn scan_dir_delta_into(
     #[cfg(test)]
     rescan_probe::record(dir_abs);
     let mut wb = WalkBuilder::new(dir_abs);
-    wb.standard_filters(true);
-    wb.require_git(false);
+    // Same configuration as the full-corpus walk, via the one helper — NOT a second copy. When this
+    // scan's ignore rules differ from `walk::walk_files`', the file set differs too, and the
+    // carry-forward loop below reads "scanned this dir, did not see it" as REMOVED: a file the full
+    // walk indexes is deleted again by the next freshen of its directory.
+    crate::walk::configure_ignore(&mut wb, true);
     wb.max_depth(Some(1));
     wb.filter_entry(|e| e.file_name() != ".glossa" && !crate::walk::is_junk_file(e.file_name()));
     for result in wb.build() {
@@ -6013,6 +6017,59 @@ mod tests {
         })
         .unwrap();
         assert_eq!(paths, vec!["a.md".to_string()]);
+    }
+
+    /// The scoped per-directory rescan behind the MCP freshen path must see exactly what the
+    /// full-corpus walk sees. When it did not — `walk_files` matched ignore rules
+    /// case-insensitively and this scan still did not — a `REPORT.PDF` indexed by `kb index` came
+    /// back as REMOVED on the next freshen of its directory, so the service deleted it again.
+    #[test]
+    fn scoped_rescan_agrees_with_the_full_walk_on_an_uppercase_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".ignore"),
+            crate::default_ignore::DEFAULT_IGNORE,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("UPPER.MD"), b"# b\nbeta\n").unwrap();
+
+        // The full walk indexes it.
+        index_dir(dir.path(), false).unwrap();
+        let manifest = Manifest::load(dir.path());
+        assert!(
+            manifest.files.contains_key("UPPER.MD"),
+            "full walk must index it: {:?}",
+            manifest.files.keys().collect::<Vec<_>>()
+        );
+
+        // The scoped rescan of its directory must NOT report it as removed.
+        let roots = [crate::root::Root {
+            label: String::new(),
+            path: dir.path().to_path_buf(),
+        }];
+        // The key for an unlabeled root's own directory is exactly "c:" (`collect_dir_mtimes`
+        // prefix "c" + an empty relative path). Anything `resolve_dir_key` cannot parse makes
+        // `scan_scoped_delta_at` fall back to a FULL walk, which would exercise the already-fixed
+        // path and prove nothing.
+        assert!(
+            resolve_dir_key("c:", &roots).is_some(),
+            "test would silently fall back to a full walk"
+        );
+        let d = scan_scoped_delta_at(
+            &roots,
+            dir.path(),
+            &manifest,
+            &["c:".to_string()],
+            &[],
+            &[],
+            None,
+        )
+        .unwrap();
+        assert!(
+            !d.removed.iter().any(|r| r.ends_with("UPPER.MD")),
+            "scoped rescan deleted a file the full walk indexed: removed={:?}",
+            d.removed
+        );
     }
 
     #[test]

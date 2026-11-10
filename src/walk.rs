@@ -28,6 +28,26 @@ pub(crate) fn is_junk_file(name: &std::ffi::OsStr) -> bool {
         || n.starts_with("._") // macOS AppleDouble resource forks
 }
 
+/// The ignore/filter configuration EVERY walk in the tree must share: the full-corpus walk, the
+/// dirsig mtime collector (`collect_dir_mtimes`) and the scoped per-directory rescan
+/// (`scan_dir_delta_into`). They must agree or they disagree about which files exist — a dir can
+/// then settle while its files are missing, or a file can be indexed by one pass and deleted by the
+/// next.
+///
+/// Case-insensitivity is the part worth explaining. The seeded `.ignore` is a WHITELIST
+/// (`default_ignore.rs`): every supported type is re-included by one `!*.ext` line, and with
+/// case-sensitive matching `!*.pdf` does not re-include `REPORT.PDF`, so `*` keeps it and the file
+/// is never walked at all — silently, because the walk is what drops it and no extractor is ever
+/// asked. Found in our own `kb-abac`: four `.PDF` certificates on disk, absent from the manifest for
+/// years. The trade is that a corpus's own hand-written exclusion becomes case-insensitive too;
+/// that is the right way round, since the alternative loses documents, and it matches the
+/// filesystem on the Windows deployments anyway.
+pub(crate) fn configure_ignore(wb: &mut WalkBuilder, respect_ignore: bool) {
+    wb.standard_filters(respect_ignore);
+    wb.require_git(!respect_ignore);
+    wb.ignore_case_insensitive(true);
+}
+
 /// Enumerate indexable files under `root` (gitignore-aware, skipping `.glossa` and OS/editor junk),
 /// calling `visit` for each file path.
 pub fn walk_files(
@@ -41,17 +61,7 @@ pub fn walk_files(
         None => None,
     };
     let mut wb = WalkBuilder::new(root);
-    wb.standard_filters(respect_ignore);
-    wb.require_git(!respect_ignore);
-    // Ignore patterns match without regard to case, because the seeded `.ignore` is a WHITELIST
-    // (`default_ignore.rs`): every supported type is re-included by one `!*.ext` line, and with
-    // case-sensitive matching `!*.pdf` does not re-include `REPORT.PDF`, so `*` keeps it and the
-    // file is never walked at all — silently, since the walk is what drops it and no extractor is
-    // ever asked. Found in our own `kb-abac`: four `.PDF` certificates on disk, absent from the
-    // manifest for years. The trade is that a corpus's own hand-written exclusion becomes
-    // case-insensitive too; that is the right way round, since the alternative loses documents, and
-    // it matches the filesystem on the Windows deployments anyway.
-    wb.ignore_case_insensitive(true);
+    configure_ignore(&mut wb, respect_ignore);
     wb.filter_entry(|e| e.file_name() != ".glossa" && !is_junk_file(e.file_name()));
     for result in wb.build() {
         let entry = match result {
