@@ -271,6 +271,51 @@ resolution and the tantivy commit with its merges — which is why the next step
 bracket those two phases on stderr the way it already brackets the sidecar, so a row names the
 quadratic phase instead of leaving two suspects.
 
+### 2026-11-10, fourth pass — the finalize is the graph, not the index
+
+`kb index` now brackets each finalize phase on stderr and the harness times them, so the row's tail
+reads `(commit N, links N, df N)`. The three named phases turned out to account for almost none of
+it:
+
+| Corpus | Chunks | Tail | commit | links | df |
+|---|---|---|---|---|---|
+| 16 × 1 MiB | 9 921 | 11 402 ms | 58 ms | 0 ms | 1 ms |
+| 16 MiB, one file | 9 911 | 22 739 ms | 69 ms | 0 ms | 1 ms |
+| ladder 1→16 MiB | 19 206 | 67 225 ms | 76 ms | 0 ms | 1 ms |
+| bisect 8→16 MiB | 37 161 | 259 722 ms | 52 ms | 0 ms | 1 ms |
+| corpus A | 2 350 | 7 054 ms | 80 ms | 0 ms | 11 ms |
+
+**The tantivy commit is 52–80 ms and does not grow with the corpus at all.** Reference resolution is
+0 ms. The DF sidecar is 1–11 ms. Everything else in the tail — 11 s to 260 s of it — is the one
+thing left between the last file and process exit: the **graph generalization pass that `--force`
+runs by itself** after indexing (`src/main.rs:2016`: transitive closure, SIMILAR edges, communities,
+centrality).
+
+Timed standalone with `kb graph generalize` (non-merge, exactly as `--force` invokes it):
+
+| Corpus | Tail measured | `graph generalize` alone | What it produced |
+|---|---|---|---|
+| 16 × 1 MiB | 11 402 ms | 11 772 ms | 64 SIMILAR edges, 0 inferred, 0 communities |
+| 16 MiB, one file | 22 739 ms | 23 151 ms | 4 SIMILAR edges |
+| ladder 1→16 MiB | 67 225 ms | 67 479 ms | 20 SIMILAR edges |
+
+Within 0.4–3%. **So the "near-quadratic finalize" of the earlier passes is the graph pass, and it is
+not extraction, not chunking, not the index.** Two consequences worth stating plainly:
+
+- **The cost is ~quadratic in node count and the work is nearly wasted here.** Eleven seconds for 64
+  edges at 10k nodes, 23 s for 4 edges, 67 s for 20. A document corpus's `Section` labels are mostly
+  unique, so a pairwise SIMILAR search finds almost nothing — while still paying for every pair.
+  The same shape explains the one-file-versus-many gap that looked like an indexing effect earlier
+  (23 s against 11.8 s at equal node counts): it is in the graph pass too.
+- **It only happens on `--force`.** An incremental `kb index` does not run it, which is why a
+  freshen is quick and why this never showed up in serving.
+
+What this does NOT say: that the generalize pass is wrong to exist (it keeps derived edges in sync,
+and on a corpus with a real semantic graph it has something to find), nor which part of it is the
+quadratic one — closure, SIMILAR and community detection were timed as one pass. Both are questions
+for the graph layer, not for extraction, and they are now the first thing to look at before any
+format work makes corpora bigger.
+
 ### DF ratios (`df(token)/n_chunks`, what the `verify` gate compares against)
 
 | Corpus | Sample |

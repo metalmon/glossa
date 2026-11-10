@@ -479,14 +479,15 @@ pub fn run_index(bin: &Path, corpus: &Path, force: bool) -> Result<RunOutcome> {
     let peak_rss_bytes = rss.finish();
     let contention = load.finish();
 
-    // The summary is the LAST line carrying `added:` — the CLI contract puts exactly one canonical
-    // block on stdout, last.
-    let summary = stdout_lines
-        .iter()
-        .rev()
-        .find(|l| l.contains("added:"))
-        .map(|l| parse_summary(l))
-        .unwrap_or_default();
+    // The canonical summary block is the only thing `kb index` puts on stdout (progress goes to
+    // stderr), and `cli_fmt::summary` renders it ONE PAIR PER LINE once it is wider than 60 visible
+    // characters — which a `--force` run always is, since it appends the generalize counts. Reading
+    // only the line that carries `added:` therefore dropped every other pair, including the four
+    // that say whether the graph generalization pass ran and how much it did.
+    let mut summary = BTreeMap::new();
+    for l in &stdout_lines {
+        summary.extend(parse_summary(l));
+    }
 
     Ok(RunOutcome {
         wall,
@@ -1360,6 +1361,31 @@ mod tests {
             out.is_err(),
             "a missing binary must be an error, not an empty RunOutcome"
         );
+    }
+
+    #[test]
+    fn a_summary_split_over_lines_is_read_whole() {
+        // `cli_fmt::summary` wraps one pair per line past 60 visible chars, which every `--force`
+        // run exceeds. Reading one line dropped the generalize counts — the pairs that say what
+        // the run did after the last file.
+        let lines = [
+            "────────────────────",
+            "added: 17",
+            "removed: 0",
+            "unchanged: 0",
+            "inferred_edges: 1240",
+            "similar_edges: 98",
+            "communities: 12",
+            "elapsed: 18.7s",
+        ];
+        let mut got = BTreeMap::new();
+        for l in lines {
+            got.extend(parse_summary(l));
+        }
+        assert_eq!(got.get("added").map(String::as_str), Some("17"));
+        assert_eq!(got.get("inferred_edges").map(String::as_str), Some("1240"));
+        assert_eq!(got.get("communities").map(String::as_str), Some("12"));
+        assert_eq!(got.len(), 7, "every pair in the block: {got:?}");
     }
 
     #[test]
