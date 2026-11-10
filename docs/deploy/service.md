@@ -40,6 +40,11 @@ kb mcp service stop    glossa-editor
 kb mcp service uninstall glossa-editor
 ```
 
+- **What lands in the command line:** exactly the serve args you passed, so `systemctl cat
+  <unit>`'s `ExecStart` is a command line you could run by hand. The Windows SCM entry additionally
+  carries `--windows-service --service-name <name>`, which is how an SCM-launched process knows to
+  attach to the service control handler; a systemd unit must not carry it (it would also turn off
+  the SIGHUP reload handler), and before 0.5.8 it was baked into the unit by mistake.
 - **Multiple corpora from one binary:** repeat `install` with distinct `--service-name` + `--bind`.
 - **Config parity with `kb mcp`:** the global `--config <role.toml>`, `--root label=path` (repeatable,
   in place of the positional `<corpus>`), and `--state-dir <dir>` all work here and are baked into the

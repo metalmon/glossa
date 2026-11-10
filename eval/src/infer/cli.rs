@@ -169,22 +169,17 @@ pub fn resolve_key(
 }
 
 /// Build the [`glossa::service::ServiceSpec`] for a `kbi` service: the given serve flags
-/// (repos/device/bind/…) — `kbi` serves by default, so there is NO `serve` prefix — plus the
-/// `--windows-service`/`--service-name` flags the SCM-launched process routes on (appended only if
-/// not already present). `program` is the `kbi` executable path.
+/// (repos/device/bind/…) — `kbi` serves by default, so there is NO `serve` prefix. The
+/// `--windows-service`/`--service-name` flags are **not** baked in: they are what an SCM-launched
+/// process routes on, and `ServiceSpec::scm_launch_args` adds them at install time on Windows, so a
+/// systemd unit's `ExecStart` stays the plain serve command line. `program` is the `kbi` executable
+/// path.
 pub fn infer_service_spec(
     name: &str,
     program: PathBuf,
     serve_args: &[String],
 ) -> glossa::service::ServiceSpec {
-    let mut args: Vec<String> = serve_args.to_vec();
-    if !args.iter().any(|a| a == "--windows-service") {
-        args.push("--windows-service".to_string());
-    }
-    if !args.iter().any(|a| a == "--service-name") {
-        args.push("--service-name".to_string());
-        args.push(name.to_string());
-    }
+    let args: Vec<String> = serve_args.to_vec();
     glossa::service::ServiceSpec {
         name: name.to_string(),
         display_name: format!("Glossa kbi ({name})"),
@@ -242,9 +237,12 @@ mod tests {
             "--rerank-repo".to_string(),
             "metalmon80/bge-reranker-v2-m3-en-ru-onnx".to_string()
         ]));
-        assert!(s.args.iter().any(|a| a == "--windows-service"));
-        assert!(s
-            .args
+        // Not baked into the spec: added per-platform at install time (a systemd unit must not
+        // carry a flag that turns off signal handling).
+        assert!(!s.args.iter().any(|a| a == "--windows-service"));
+        let scm = s.scm_launch_args();
+        assert!(scm.iter().any(|a| a == "--windows-service"));
+        assert!(scm
             .windows(2)
             .any(|w| w == ["--service-name", "glossa-scorer"]));
     }

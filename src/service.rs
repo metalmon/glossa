@@ -11,6 +11,11 @@ use std::path::{Path, PathBuf};
 
 /// A service to register, in binary- and OS-neutral terms: a unique `name`, human labels, the
 /// `program` to run, its `args`, and whether the program pings a systemd watchdog.
+///
+/// `args` are the plain serve args — exactly what an operator would type. The flags that make an
+/// SCM-launched process hand off to the service dispatcher are **not** in here: they are
+/// Windows-only and get added by [`ServiceSpec::scm_launch_args`] at install time. A systemd unit
+/// must not carry them (see [`render_systemd_unit`]).
 pub struct ServiceSpec {
     pub name: String,
     pub display_name: String,
@@ -20,8 +25,34 @@ pub struct ServiceSpec {
     pub watchdog: bool,
 }
 
+impl ServiceSpec {
+    /// The args a Windows SCM launch needs: the serve args plus `--windows-service --service-name
+    /// <name>`, which is how the SCM-launched process knows to route into the control-handler
+    /// dispatcher instead of running in the foreground.
+    ///
+    /// Idempotent — a spec that already carries either flag is passed through unchanged, so a
+    /// hand-built spec cannot end up with it twice.
+    pub fn scm_launch_args(&self) -> Vec<String> {
+        let mut args = self.args.clone();
+        if !args.iter().any(|a| a == "--windows-service") {
+            args.push("--windows-service".to_string());
+        }
+        if !args.iter().any(|a| a == "--service-name") {
+            args.push("--service-name".to_string());
+            args.push(self.name.clone());
+        }
+        args
+    }
+}
+
 /// Render a systemd unit for `spec` (Linux). `Type=notify` (the binary calls `sd_notify` READY once
 /// serving — see `sdnotify.rs`), `WatchdogSec=30` when the binary pings, `Restart=on-failure`.
+///
+/// `ExecStart` is the plain serve command line, with no `--windows-service`. That flag routes the
+/// process into the service dispatcher, which off Windows is only a Ctrl-C/SIGTERM bridge — and
+/// taking it means `run_serve` is told not to handle signals, which silently drops the SIGHUP
+/// handler (log-level reload, TLS reload, forced freshen). The foreground path already does
+/// everything a unit needs: READY=1 after bind, the watchdog ping, SIGTERM drain, and SIGHUP.
 pub fn render_systemd_unit(spec: &ServiceSpec) -> String {
     let program = spec.program.display().to_string();
     let prog = if program.contains(' ') {
@@ -356,7 +387,7 @@ mod os {
             start_type: ServiceStartType::AutoStart,
             error_control: ServiceErrorControl::Normal,
             executable_path: spec.program.clone(),
-            launch_arguments: spec.args.iter().map(OsString::from).collect(),
+            launch_arguments: spec.scm_launch_args().iter().map(OsString::from).collect(),
             dependencies: vec![],
             account_name: None,
             account_password: None,
@@ -642,6 +673,41 @@ mod tests {
         assert!(u.contains("WantedBy=multi-user.target"));
         // ExecStart quotes the arg with a space:
         assert!(u.contains("ExecStart=/opt/kb/kb mcp \"/data/base one\" --bind 127.0.0.1:8801"));
+    }
+
+    #[test]
+    fn systemd_unit_carries_no_scm_flags() {
+        // Reported from a pilot kit: ExecStart arrived with `--windows-service` in it. Besides
+        // reading as nonsense in a Linux unit, the flag routes the process into the service
+        // dispatcher, which tells `run_serve` not to handle signals and so drops the SIGHUP
+        // handler (log reload, TLS reload, forced freshen). `docs/deploy/mcp-server.md` documents
+        // the flag as SCM-only.
+        let u = render_systemd_unit(&spec());
+        assert!(
+            !u.contains("--windows-service"),
+            "unit was:
+{u}"
+        );
+        assert!(
+            !u.contains("--service-name"),
+            "unit was:
+{u}"
+        );
+    }
+
+    #[test]
+    fn scm_launch_args_add_the_flags_once() {
+        let s = spec();
+        let a = s.scm_launch_args();
+        assert!(a.starts_with(&s.args), "the serve args come first: {a:?}");
+        assert!(a.windows(2).any(|w| w == ["--service-name", "glossa-x"]));
+        assert_eq!(a.iter().filter(|x| *x == "--windows-service").count(), 1);
+        // A spec that already carries them is passed through unchanged, so nothing can double up.
+        let mut pre = spec();
+        pre.args.push("--windows-service".into());
+        pre.args.push("--service-name".into());
+        pre.args.push("other".into());
+        assert_eq!(pre.scm_launch_args(), pre.args);
     }
 
     #[test]
