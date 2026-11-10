@@ -93,6 +93,16 @@ pub fn generate_corpus(dest: &Path, spec: &CorpusSpec) -> Result<CorpusStats> {
             largest = largest.max(len);
             written += 1;
         }
+        // A ladder exists to price its largest file, and the last file walked gets no per-file
+        // sample at all (see `per_file_durations`) — so the ladder ends with a tiny file that sorts
+        // after every other path in the corpus. The big file gets a closing tick and a real
+        // duration; this one absorbs the finalize and is reported as the row's tail.
+        let dir = dest.join("zz-tail-sentinel");
+        std::fs::create_dir_all(&dir)?;
+        let body = synth_markdown(&mut rng, 0, 1);
+        std::fs::write(dir.join("tiny.md"), body.as_bytes())?;
+        bytes += body.len() as u64;
+        written += 1;
     }
 
     Ok(CorpusStats {
@@ -210,17 +220,36 @@ pub fn parse_progress(line: &str, at: Duration) -> Option<FileTick> {
     })
 }
 
-/// Per-file durations: the gap to the next tick, with the last file running to `total`.
+/// Per-file durations: the gap from each tick to the next.
+///
+/// **The last file gets no sample**, and that is the whole point. A tick says when a file *started*,
+/// so the last file's interval has no closing tick — running it to the end of the process instead
+/// hands it everything the run does after its last file: the tantivy commit, the graph commit, the
+/// DF sidecar, the manifest. That is how this harness manufactured a "16 MiB cliff": in every
+/// corpus measured, `ladder/big-04-16MiB.md` sorted last, so it was charged the entire finalize.
+/// Measured alone, 15 MiB costs 27.3 s and 16 MiB 30.1 s — no cliff at all, and sixteen 1 MiB
+/// files cost 21.5 s against one 16 MiB file's 30.1 s for the same chunks.
+///
+/// What the finalize costs is now reported by [`tail`] under its own name.
 ///
 /// Empty in, empty out — an all-unchanged pass emits no ticks at all, and reporting a 0 ms sample
-/// there would be a claim rather than an absence.
-pub fn per_file_durations(ticks: &[FileTick], total: Duration) -> Vec<Duration> {
-    let mut out = Vec::with_capacity(ticks.len());
-    for (i, t) in ticks.iter().enumerate() {
-        let end = ticks.get(i + 1).map(|n| n.at).unwrap_or(total);
-        out.push(end.saturating_sub(t.at));
-    }
-    out
+/// there would be a claim rather than an absence. One tick in is also empty out: with a single
+/// file, nothing separates that file from the finalize.
+pub fn per_file_durations(ticks: &[FileTick]) -> Vec<Duration> {
+    ticks
+        .windows(2)
+        .map(|w| w[1].at.saturating_sub(w[0].at))
+        .collect()
+}
+
+/// Everything after the last file started: that file's own work plus the run's finalize, which no
+/// progress line separates. `None` for a run that ticked no files.
+///
+/// This grows with the size of the index being committed, not with the last file, so a row's tail
+/// belongs next to its chunk count. Watch it: at ~10k chunks it is ~15 s, at ~37k chunks ~237 s.
+pub fn tail(ticks: &[FileTick], total: Duration) -> Option<Duration> {
+    let last = ticks.last()?;
+    Some(total.saturating_sub(last.at))
 }
 
 /// The `n` costliest files, slowest first, as `(doc_key, millis)`.
@@ -228,8 +257,8 @@ pub fn per_file_durations(ticks: &[FileTick], total: Duration) -> Vec<Duration> 
 /// A p95 without the filename behind it is half a finding: the first baseline put `kb-abac`'s p95 at
 /// 108x its p50, and nothing in the row said which document did it. This is what makes that
 /// actionable.
-pub fn slowest_files(ticks: &[FileTick], total: Duration, n: usize) -> Vec<(String, u64)> {
-    let durations = per_file_durations(ticks, total);
+pub fn slowest_files(ticks: &[FileTick], n: usize) -> Vec<(String, u64)> {
+    let durations = per_file_durations(ticks);
     let mut pairs: Vec<(String, u64)> = ticks
         .iter()
         .zip(durations.iter())
@@ -661,8 +690,12 @@ pub struct BenchReport {
     pub platform: String,
     pub files_walked: usize,
     pub wall_ms: u64,
+    /// Over every file but the last — see [`per_file_durations`] for why the last one is excluded.
     pub per_file_p50_ms: Option<u64>,
     pub per_file_p95_ms: Option<u64>,
+    /// The last file's own work plus the run's finalize, which no progress line separates. Read it
+    /// against `chunks`, not against the last file's size.
+    pub tail_ms: Option<u64>,
     pub peak_rss_bytes: Option<u64>,
     /// Machine contention during the run. A row taken at factor 1.0 is comparable with another at
     /// 1.0; one taken at 3.0 is a different experiment.
@@ -710,7 +743,7 @@ impl BenchReport {
             .map(|b| format!("{:.1} MiB", b as f64 / (1024.0 * 1024.0)))
             .unwrap_or_else(|| "—".into());
         format!(
-            "| {} | {} | {} | {} | {} ms | {} / {} ms | {} | {} | {} | {} | schema {}→{} | {} / {} ms | x{:.2} / x{:.2} | {} |",
+            "| {} | {} | {} | {} | {} ms | {} / {} ms | {} ms | {} | {} | {} | {} | schema {}→{} | {} / {} ms | x{:.2} / x{:.2} | {} |",
             self.corpus,
             self.kb_version,
             self.platform,
@@ -718,6 +751,7 @@ impl BenchReport {
             self.wall_ms,
             ms(self.per_file_p50_ms),
             ms(self.per_file_p95_ms),
+            ms(self.tail_ms),
             rss,
             self.chunks.map(|c| c.to_string()).unwrap_or_else(|| "—".into()),
             cps,
@@ -735,8 +769,8 @@ impl BenchReport {
     /// The header the rows sit under, so a fresh `docs/benchmarks.md` section is self-describing.
     pub fn markdown_header() -> String {
         [
-            "| Corpus | kb | Platform | Files | Wall | per-file p50/p95 | Peak RSS | Chunks | Chunks/s | Largest file | Migration | read p50/p95 | Load med/peak | Run |",
-            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+            "| Corpus | kb | Platform | Files | Wall | per-file p50/p95 | Tail | Peak RSS | Chunks | Chunks/s | Largest file | Migration | read p50/p95 | Load med/peak | Run |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
         .join("\n")
     }
@@ -766,7 +800,7 @@ pub fn measure(opts: &BenchOpts) -> Result<BenchReport> {
 
     let run = run_index(&opts.bin, &opts.corpus, opts.force)?;
 
-    let mut durations = per_file_durations(&run.ticks, run.wall);
+    let mut durations = per_file_durations(&run.ticks);
     durations.sort_unstable();
     let figures = index_figures(&opts.corpus, &opts.df_tokens)?;
 
@@ -789,6 +823,7 @@ pub fn measure(opts: &BenchOpts) -> Result<BenchReport> {
         wall_ms,
         per_file_p50_ms: percentile(&durations, 0.50).map(|d| d.as_millis() as u64),
         per_file_p95_ms: percentile(&durations, 0.95).map(|d| d.as_millis() as u64),
+        tail_ms: tail(&run.ticks, run.wall).map(|d| d.as_millis() as u64),
         peak_rss_bytes: run.peak_rss_bytes,
         contention: run.contention,
         chunks: figures.chunks,
@@ -796,7 +831,7 @@ pub fn measure(opts: &BenchOpts) -> Result<BenchReport> {
         largest_file_bytes: largest_file(&opts.corpus),
         df_n_chunks: figures.df_n_chunks,
         df_ratio_sample: figures.df_ratio_sample,
-        slowest: slowest_files(&run.ticks, run.wall, 5),
+        slowest: slowest_files(&run.ticks, 5),
         schema_before,
         schema_after: figures.schema_version,
         summary: run.summary,
@@ -938,7 +973,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(st.files, 15, "10 documents plus the 5-step ladder");
+        assert_eq!(
+            st.files, 16,
+            "10 documents, the 5-step ladder, and the tail sentinel"
+        );
         assert!(
             st.largest >= 16 * 1024 * 1024,
             "size ladder must reach 16 MiB, got {}",
@@ -961,10 +999,33 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(st.files, 2, "no documents, two ladder files");
+        assert_eq!(st.files, 3, "two ladder files plus the tail sentinel");
         assert!(d.path().join("ladder/big-00-10MiB.md").exists());
         assert!(d.path().join("ladder/big-01-12MiB.md").exists());
         assert!(st.largest >= 12 * 1024 * 1024 && st.largest < 13 * 1024 * 1024);
+    }
+
+    #[test]
+    fn the_tail_sentinel_sorts_after_every_other_path() {
+        // Its whole job is to be walked last, so that the ladder's largest file gets a closing
+        // tick. If some directory ever sorts after it, the ladder is measuring the finalize again.
+        let d = tempfile::tempdir().unwrap();
+        generate_corpus(
+            d.path(),
+            &CorpusSpec {
+                files: 40,
+                seed: 1,
+                ladder_mib: vec![1],
+            },
+        )
+        .unwrap();
+        let mut dirs: Vec<String> = std::fs::read_dir(d.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| !n.starts_with('.'))
+            .collect();
+        dirs.sort();
+        assert_eq!(dirs.last().unwrap(), "zz-tail-sentinel");
     }
 
     #[test]
@@ -1013,15 +1074,14 @@ mod tests {
     #[test]
     fn percentiles_of_no_samples_are_absent_not_zero() {
         // An all-unchanged pass emits no ticks at all.
-        assert_eq!(
-            per_file_durations(&[], Duration::from_secs(1)),
-            Vec::<Duration>::new()
-        );
+        assert_eq!(per_file_durations(&[]), Vec::<Duration>::new());
         assert_eq!(percentile(&[], 0.5), None);
     }
 
     #[test]
-    fn last_file_duration_runs_to_the_total() {
+    fn the_last_file_gets_no_per_file_sample() {
+        // It cannot have one: a tick says when a file started, and after the last file the run
+        // commits the index. Charging that to the file is how the "16 MiB cliff" was invented.
         let ticks = vec![
             FileTick {
                 doc_key: "a".into(),
@@ -1032,15 +1092,34 @@ mod tests {
                 at: Duration::from_millis(100),
             },
         ];
-        let d = per_file_durations(&ticks, Duration::from_millis(250));
+        assert_eq!(per_file_durations(&ticks), vec![Duration::from_millis(100)]);
         assert_eq!(
-            d,
-            vec![Duration::from_millis(100), Duration::from_millis(150)]
+            tail(&ticks, Duration::from_millis(250)),
+            Some(Duration::from_millis(150))
         );
     }
 
     #[test]
-    fn slowest_files_names_the_tail_and_is_stable() {
+    fn one_file_is_all_tail_and_no_per_file_sample() {
+        // A single-file run cannot separate the file from the finalize, so it claims neither.
+        let ticks = vec![FileTick {
+            doc_key: "only.md".into(),
+            at: Duration::from_millis(5),
+        }];
+        assert!(per_file_durations(&ticks).is_empty());
+        assert_eq!(
+            tail(&ticks, Duration::from_millis(30_005)),
+            Some(Duration::from_millis(30_000))
+        );
+    }
+
+    #[test]
+    fn a_run_that_ticked_nothing_has_no_tail() {
+        assert_eq!(tail(&[], Duration::from_secs(9)), None);
+    }
+
+    #[test]
+    fn slowest_files_names_the_costly_file_and_is_stable() {
         let ticks = vec![
             FileTick {
                 doc_key: "cheap.md".into(),
@@ -1055,16 +1134,17 @@ mod tests {
                 at: Duration::from_millis(5010),
             },
         ];
-        let top = slowest_files(&ticks, Duration::from_millis(5200), 2);
+        let top = slowest_files(&ticks, 2);
         assert_eq!(top[0], ("dear.pdf".to_string(), 5000));
-        assert_eq!(top[1], ("mid.md".to_string(), 190));
+        // "mid.md" is last, so it has no measured duration and cannot appear.
+        assert_eq!(top[1], ("cheap.md".to_string(), 10));
         // Same input, same order — a row compared across phases must list the same files.
-        assert_eq!(top, slowest_files(&ticks, Duration::from_millis(5200), 2));
+        assert_eq!(top, slowest_files(&ticks, 2));
     }
 
     #[test]
     fn slowest_files_of_no_ticks_is_empty() {
-        assert!(slowest_files(&[], Duration::from_secs(1), 5).is_empty());
+        assert!(slowest_files(&[], 5).is_empty());
     }
 
     #[test]
@@ -1135,6 +1215,7 @@ mod tests {
             wall_ms: 12_000,
             per_file_p50_ms: Some(210),
             per_file_p95_ms: Some(900),
+            tail_ms: Some(15632),
             peak_rss_bytes: None,
             contention: Contention {
                 baseline_us: 10_000,
