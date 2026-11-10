@@ -4,6 +4,61 @@ All notable changes to glossa are documented here. Release tags ship **`kb`**, *
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.8] — 2026-11-11
+
+### Fixed
+
+- **A file whose extension is UPPERCASE is indexed.** `.ignore` is a seeded whitelist
+  (`*` then `!*.pdf`, `!*.docx`, …) and the walker matched it case-sensitively, so `REPORT.PDF` was
+  invisible — not skipped with a reason, simply never seen. Found on a working corpus where four
+  certificates had never been in any index. The three walkers (full pass, scoped rescan, delta scan)
+  now share one ignore configuration, which is the whole fix: configuring only the full pass makes it
+  worse, because the delta scan then reads the newly-indexed file as *removed* and deletes it again
+  on the next freshen.
+- **A full-coverage pass rebuilds everything it is supposed to.** An index-schema migration rebuilt
+  the document bodies but left the DF sidecar and the auto-derived graph edges as they were, so a
+  corpus that migrated carried a grounding table and a structural graph built by an older extractor
+  — silently, since nothing in the output distinguishes a stale sidecar from a fresh one. Both are
+  now rebuilt by the same condition that rebuilds the bodies.
+- **`kb search` and the MCP `search` tool rank the same pool.** The CLI reranked a pool derived from
+  limit 100 and the MCP tool one derived from 50, so the same query against the same index could put
+  different documents on top depending on which door it came through. Both now resolve the depth
+  through one function with one default.
+- **`kb mcp service install` writes a systemd unit without `--windows-service` in it.** The flag is
+  how an SCM-launched process attaches to the Windows service control handler; in a unit it reads as
+  nonsense and costs something real, because that code path tells the server not to install signal
+  handlers — so an installed unit silently lost SIGHUP (log-level reload, TLS certificate reload,
+  forced freshen). The two SCM flags are now added at install time on Windows only. `kbi service
+  install` had the same defect.
+
+### Changed
+
+- **`kb index --force` no longer spends its time pairing sections.** Nearly all of a full reindex
+  went to the graph generalization pass that `--force` runs after indexing, and inside it to a
+  double loop over every pair of nodes that has an edge — one `Section` per chunk on a document
+  corpus. Measured on a generated 37 000-chunk corpus: the pass took 289 s to emit 20 SIMILAR edges
+  between sections, the same edge type retrieval already de-weights because a SIMILAR flood drowns
+  the reasoning edges. Both SIMILAR arms now pair reasoning nodes only (the ontology's `structural`
+  types were already excluded from one of them), and candidates come from shared neighbours rather
+  than from every pair. That corpus's full reindex went **294 s → 43 s** (126 → 858 chunks/s) and
+  the pass itself 289 s → 1.0 s; on a corpus with a real reasoning graph the pass went 12.7 s → 3.1 s
+  while emitting the same 9 151 edges and 91 communities. Existing corpora keep the
+  section-to-section edges they already derived until the next `kb index --force`, which clears the
+  auto-derived layer before rebuilding it.
+- **`kb index` says which finalize phase it is in.** A `--force` pass over a large corpus goes quiet
+  for minutes after the last file; it now brackets cross-document reference resolution, the tantivy
+  commit and the DF sidecar write on stderr, so the pause is attributable. The scoped freshen path
+  stays silent — it is short by construction, and a running server would log two lines per cycle.
+
+### Added
+
+- **`kbx bench extract` — indexing and read-path measurement.** One row per corpus per run into
+  `docs/benchmarks.md`: wall time, per-file p50/p95, the finalize tail broken into named phases,
+  chunk throughput, the index-schema versions the run crossed, read latency, and a load probe that
+  says how busy the machine was (a row taken under contention is a different experiment). Generates a
+  deterministic corpus with a size ladder and a Zipf vocabulary knob for the cases a real corpus
+  cannot cover.
+
 ## [0.5.7] — 2026-11-04
 
 ### Fixed
