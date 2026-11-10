@@ -288,8 +288,8 @@ last-episode:
 # locally like every other tool in this file.
 #
 # Corpora are measured as COPIES. A `--force` pass rebuilds a corpus's index, and on a corpus whose
-# manifest predates the current schema it migrates it too — kb-abac sits at version 3 against a
-# current 5, so measuring it in place would move the eval baseline underneath us.
+# manifest predates the current schema it migrates it too — a corpus an eval baseline rests on would
+# move underneath that baseline if measured in place.
 bench_dir := env_var_or_default("GLOSSA_BENCH_DIR", "../glossa-bench")
 
 # Copy one corpus for measuring (index and graph come along: the point is to measure a real one).
@@ -300,7 +300,8 @@ bench-copy src dst:
 bench-extract kb corpus *extra: build-kbx
     {{preface}}{{kbx_bin}} bench extract '{{corpus}}' --bin '{{kb}}' --out '{{corpus}}.bench.json' {{extra}}
 
-# The whole baseline: both real corpora as copies, plus a generated corpus with the size ladder.
+# The whole baseline: two real corpora as copies, plus a generated corpus with the size ladder.
+# Corpus directories are arguments, not constants — a corpus name says who the corpus belongs to.
 # Rows go to stdout (the column header goes to stderr), so append them where you want them.
-bench-baseline kb: build-kbx
-    {{preface}}set -e;       just bench-copy kb-abac kb-abac-copy;       just bench-copy kb-gost kb-gost-copy;       rm -rf '{{bench_dir}}/synth';       just bench-extract '{{kb}}' '{{bench_dir}}/kb-abac-copy';       just bench-extract '{{kb}}' '{{bench_dir}}/kb-gost-copy';       just bench-extract '{{kb}}' '{{bench_dir}}/synth' --generate 2000 --seed 1 --ladder
+bench-baseline kb corpus_a corpus_b: build-kbx
+    {{preface}}set -e;       just bench-copy '{{corpus_a}}' a-copy;       just bench-copy '{{corpus_b}}' b-copy;       rm -rf '{{bench_dir}}/synth';       just bench-extract '{{kb}}' '{{bench_dir}}/a-copy';       just bench-extract '{{kb}}' '{{bench_dir}}/b-copy';       just bench-extract '{{kb}}' '{{bench_dir}}/synth' --generate 2000 --seed 1 --ladder

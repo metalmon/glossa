@@ -331,8 +331,8 @@ pub fn tail(ticks: &[FileTick], total: Duration) -> Option<Duration> {
 
 /// The `n` costliest files, slowest first, as `(doc_key, millis)`.
 ///
-/// A p95 without the filename behind it is half a finding: the first baseline put `kb-abac`'s p95 at
-/// 108x its p50, and nothing in the row said which document did it. This is what makes that
+/// A p95 without the filename behind it is half a finding: the first baseline put a real corpus's
+/// p95 at 108x its p50, and nothing in the row said which document did it. This is what makes that
 /// actionable.
 pub fn slowest_files(ticks: &[FileTick], n: usize) -> Vec<(String, u64)> {
     let durations = per_file_durations(ticks);
@@ -828,7 +828,7 @@ pub struct BenchReport {
     /// alarming.
     pub slowest: Vec<(String, u64)>,
     /// The manifest's schema version before and after the run. A row that does not say which side
-    /// of a migration it measured describes two different corpora — `kb-abac` sits at 3 against a
+    /// of a migration it measured describes two different corpora — a working corpus sat at 3 against a
     /// current 5, so this is not hypothetical.
     pub schema_before: u32,
     pub schema_after: u32,
@@ -1427,7 +1427,7 @@ mod tests {
 
     fn sample_report() -> BenchReport {
         BenchReport {
-            corpus: "kb-abac-copy".into(),
+            corpus: "corpus-a-copy".into(),
             kb_version: "kb 0.5.7".into(),
             platform: std::env::consts::OS.to_string(),
             files_walked: 38,

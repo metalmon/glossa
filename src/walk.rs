@@ -38,7 +38,7 @@ pub(crate) fn is_junk_file(name: &std::ffi::OsStr) -> bool {
 /// (`default_ignore.rs`): every supported type is re-included by one `!*.ext` line, and with
 /// case-sensitive matching `!*.pdf` does not re-include `REPORT.PDF`, so `*` keeps it and the file
 /// is never walked at all — silently, because the walk is what drops it and no extractor is ever
-/// asked. Found in our own `kb-abac`: four `.PDF` certificates on disk, absent from the manifest for
+/// asked. Found on a working corpus: four `.PDF` certificates on disk, absent from the manifest for
 /// years. The trade is that a corpus's own hand-written exclusion becomes case-insensitive too;
 /// that is the right way round, since the alternative loses documents, and it matches the
 /// filesystem on the Windows deployments anyway.
@@ -112,7 +112,7 @@ mod cover_tests {
 
     /// The seeded `.ignore` is a whitelist, so a case-sensitive match drops an UPPERCASE extension
     /// before any extractor is asked — the walk is what loses it, silently. Four `.PDF` files in
-    /// `kb-abac` were missing from its manifest for exactly this reason.
+    /// a working corpus were missing from its manifest for exactly this reason.
     #[test]
     fn whitelisted_extension_is_matched_regardless_of_case() {
         let dir = tempfile::tempdir().unwrap();
