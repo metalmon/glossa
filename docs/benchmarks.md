@@ -238,6 +238,11 @@ document corpus. `--vocab 50000` draws Zipf-weighted from generated pseudo-words
 the byte count and the ladder identical, and the real corpora were re-run with `--tail-sentinel` so
 their finalize is separated from the last document's own cost.
 
+One caveat about re-running these three: they were measured before a fix to the rank-to-index shift
+in the Zipf draw, so their corpora used a 50 000-word vocabulary whose commonest word was never
+drawn. The distribution's shape was unaffected and the rows stand, but the same seed now generates a
+slightly different corpus — re-measure the pair, not just one side of it.
+
 **The vocabulary was not it.** Three matched pairs:
 
 | Chunks | Tail @ 32 words | Chunks | Tail @ 50k words | ratio |
