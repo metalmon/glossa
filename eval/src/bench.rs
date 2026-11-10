@@ -102,10 +102,10 @@ fn synth_markdown(rng: &mut impl Rng, index: usize, paragraphs: usize) -> String
     let mut out = String::with_capacity(paragraphs * 220);
     out.push_str(&format!("# Document {index}\n\n"));
     for p in 0..paragraphs {
-        if p % 8 == 0 {
+        if p.is_multiple_of(8) {
             out.push_str(&format!("## Section {}\n\n", p / 8));
         }
-        if p % 24 == 0 {
+        if p.is_multiple_of(24) {
             out.push_str(&format!("### Subsection {}\n\n", p / 24));
         }
         for _ in 0..24 {
@@ -119,7 +119,7 @@ fn synth_markdown(rng: &mut impl Rng, index: usize, paragraphs: usize) -> String
             out.push_str(PLANTED_TOKENS[index % 2]);
             out.push(' ');
         }
-        if p == 1 && index % 10 == 0 {
+        if p == 1 && index.is_multiple_of(10) {
             out.push_str(PLANTED_TOKENS[2 + (index / 10) % 2]);
             out.push(' ');
         }
