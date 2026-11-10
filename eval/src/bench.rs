@@ -256,6 +256,8 @@ pub struct RunOutcome {
     pub wall: Duration,
     pub ticks: Vec<FileTick>,
     pub peak_rss_bytes: Option<u64>,
+    /// How busy the machine was while this ran — without it a row cannot be judged.
+    pub contention: Contention,
     /// The canonical `added/removed/unchanged[/skipped]` block `kb index` prints last on stdout.
     pub summary: BTreeMap<String, String>,
     pub exit_ok: bool,
@@ -298,6 +300,7 @@ pub fn run_index(bin: &Path, corpus: &Path, force: bool) -> Result<RunOutcome> {
 
     let pid = child.id();
     let rss = PeakRss::start(pid);
+    let load = ContentionProbe::start();
 
     // Drain stdout on its own thread. Reading stderr to EOF first would deadlock if the child
     // filled the stdout pipe buffer meanwhile — and `--force` keeps writing after the summary
@@ -332,6 +335,7 @@ pub fn run_index(bin: &Path, corpus: &Path, force: bool) -> Result<RunOutcome> {
     let status = child.wait().context("wait for kb index")?;
     let wall = started.elapsed();
     let peak_rss_bytes = rss.finish();
+    let contention = load.finish();
 
     // The summary is the LAST line carrying `added:` — the CLI contract puts exactly one canonical
     // block on stdout, last.
@@ -346,10 +350,130 @@ pub fn run_index(bin: &Path, corpus: &Path, force: bool) -> Result<RunOutcome> {
         wall,
         ticks,
         peak_rss_bytes,
+        contention,
         summary,
         exit_ok: status.success(),
         stderr_tail: tail.into_iter().collect::<Vec<_>>().join("\n"),
     })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Machine contention
+// ---------------------------------------------------------------------------------------------
+
+/// How busy the machine was, as a factor against its own state at the start of the run.
+///
+/// This exists because the first baseline was taken on a developer workstation with other work on
+/// it, which makes every row un-judgeable: a 165-second file could be superlinear behaviour or a
+/// load spike, and nothing in the row could tell them apart. A row that cannot be judged is not
+/// evidence.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Contention {
+    /// The probe's time with the machine as it was when the run started, in microseconds.
+    pub baseline_us: u64,
+    /// Median probe time during the run.
+    pub p50_us: u64,
+    /// Worst probe time during the run — what a spike looks like.
+    pub max_us: u64,
+    pub samples: usize,
+}
+
+impl Contention {
+    /// Median probe time over its baseline. 1.0 means as quiet as at the start; 3.0 means the probe
+    /// took three times as long, so something else was taking the CPU.
+    pub fn factor(&self) -> f64 {
+        if self.baseline_us == 0 {
+            return 1.0;
+        }
+        self.p50_us as f64 / self.baseline_us as f64
+    }
+
+    /// Worst-case factor — a short spike shows here and not in `factor`.
+    pub fn peak_factor(&self) -> f64 {
+        if self.baseline_us == 0 {
+            return 1.0;
+        }
+        self.max_us as f64 / self.baseline_us as f64
+    }
+}
+
+/// Fixed, deterministic CPU work. The accumulator is returned so the optimiser cannot drop it.
+fn probe_work() -> u64 {
+    let mut acc: u64 = 0x9E37_79B9_7F4A_7C15;
+    for i in 0..3_000_000u64 {
+        acc = acc.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(i);
+        acc ^= acc >> 29;
+    }
+    acc
+}
+
+/// Time one probe.
+fn probe_once() -> Duration {
+    let t = Instant::now();
+    let acc = probe_work();
+    let d = t.elapsed();
+    // Consume the accumulator so the loop cannot be optimised away.
+    if acc == 0 {
+        eprintln!("probe produced zero, which is possible but vanishingly unlikely");
+    }
+    d
+}
+
+/// Samples [`probe_once`] on its own thread for the length of a run.
+///
+/// It costs one core. That is the point: it measures how much of a core the rest of the machine is
+/// willing to leave alone, which is the quantity a reader of the row needs.
+struct ContentionProbe {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    samples: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+    baseline_us: u64,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ContentionProbe {
+    fn start() -> Self {
+        // Two probes, take the faster: the first can pay for cold caches and branch predictors.
+        let baseline_us = probe_once().min(probe_once()).as_micros() as u64;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let samples = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (s, v) = (stop.clone(), samples.clone());
+        let handle = Some(std::thread::spawn(move || {
+            while !s.load(std::sync::atomic::Ordering::Relaxed) {
+                let us = probe_once().as_micros() as u64;
+                if let Ok(mut g) = v.lock() {
+                    g.push(us);
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }));
+        Self {
+            stop,
+            samples,
+            baseline_us,
+            handle,
+        }
+    }
+
+    fn finish(self) -> Contention {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.handle {
+            let _ = h.join();
+        }
+        let mut v = self.samples.lock().map(|g| g.clone()).unwrap_or_default();
+        v.sort_unstable();
+        let p50 = if v.is_empty() {
+            self.baseline_us
+        } else {
+            v[v.len() / 2]
+        };
+        let max = v.last().copied().unwrap_or(self.baseline_us);
+        Contention {
+            baseline_us: self.baseline_us,
+            p50_us: p50,
+            max_us: max,
+            samples: v.len(),
+        }
+    }
 }
 
 /// Peak resident set of a child, where the platform gives it away cheaply.
@@ -535,6 +659,9 @@ pub struct BenchReport {
     pub per_file_p50_ms: Option<u64>,
     pub per_file_p95_ms: Option<u64>,
     pub peak_rss_bytes: Option<u64>,
+    /// Machine contention during the run. A row taken at factor 1.0 is comparable with another at
+    /// 1.0; one taken at 3.0 is a different experiment.
+    pub contention: Contention,
     pub chunks: Option<u64>,
     pub chunks_per_sec: Option<f64>,
     pub largest_file_bytes: Option<u64>,
@@ -578,7 +705,7 @@ impl BenchReport {
             .map(|b| format!("{:.1} MiB", b as f64 / (1024.0 * 1024.0)))
             .unwrap_or_else(|| "—".into());
         format!(
-            "| {} | {} | {} | {} | {} ms | {} / {} ms | {} | {} | {} | {} | schema {}→{} | {} / {} ms | {} |",
+            "| {} | {} | {} | {} | {} ms | {} / {} ms | {} | {} | {} | {} | schema {}→{} | {} / {} ms | x{:.2} / x{:.2} | {} |",
             self.corpus,
             self.kb_version,
             self.platform,
@@ -594,6 +721,8 @@ impl BenchReport {
             self.schema_after,
             ms(self.read_p50_ms),
             ms(self.read_p95_ms),
+            self.contention.factor(),
+            self.contention.peak_factor(),
             if self.exit_ok { "ok" } else { "**FAILED**" },
         )
     }
@@ -601,8 +730,8 @@ impl BenchReport {
     /// The header the rows sit under, so a fresh `docs/benchmarks.md` section is self-describing.
     pub fn markdown_header() -> String {
         [
-            "| Corpus | kb | Platform | Files | Wall | per-file p50/p95 | Peak RSS | Chunks | Chunks/s | Largest file | Migration | read p50/p95 | Run |",
-            "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+            "| Corpus | kb | Platform | Files | Wall | per-file p50/p95 | Peak RSS | Chunks | Chunks/s | Largest file | Migration | read p50/p95 | Load med/peak | Run |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
         .join("\n")
     }
@@ -656,6 +785,7 @@ pub fn measure(opts: &BenchOpts) -> Result<BenchReport> {
         per_file_p50_ms: percentile(&durations, 0.50).map(|d| d.as_millis() as u64),
         per_file_p95_ms: percentile(&durations, 0.95).map(|d| d.as_millis() as u64),
         peak_rss_bytes: run.peak_rss_bytes,
+        contention: run.contention,
         chunks: figures.chunks,
         chunks_per_sec,
         largest_file_bytes: largest_file(&opts.corpus),
@@ -981,6 +1111,12 @@ mod tests {
             per_file_p50_ms: Some(210),
             per_file_p95_ms: Some(900),
             peak_rss_bytes: None,
+            contention: Contention {
+                baseline_us: 10_000,
+                p50_us: 12_000,
+                max_us: 30_000,
+                samples: 24,
+            },
             chunks: Some(4_200),
             chunks_per_sec: Some(350.0),
             largest_file_bytes: Some(16 * 1024 * 1024),
@@ -1032,6 +1168,52 @@ mod tests {
         assert_eq!(back.schema_before, 3);
         assert_eq!(back.schema_after, 5);
         assert_eq!(back.files_walked, 38);
+    }
+
+    #[test]
+    fn contention_factor_is_one_when_the_machine_was_as_quiet_as_at_the_start() {
+        let c = Contention {
+            baseline_us: 10_000,
+            p50_us: 10_000,
+            max_us: 10_000,
+            samples: 5,
+        };
+        assert!((c.factor() - 1.0).abs() < 1e-9);
+        assert!((c.peak_factor() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn contention_reports_a_spike_in_peak_not_in_median() {
+        let c = Contention {
+            baseline_us: 10_000,
+            p50_us: 11_000,
+            max_us: 40_000,
+            samples: 20,
+        };
+        assert!((c.factor() - 1.1).abs() < 1e-9, "median barely moved");
+        assert!(
+            (c.peak_factor() - 4.0).abs() < 1e-9,
+            "the spike shows in peak"
+        );
+    }
+
+    #[test]
+    fn contention_with_no_baseline_does_not_divide_by_zero() {
+        let c = Contention {
+            baseline_us: 0,
+            p50_us: 5,
+            max_us: 9,
+            samples: 1,
+        };
+        assert_eq!(c.factor(), 1.0);
+        assert_eq!(c.peak_factor(), 1.0);
+    }
+
+    #[test]
+    fn the_row_states_the_machine_load() {
+        let row = sample_report().to_markdown_row();
+        assert!(row.contains("x1.20"), "median load factor missing: {row}");
+        assert!(row.contains("x3.00"), "peak load factor missing: {row}");
     }
 
     #[test]
