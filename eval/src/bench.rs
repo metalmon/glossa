@@ -177,8 +177,11 @@ fn vocabulary(n: usize, seed: u64) -> Vec<String> {
 /// about `n` times as likely as rank `n`. Cheap enough to call per word, which matters at 60 MiB.
 fn zipf_index(rng: &mut impl Rng, n: usize) -> usize {
     let u: f64 = rng.gen_range(0.0..1.0);
+    // `n^u` is the RANK, 1-based: u = 0 gives rank 1, u -> 1 gives rank n. The vocabulary is
+    // 0-indexed, so rank 1 is index 0 — without the shift the commonest word is never drawn at all
+    // and rank 1's mass lands on the second word.
     let rank = (n as f64).powf(u) as usize;
-    rank.min(n.saturating_sub(1))
+    (rank.saturating_sub(1)).min(n.saturating_sub(1))
 }
 
 /// One synthetic document: a heading path a few levels deep, prose, and the planted markers.
@@ -1171,6 +1174,9 @@ mod tests {
 
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(1);
         let mut hits = vec![0u32; 5_000];
+        // Index 0 is the commonest word and must actually be drawn — `n^u` is a 1-based rank, so
+        // handing it back unshifted would leave the first word of every corpus unused.
+        assert!((0..200).any(|_| zipf_index(&mut rng, 5_000) == 0));
         for _ in 0..50_000 {
             hits[zipf_index(&mut rng, 5_000)] += 1;
         }
