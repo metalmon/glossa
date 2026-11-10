@@ -218,6 +218,24 @@ pub fn per_file_durations(ticks: &[FileTick], total: Duration) -> Vec<Duration> 
     out
 }
 
+/// The `n` costliest files, slowest first, as `(doc_key, millis)`.
+///
+/// A p95 without the filename behind it is half a finding: the first baseline put `kb-abac`'s p95 at
+/// 108x its p50, and nothing in the row said which document did it. This is what makes that
+/// actionable.
+pub fn slowest_files(ticks: &[FileTick], total: Duration, n: usize) -> Vec<(String, u64)> {
+    let durations = per_file_durations(ticks, total);
+    let mut pairs: Vec<(String, u64)> = ticks
+        .iter()
+        .zip(durations.iter())
+        .map(|(t, d)| (t.doc_key.clone(), d.as_millis() as u64))
+        .collect();
+    // Slowest first; ties broken by key so two runs of one corpus list them in the same order.
+    pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    pairs.truncate(n);
+    pairs
+}
+
 /// Nearest-rank percentile over an already-sorted slice. `None` for no samples.
 pub fn percentile(sorted: &[Duration], q: f64) -> Option<Duration> {
     if sorted.is_empty() {
@@ -522,6 +540,9 @@ pub struct BenchReport {
     pub largest_file_bytes: Option<u64>,
     pub df_n_chunks: Option<u32>,
     pub df_ratio_sample: Vec<(String, f32)>,
+    /// The costliest files, slowest first — what makes a long p95 tail actionable rather than just
+    /// alarming.
+    pub slowest: Vec<(String, u64)>,
     /// The manifest's schema version before and after the run. A row that does not say which side
     /// of a migration it measured describes two different corpora — `kb-abac` sits at 3 against a
     /// current 5, so this is not hypothetical.
@@ -640,6 +661,7 @@ pub fn measure(opts: &BenchOpts) -> Result<BenchReport> {
         largest_file_bytes: largest_file(&opts.corpus),
         df_n_chunks: figures.df_n_chunks,
         df_ratio_sample: figures.df_ratio_sample,
+        slowest: slowest_files(&run.ticks, run.wall, 5),
         schema_before,
         schema_after: figures.schema_version,
         summary: run.summary,
@@ -863,6 +885,34 @@ mod tests {
     }
 
     #[test]
+    fn slowest_files_names_the_tail_and_is_stable() {
+        let ticks = vec![
+            FileTick {
+                doc_key: "cheap.md".into(),
+                at: Duration::from_millis(0),
+            },
+            FileTick {
+                doc_key: "dear.pdf".into(),
+                at: Duration::from_millis(10),
+            },
+            FileTick {
+                doc_key: "mid.md".into(),
+                at: Duration::from_millis(5010),
+            },
+        ];
+        let top = slowest_files(&ticks, Duration::from_millis(5200), 2);
+        assert_eq!(top[0], ("dear.pdf".to_string(), 5000));
+        assert_eq!(top[1], ("mid.md".to_string(), 190));
+        // Same input, same order — a row compared across phases must list the same files.
+        assert_eq!(top, slowest_files(&ticks, Duration::from_millis(5200), 2));
+    }
+
+    #[test]
+    fn slowest_files_of_no_ticks_is_empty() {
+        assert!(slowest_files(&[], Duration::from_secs(1), 5).is_empty());
+    }
+
+    #[test]
     fn percentile_picks_by_nearest_rank() {
         let s: Vec<Duration> = (1..=10).map(Duration::from_millis).collect();
         assert_eq!(percentile(&s, 0.5), Some(Duration::from_millis(5)));
@@ -936,6 +986,7 @@ mod tests {
             largest_file_bytes: Some(16 * 1024 * 1024),
             df_n_chunks: Some(4_200),
             df_ratio_sample: vec![("zylathon".into(), 0.5)],
+            slowest: vec![("d00/doc-00001.md".into(), 5270)],
             schema_before: 3,
             schema_after: 5,
             summary: BTreeMap::new(),

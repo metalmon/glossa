@@ -1622,6 +1622,29 @@ fn run_bench_extract(args: BenchExtractArgs) -> Result<()> {
     eprintln!("{}", kb_eval::bench::BenchReport::markdown_header());
     println!("{}", report.to_markdown_row());
 
+    // The tail, by name, on stderr: a p95 without the file behind it cannot be acted on, and the
+    // table has no room for a path. Tokens are echoed with their ratios for the same reason — a
+    // per-token number is only trustworthy next to the token it was computed for, and a non-ASCII
+    // one does not survive argv on Windows.
+    if !report.slowest.is_empty() {
+        eprintln!(
+            "
+slowest files:"
+        );
+        for (key, ms) in &report.slowest {
+            eprintln!("  {ms:>7} ms  {key}");
+        }
+    }
+    if !report.df_ratio_sample.is_empty() {
+        eprintln!(
+            "
+df(token)/n_chunks:"
+        );
+        for (tok, ratio) in &report.df_ratio_sample {
+            eprintln!("  {ratio:>12.6}  {tok}");
+        }
+    }
+
     if !report.exit_ok {
         eprintln!(
             "\nthe measured run FAILED; last stderr lines:\n{}",
