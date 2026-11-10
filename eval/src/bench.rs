@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use rand::{Rng, SeedableRng};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------------------------
@@ -500,6 +500,189 @@ pub fn run_reads(bin: &Path, corpus: &Path, refs: &[String]) -> Result<ReadStats
 }
 
 // ---------------------------------------------------------------------------------------------
+// Task 6: the report
+// ---------------------------------------------------------------------------------------------
+
+/// One measured run, as it goes into `docs/benchmarks.md` and a JSON sidecar.
+///
+/// Durations are stored as milliseconds rather than `Duration` so the JSON stays readable to a
+/// person comparing two runs by eye, which is what the benchmarks log is for.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BenchReport {
+    pub corpus: String,
+    pub kb_version: String,
+    pub platform: String,
+    pub files_walked: usize,
+    pub wall_ms: u64,
+    pub per_file_p50_ms: Option<u64>,
+    pub per_file_p95_ms: Option<u64>,
+    pub peak_rss_bytes: Option<u64>,
+    pub chunks: Option<u64>,
+    pub chunks_per_sec: Option<f64>,
+    pub largest_file_bytes: Option<u64>,
+    pub df_n_chunks: Option<u32>,
+    pub df_ratio_sample: Vec<(String, f32)>,
+    /// The manifest's schema version before and after the run. A row that does not say which side
+    /// of a migration it measured describes two different corpora — `kb-abac` sits at 3 against a
+    /// current 5, so this is not hypothetical.
+    pub schema_before: u32,
+    pub schema_after: u32,
+    pub summary: BTreeMap<String, String>,
+    pub exit_ok: bool,
+    pub read_calls: usize,
+    pub read_p50_ms: Option<u64>,
+    pub read_p95_ms: Option<u64>,
+    /// Non-empty when the run failed — the last stderr lines, so the row is diagnosable alone.
+    pub stderr_tail: String,
+}
+
+impl BenchReport {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
+    }
+
+    /// One `docs/benchmarks.md` table row.
+    pub fn to_markdown_row(&self) -> String {
+        let ms = |v: Option<u64>| v.map(|x| format!("{x}")).unwrap_or_else(|| "—".into());
+        let rss = self
+            .peak_rss_bytes
+            .map(|b| format!("{:.0} MiB", b as f64 / (1024.0 * 1024.0)))
+            .unwrap_or_else(|| "not measured".into());
+        let cps = self
+            .chunks_per_sec
+            .map(|v| format!("{v:.0}"))
+            .unwrap_or_else(|| "—".into());
+        let largest = self
+            .largest_file_bytes
+            .map(|b| format!("{:.1} MiB", b as f64 / (1024.0 * 1024.0)))
+            .unwrap_or_else(|| "—".into());
+        format!(
+            "| {} | {} | {} | {} | {} ms | {} / {} ms | {} | {} | {} | {} | schema {}→{} | {} / {} ms | {} |",
+            self.corpus,
+            self.kb_version,
+            self.platform,
+            self.files_walked,
+            self.wall_ms,
+            ms(self.per_file_p50_ms),
+            ms(self.per_file_p95_ms),
+            rss,
+            self.chunks.map(|c| c.to_string()).unwrap_or_else(|| "—".into()),
+            cps,
+            largest,
+            self.schema_before,
+            self.schema_after,
+            ms(self.read_p50_ms),
+            ms(self.read_p95_ms),
+            if self.exit_ok { "ok" } else { "**FAILED**" },
+        )
+    }
+
+    /// The header the rows sit under, so a fresh `docs/benchmarks.md` section is self-describing.
+    pub fn markdown_header() -> String {
+        [
+            "| Corpus | kb | Platform | Files | Wall | per-file p50/p95 | Peak RSS | Chunks | Chunks/s | Largest file | Migration | read p50/p95 | Run |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        ]
+        .join("\n")
+    }
+}
+
+/// What to measure.
+#[derive(Debug, Clone)]
+pub struct BenchOpts {
+    pub bin: PathBuf,
+    pub corpus: PathBuf,
+    pub df_tokens: Vec<String>,
+    pub reads: usize,
+    pub force: bool,
+}
+
+/// Measure one corpus end to end: schema before, index run, figures after, read path.
+pub fn measure(opts: &BenchOpts) -> Result<BenchReport> {
+    let schema_before = glossa::index::manifest::Manifest::load(&opts.corpus).index_schema_version;
+
+    let kb_version = std::process::Command::new(&opts.bin)
+        .arg("--version")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".into());
+
+    let run = run_index(&opts.bin, &opts.corpus, opts.force)?;
+
+    let mut durations = per_file_durations(&run.ticks, run.wall);
+    durations.sort_unstable();
+    let figures = index_figures(&opts.corpus, &opts.df_tokens)?;
+
+    // Read references straight out of the index, so the read timings hit real chunks rather than
+    // addresses we invented.
+    let refs = read_refs(&opts.corpus, opts.reads);
+    let reads = run_reads(&opts.bin, &opts.corpus, &refs)?;
+
+    let wall_ms = run.wall.as_millis() as u64;
+    let chunks_per_sec = match (figures.chunks, wall_ms) {
+        (Some(c), w) if w > 0 => Some(c as f64 * 1000.0 / w as f64),
+        _ => None,
+    };
+
+    Ok(BenchReport {
+        corpus: opts.corpus.display().to_string(),
+        kb_version,
+        platform: std::env::consts::OS.to_string(),
+        files_walked: run.ticks.len(),
+        wall_ms,
+        per_file_p50_ms: percentile(&durations, 0.50).map(|d| d.as_millis() as u64),
+        per_file_p95_ms: percentile(&durations, 0.95).map(|d| d.as_millis() as u64),
+        peak_rss_bytes: run.peak_rss_bytes,
+        chunks: figures.chunks,
+        chunks_per_sec,
+        largest_file_bytes: largest_file(&opts.corpus),
+        df_n_chunks: figures.df_n_chunks,
+        df_ratio_sample: figures.df_ratio_sample,
+        schema_before,
+        schema_after: figures.schema_version,
+        summary: run.summary,
+        exit_ok: run.exit_ok,
+        read_calls: reads.calls,
+        read_p50_ms: reads.p50.map(|d| d.as_millis() as u64),
+        read_p95_ms: reads.p95.map(|d| d.as_millis() as u64),
+        stderr_tail: if run.exit_ok {
+            String::new()
+        } else {
+            run.stderr_tail
+        },
+    })
+}
+
+/// Up to `n` `path#1` references drawn from the manifest, in manifest order so two runs read the
+/// same documents.
+fn read_refs(corpus: &Path, n: usize) -> Vec<String> {
+    glossa::index::manifest::Manifest::load(corpus)
+        .files
+        .keys()
+        .take(n)
+        .map(|k| format!("{k}#1"))
+        .collect()
+}
+
+/// Largest walked file, which is what the size ladder exists to surface.
+fn largest_file(corpus: &Path) -> Option<u64> {
+    let mut largest = 0u64;
+    let _ = glossa::walk::walk_files(corpus, None, true, &mut |p| {
+        if let Ok(m) = std::fs::metadata(p) {
+            largest = largest.max(m.len());
+        }
+        Ok(())
+    });
+    if largest == 0 {
+        None
+    } else {
+        Some(largest)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -736,5 +919,77 @@ mod tests {
         assert_eq!(s.calls, 0);
         assert_eq!(s.p50, None);
         assert_eq!(s.p95, None);
+    }
+
+    fn sample_report() -> BenchReport {
+        BenchReport {
+            corpus: "kb-abac-copy".into(),
+            kb_version: "kb 0.5.7".into(),
+            platform: std::env::consts::OS.to_string(),
+            files_walked: 38,
+            wall_ms: 12_000,
+            per_file_p50_ms: Some(210),
+            per_file_p95_ms: Some(900),
+            peak_rss_bytes: None,
+            chunks: Some(4_200),
+            chunks_per_sec: Some(350.0),
+            largest_file_bytes: Some(16 * 1024 * 1024),
+            df_n_chunks: Some(4_200),
+            df_ratio_sample: vec![("zylathon".into(), 0.5)],
+            schema_before: 3,
+            schema_after: 5,
+            summary: BTreeMap::new(),
+            exit_ok: true,
+            read_calls: 20,
+            read_p50_ms: Some(40),
+            read_p95_ms: Some(85),
+            stderr_tail: String::new(),
+        }
+    }
+
+    #[test]
+    fn markdown_row_states_the_schema_versions_and_the_platform() {
+        let row = sample_report().to_markdown_row();
+        assert!(
+            row.contains("schema 3→5"),
+            "a row must say which side of a migration it measured: {row}"
+        );
+        assert!(row.contains(std::env::consts::OS), "{row}");
+    }
+
+    #[test]
+    fn an_unmeasured_peak_rss_says_so_rather_than_showing_zero() {
+        // On Windows there is no peak RSS; a row showing "0 MiB" would be a false claim.
+        let row = sample_report().to_markdown_row();
+        assert!(row.contains("not measured"), "{row}");
+        assert!(!row.contains("0 MiB |"), "{row}");
+    }
+
+    #[test]
+    fn a_failed_run_is_marked_in_its_row() {
+        let mut r = sample_report();
+        r.exit_ok = false;
+        assert!(r.to_markdown_row().contains("**FAILED**"));
+    }
+
+    #[test]
+    fn report_json_round_trips() {
+        let r = sample_report();
+        let back: BenchReport = serde_json::from_str(&r.to_json()).unwrap();
+        assert_eq!(back.schema_before, 3);
+        assert_eq!(back.schema_after, 5);
+        assert_eq!(back.files_walked, 38);
+    }
+
+    #[test]
+    fn the_header_columns_match_a_row() {
+        let header = BenchReport::markdown_header();
+        let cols = |s: &str| s.matches('|').count();
+        let head_line = header.lines().next().unwrap();
+        assert_eq!(
+            cols(head_line),
+            cols(&sample_report().to_markdown_row()),
+            "header and row must have the same number of columns"
+        );
     }
 }

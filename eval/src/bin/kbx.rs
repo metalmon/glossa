@@ -87,6 +87,13 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Measure what extraction costs: index one corpus with an already-built `kb`, time it per
+    /// file, read back what it left in the index, and emit one `docs/benchmarks.md` row. Drives the
+    /// binary as a child process on purpose — the thing measured is the thing shipped.
+    Bench {
+        #[command(subcommand)]
+        cmd: BenchCmd,
+    },
     /// Score a dataset against a corpus (`run`), or calibrate the answer-grounding gate's
     /// verify-threshold from a past run (`calibrate`).
     Eval {
@@ -808,6 +815,48 @@ fn run_download(
 /// `kbx eval` subcommands: `run` is the former flat `kbx eval <path>` (BREAKING: now `kbx eval run
 /// <path>`), added alongside `calibrate` (the answer-grounding gate's verify-threshold sweep,
 /// `kb_eval::calibrate::run`) so `eval` can host both without a name clash.
+/// `bench` hosts the measurement verbs. Today only `extract`, which is phase 1 of the
+/// omnivorous-extraction design: a baseline every later phase reports its delta against.
+#[derive(Subcommand)]
+enum BenchCmd {
+    /// Index a corpus with an already-built `kb` and report what it cost.
+    Extract(BenchExtractArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct BenchExtractArgs {
+    /// Corpus to measure. Pass a COPY of a real corpus: a `--force` pass rebuilds its index, and
+    /// on a corpus whose manifest predates the current schema it also migrates it.
+    corpus: PathBuf,
+    /// The `kb` binary to measure — a CI artifact, not a local build.
+    #[arg(long)]
+    bin: PathBuf,
+    /// Generate a synthetic corpus at `corpus` first, with this many documents.
+    #[arg(long)]
+    generate: Option<usize>,
+    /// Seed for `--generate`. The same seed must give a byte-identical corpus, or a phase-to-phase
+    /// delta measures the corpus instead of the code.
+    #[arg(long, default_value_t = 1)]
+    seed: u64,
+    /// With `--generate`, append five files doubling from 1 MiB to 16 MiB — the per-file-size
+    /// ceiling, and the memory evidence on platforms where peak RSS is not measured.
+    #[arg(long)]
+    ladder: bool,
+    /// Token to sample `df(token)/n_chunks` for, repeatable. Supplied rather than discovered so
+    /// successive phases compare the same ratio; defaults to the generator's planted markers.
+    #[arg(long = "df-token")]
+    df_tokens: Vec<String>,
+    /// How many `kb read` calls to time. The spec requires the read path, not only indexing.
+    #[arg(long, default_value_t = 20)]
+    reads: usize,
+    /// Index incrementally instead of with `--force`.
+    #[arg(long)]
+    no_force: bool,
+    /// Write the full JSON report here as well as printing the markdown row.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
 #[derive(Subcommand)]
 enum EvalCmd {
     /// Score a dataset against a corpus (the former `kbx eval <path>`).
@@ -873,6 +922,9 @@ fn main() -> Result<()> {
             cli_fmt::summary(&[("workspace", paths.kbx_dir.display().to_string())]);
             Ok(())
         }
+        Cmd::Bench {
+            cmd: BenchCmd::Extract(args),
+        } => run_bench_extract(args),
         Cmd::Eval {
             cmd: EvalCmd::Run(args),
         } => run_eval(args),
@@ -1522,6 +1574,62 @@ fn verdict_score(v: Verdict) -> f32 {
         Verdict::Partial => 0.5,
         Verdict::Wrong | Verdict::Unscored => 0.0,
     }
+}
+
+fn run_bench_extract(args: BenchExtractArgs) -> Result<()> {
+    if let Some(files) = args.generate {
+        let stats = kb_eval::bench::generate_corpus(
+            &args.corpus,
+            &kb_eval::bench::CorpusSpec {
+                files,
+                seed: args.seed,
+                size_ladder: args.ladder,
+            },
+        )?;
+        cli_fmt::summary(&[
+            ("generated", stats.files.to_string()),
+            ("bytes", stats.bytes.to_string()),
+            ("largest", stats.largest.to_string()),
+        ]);
+    }
+
+    // Default to the markers the generator plants, so a generated corpus needs no flags and a real
+    // corpus is told explicitly which of its own terms to track.
+    let df_tokens: Vec<String> = if args.df_tokens.is_empty() {
+        kb_eval::bench::PLANTED_TOKENS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        args.df_tokens
+    };
+
+    let report = kb_eval::bench::measure(&kb_eval::bench::BenchOpts {
+        bin: args.bin,
+        corpus: args.corpus,
+        df_tokens,
+        reads: args.reads,
+        force: !args.no_force,
+    })?;
+
+    if let Some(out) = &args.out {
+        std::fs::write(out, report.to_json())
+            .with_context(|| format!("write {}", out.display()))?;
+    }
+
+    // The header goes to stderr and the row to stdout, so appending a row to the benchmarks log is
+    // a plain shell redirect while the human still sees what the columns mean.
+    eprintln!("{}", kb_eval::bench::BenchReport::markdown_header());
+    println!("{}", report.to_markdown_row());
+
+    if !report.exit_ok {
+        eprintln!(
+            "\nthe measured run FAILED; last stderr lines:\n{}",
+            report.stderr_tail
+        );
+        anyhow::bail!("kb index exited non-zero — the row above is marked FAILED, not a baseline");
+    }
+    Ok(())
 }
 
 fn run_eval(args: EvalArgs) -> Result<()> {
