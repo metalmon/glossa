@@ -848,6 +848,13 @@ struct BenchExtractArgs {
     /// alone, which is what a replication of one large file costs least as.
     #[arg(long, value_delimiter = ',')]
     ladder_sizes: Vec<u64>,
+    /// How many distinct words the generated prose draws from, Zipf-weighted. The default 32 makes
+    /// a corpus with enormous posting lists and near-duplicate text — a pathological shape for an
+    /// inverted index, and the reason the first tail measurements could not be told apart from a
+    /// corpus-size effect. Pass something realistic (tens of thousands) to separate the two: the
+    /// byte count and chunk count do not change.
+    #[arg(long)]
+    vocab: Option<usize>,
     /// Token to sample `df(token)/n_chunks` for, repeatable. Supplied rather than discovered so
     /// successive phases compare the same ratio; defaults to the generator's planted markers.
     ///
@@ -1611,6 +1618,7 @@ fn run_bench_extract(args: BenchExtractArgs) -> Result<()> {
                 files,
                 seed: args.seed,
                 ladder_mib,
+                vocab_words: args.vocab.unwrap_or(kb_eval::bench::DEFAULT_VOCAB_WORDS),
             },
         )?;
         cli_fmt::summary(&[

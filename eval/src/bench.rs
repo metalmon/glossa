@@ -32,7 +32,19 @@ pub struct CorpusSpec {
     /// measured, it is the memory evidence. Empty means no ladder. Sizes need not double: to
     /// bisect a step that one doubling jumped over, pass the intermediate sizes.
     pub ladder_mib: Vec<u64>,
+    /// How many distinct words the prose draws from, Zipf-weighted (rank 1 is ~`n` times as likely
+    /// as rank `n`), which is roughly how a real corpus's terms are distributed. At
+    /// [`DEFAULT_VOCAB_WORDS`] the corpus has 32 terms and near-duplicate text; a realistic figure
+    /// is tens of thousands. Same byte count and chunk count either way, so a row at one
+    /// vocabulary and a row at another differ in exactly this.
+    pub vocab_words: usize,
 }
+
+/// Distinct words the default generator draws from — the `WORDS` list. A corpus this narrow is a
+/// pathological shape for an inverted index (few terms, enormous posting lists), which is why
+/// [`CorpusSpec::vocab_words`] exists: the first tail measurements were all taken at this
+/// vocabulary and could not be told apart from a corpus-size effect.
+pub const DEFAULT_VOCAB_WORDS: usize = WORDS.len();
 
 /// The doubling ladder the first baseline used, kept as a name so a row saying "the default
 /// ladder" means one thing.
@@ -63,6 +75,7 @@ pub fn generate_corpus(dest: &Path, spec: &CorpusSpec) -> Result<CorpusStats> {
     // `rand` major versions, and this corpus must stay byte-identical across phases that may
     // outlive a `rand` bump.
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(spec.seed);
+    let vocab = vocabulary(spec.vocab_words, spec.seed);
 
     let mut bytes = 0u64;
     let mut largest = 0u64;
@@ -74,7 +87,7 @@ pub fn generate_corpus(dest: &Path, spec: &CorpusSpec) -> Result<CorpusStats> {
         let dir = dest.join(format!("d{:02}", i % 16));
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("doc-{i:05}.md"));
-        let body = synth_markdown(&mut rng, i, 40);
+        let body = synth_markdown(&mut rng, i, 40, &vocab);
         std::fs::write(&path, body.as_bytes())?;
         let len = body.len() as u64;
         bytes += len;
@@ -88,7 +101,7 @@ pub fn generate_corpus(dest: &Path, spec: &CorpusSpec) -> Result<CorpusStats> {
         for (step, mib) in spec.ladder_mib.iter().enumerate() {
             let target = mib * (1u64 << 20);
             let path = dir.join(format!("big-{step:02}-{mib}MiB.md"));
-            let len = write_sized_markdown(&path, &mut rng, target)?;
+            let len = write_sized_markdown(&path, &mut rng, target, &vocab)?;
             bytes += len;
             largest = largest.max(len);
             written += 1;
@@ -123,13 +136,53 @@ pub fn write_tail_sentinel(dest: &Path) -> Result<u64> {
     let dir = dest.join("zz-tail-sentinel");
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0);
-    let body = synth_markdown(&mut rng, 0, 1);
+    let body = synth_markdown(&mut rng, 0, 1, &vocabulary(DEFAULT_VOCAB_WORDS, 0));
     std::fs::write(dir.join("tiny.md"), body.as_bytes()).context("write tail sentinel")?;
     Ok(body.len() as u64)
 }
 
+/// The vocabulary a corpus draws from: either the fixed `WORDS` list, or `n` generated pseudo-words.
+///
+/// Generated rather than taken from a word list so the vocabulary is a knob with no dependency and
+/// no language: syllables, deterministic in the corpus seed, and long enough (5-9 chars) that the
+/// index's term dictionary carries a realistic amount of bytes per term.
+fn vocabulary(n: usize, seed: u64) -> Vec<String> {
+    if n <= WORDS.len() {
+        return WORDS.iter().take(n.max(1)).map(|w| w.to_string()).collect();
+    }
+    const ONSET: [&str; 16] = [
+        "b", "d", "f", "g", "k", "l", "m", "n", "p", "r", "s", "t", "v", "z", "br", "tr",
+    ];
+    const NUCLEUS: [&str; 8] = ["a", "e", "i", "o", "u", "ai", "ou", "ea"];
+    const CODA: [&str; 8] = ["", "n", "r", "s", "t", "l", "m", "k"];
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed ^ 0x5f3d_1a7c);
+    let mut out = Vec::with_capacity(n);
+    let mut seen = std::collections::HashSet::with_capacity(n);
+    while out.len() < n {
+        let syllables = 2 + (out.len() % 2);
+        let mut w = String::with_capacity(9);
+        for _ in 0..syllables {
+            w.push_str(ONSET[rng.gen_range(0..ONSET.len())]);
+            w.push_str(NUCLEUS[rng.gen_range(0..NUCLEUS.len())]);
+            w.push_str(CODA[rng.gen_range(0..CODA.len())]);
+        }
+        if seen.insert(w.clone()) {
+            out.push(w);
+        }
+    }
+    out
+}
+
+/// Draw a word index Zipf-like (s = 1) by inverse CDF: `rank = n^u` for uniform `u`, so rank 1 is
+/// about `n` times as likely as rank `n`. Cheap enough to call per word, which matters at 60 MiB.
+fn zipf_index(rng: &mut impl Rng, n: usize) -> usize {
+    let u: f64 = rng.gen_range(0.0..1.0);
+    let rank = (n as f64).powf(u) as usize;
+    rank.min(n.saturating_sub(1))
+}
+
 /// One synthetic document: a heading path a few levels deep, prose, and the planted markers.
-fn synth_markdown(rng: &mut impl Rng, index: usize, paragraphs: usize) -> String {
+fn synth_markdown(rng: &mut impl Rng, index: usize, paragraphs: usize, vocab: &[String]) -> String {
     let mut out = String::with_capacity(paragraphs * 220);
     out.push_str(&format!("# Document {index}\n\n"));
     for p in 0..paragraphs {
@@ -140,7 +193,7 @@ fn synth_markdown(rng: &mut impl Rng, index: usize, paragraphs: usize) -> String
             out.push_str(&format!("### Subsection {}\n\n", p / 24));
         }
         for _ in 0..24 {
-            let w = WORDS[rng.gen_range(0..WORDS.len())];
+            let w = &vocab[zipf_index(rng, vocab.len())];
             out.push_str(w);
             out.push(' ');
         }
@@ -160,13 +213,18 @@ fn synth_markdown(rng: &mut impl Rng, index: usize, paragraphs: usize) -> String
 }
 
 /// Grow one document to `target` bytes, returning what was written.
-fn write_sized_markdown(path: &Path, rng: &mut impl Rng, target: u64) -> Result<u64> {
+fn write_sized_markdown(
+    path: &Path,
+    rng: &mut impl Rng,
+    target: u64,
+    vocab: &[String],
+) -> Result<u64> {
     let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut written = 0u64;
     f.write_all(b"# Large document\n\n")?;
     written += 18;
     while written < target {
-        let chunk = synth_markdown(rng, 0, 40);
+        let chunk = synth_markdown(rng, 0, 40, vocab);
         f.write_all(chunk.as_bytes())?;
         written += chunk.len() as u64;
     }
@@ -974,6 +1032,7 @@ mod tests {
             files: 50,
             seed: 7,
             ladder_mib: Vec::new(),
+            vocab_words: DEFAULT_VOCAB_WORDS,
         };
         generate_corpus(a.path(), &spec).unwrap();
         generate_corpus(b.path(), &spec).unwrap();
@@ -990,6 +1049,7 @@ mod tests {
                 files: 20,
                 seed: 1,
                 ladder_mib: Vec::new(),
+                vocab_words: DEFAULT_VOCAB_WORDS,
             },
         )
         .unwrap();
@@ -999,6 +1059,7 @@ mod tests {
                 files: 20,
                 seed: 2,
                 ladder_mib: Vec::new(),
+                vocab_words: DEFAULT_VOCAB_WORDS,
             },
         )
         .unwrap();
@@ -1014,6 +1075,7 @@ mod tests {
                 files: 10,
                 seed: 1,
                 ladder_mib: DEFAULT_LADDER_MIB.to_vec(),
+                vocab_words: DEFAULT_VOCAB_WORDS,
             },
         )
         .unwrap();
@@ -1040,6 +1102,7 @@ mod tests {
                 files: 0,
                 seed: 1,
                 ladder_mib: vec![10, 12],
+                vocab_words: DEFAULT_VOCAB_WORDS,
             },
         )
         .unwrap();
@@ -1047,6 +1110,47 @@ mod tests {
         assert!(d.path().join("ladder/big-00-10MiB.md").exists());
         assert!(d.path().join("ladder/big-01-12MiB.md").exists());
         assert!(st.largest >= 12 * 1024 * 1024 && st.largest < 13 * 1024 * 1024);
+    }
+
+    #[test]
+    fn a_wide_vocabulary_is_wide_deterministic_and_zipf_weighted() {
+        // The knob exists to tell a corpus-size effect apart from a vocabulary effect, so what it
+        // must guarantee is: the words really are distinct, the corpus is still reproducible from
+        // its seed, and the distribution is skewed rather than uniform (a real corpus's is).
+        let v = vocabulary(5_000, 7);
+        assert_eq!(v.len(), 5_000);
+        assert_eq!(
+            v.iter().collect::<std::collections::HashSet<_>>().len(),
+            5_000
+        );
+        assert_eq!(v, vocabulary(5_000, 7), "same seed, same vocabulary");
+        assert_ne!(v, vocabulary(5_000, 8));
+        // 2-3 syllables, each 2-5 chars: an onset, a nucleus, and a coda that may be empty.
+        assert!(
+            v.iter().all(|w| w.len() >= 4 && w.len() <= 15),
+            "{:?}",
+            &v[..4]
+        );
+
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(1);
+        let mut hits = vec![0u32; 5_000];
+        for _ in 0..50_000 {
+            hits[zipf_index(&mut rng, 5_000)] += 1;
+        }
+        // Under this law P(rank <= k) = ln k / ln n, so the first ten of 5000 ranks hold ~27% of
+        // the draws where a uniform pick would give 0.2%, and the commonest term is drawn orders of
+        // magnitude more often than the mean. (What it does NOT do is leave the tail unseen: at
+        // ~5867/r expected draws every rank is still drawn, which is why that is not asserted.)
+        let head: u32 = hits[..10].iter().sum();
+        assert!(head > 10_000, "head too light to be Zipf: {head}");
+        let mean = 50_000.0 / 5_000.0;
+        let top = *hits.iter().max().unwrap() as f64;
+        assert!(top > 50.0 * mean, "flattest rank {top} vs mean {mean}");
+    }
+
+    #[test]
+    fn a_narrow_vocabulary_is_the_fixed_list_so_old_rows_stay_comparable() {
+        assert_eq!(vocabulary(DEFAULT_VOCAB_WORDS, 3), WORDS.to_vec());
     }
 
     #[test]
@@ -1060,6 +1164,7 @@ mod tests {
                 files: 40,
                 seed: 1,
                 ladder_mib: vec![1],
+                vocab_words: DEFAULT_VOCAB_WORDS,
             },
         )
         .unwrap();
@@ -1081,6 +1186,7 @@ mod tests {
                 files: 20,
                 seed: 3,
                 ladder_mib: Vec::new(),
+                vocab_words: DEFAULT_VOCAB_WORDS,
             },
         )
         .unwrap();
@@ -1260,6 +1366,7 @@ mod tests {
             per_file_p50_ms: Some(210),
             per_file_p95_ms: Some(900),
             tail_ms: Some(15632),
+            df_write_ms: Some(11),
             peak_rss_bytes: None,
             contention: Contention {
                 baseline_us: 10_000,
@@ -1357,6 +1464,16 @@ mod tests {
         };
         assert_eq!(c.factor(), 1.0);
         assert_eq!(c.peak_factor(), 1.0);
+    }
+
+    #[test]
+    fn the_row_names_the_df_phase_inside_the_tail() {
+        let row = sample_report().to_markdown_row();
+        assert!(row.contains("15632 ms (df 11)"), "{row}");
+        // A run that wrote no sidecar says nothing about one, rather than claiming 0 ms.
+        let mut r = sample_report();
+        r.df_write_ms = None;
+        assert!(r.to_markdown_row().contains("| 15632 ms |"));
     }
 
     #[test]
