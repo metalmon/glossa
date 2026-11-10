@@ -84,14 +84,18 @@ per run; append, don't rewrite.
   serving path, not a measurement of in-process MCP reads.
 - **No network mount has been measured.** Every row here is local disk, and the extraction design's
   cost reasoning about SMB/NFS is therefore unverified by these numbers.
+- **Load med/peak says how busy the machine was**, as a factor against a fixed integer workload
+  timed before the run started: `x1.00` means the machine stayed as quiet as it was at the start,
+  `x3.00` that something else was taking the CPU. Rows reading `not measured` were taken before the
+  probe existed, which is why none of them can be told apart from a load spike.
 - There is **no regression gate**. A slower row is a finding to explain, not a build failure.
 
-| Corpus | kb | Platform | Files | Wall | per-file p50/p95 | Peak RSS | Chunks | Chunks/s | Largest file | Migration | read p50/p95 | Run |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `kb-abac` (copy) | kb 0.5.7 (none) | windows | 38 | 28451 ms | 49 / 5270 ms | not measured | 2349 | 83 | 39.6 MiB | schema 3→5 | 12 / 13 ms | ok |
-| `kb-abac` (copy, repeat) | kb 0.5.7 (none) | windows | 38 | 26751 ms | 33 / 4881 ms | not measured | 2349 | 88 | 39.6 MiB | schema 5→5 | 11 / 14 ms | ok |
-| `kb-gost` (copy) | kb 0.5.7 (none) | windows | 11 | 1924 ms | 138 / 397 ms | not measured | 173 | 90 | 0.6 MiB | schema 2→5 | 12 / 13 ms | ok |
-| generated, 2000 docs + 1→16 MiB ladder | kb 0.5.7 (none) | windows | 2005 | 191651 ms | 6 / 23 ms | not measured | 29205 | 152 | 16.0 MiB | schema 1→5 | 11 / 13 ms | ok |
+| Corpus | kb | Platform | Files | Wall | per-file p50/p95 | Peak RSS | Chunks | Chunks/s | Largest file | Migration | read p50/p95 | Load med/peak | Run |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `kb-abac` (copy) | kb 0.5.7 (none) | windows | 38 | 28451 ms | 49 / 5270 ms | not measured | 2349 | 83 | 39.6 MiB | schema 3→5 | 12 / 13 ms | not measured | ok |
+| `kb-abac` (copy, repeat) | kb 0.5.7 (none) | windows | 38 | 26751 ms | 33 / 4881 ms | not measured | 2349 | 88 | 39.6 MiB | schema 5→5 | 11 / 14 ms | not measured | ok |
+| `kb-gost` (copy) | kb 0.5.7 (none) | windows | 11 | 1924 ms | 138 / 397 ms | not measured | 173 | 90 | 0.6 MiB | schema 2→5 | 12 / 13 ms | not measured | ok |
+| generated, 2000 docs + 1→16 MiB ladder | kb 0.5.7 (none) | windows | 2005 | 191651 ms | 6 / 23 ms | not measured | 29205 | 152 | 16.0 MiB | schema 1→5 | 11 / 13 ms | not measured | ok |
 
 **2026-11-10 — first baseline, taken before any omnivorous-extraction change.** Measured with the
 CI artifact `glossa-x86_64-pc-windows-msvc-none` from the `release.yml` dispatch on
@@ -102,8 +106,16 @@ shipped set is still owed.
 
 ### What these first rows establish
 
-**Indexing one large file is not linear, and the cliff is between 8 and 16 MiB.** From the generated
-corpus's ladder, each step one doubling of the one before:
+**UNREPLICATED, AND THE MACHINE WAS NOT IDLE — read the next finding as a lead, not a fact.** Every
+row above was taken on a developer workstation with other work running on it (Docker among others),
+and each number below is a **single sample of a single file**. The repeatability check further down
+measures ~6-8% noise on a whole-corpus wall time; it says nothing about how much a load spike can
+move one 165-second file. A 52x step is far too large to dismiss as noise, and far too
+single-sampled to assert as behaviour. Replication and a load probe are the next task; until they
+land, this is the strongest lead the baseline produced and not more than that.
+
+**Lead: indexing one large file may be sharply superlinear, with a step between 8 and 16 MiB.** From
+the generated corpus's ladder, each step one doubling of the one before:
 
 | File | Time | vs previous step |
 |---|---|---|
@@ -112,11 +124,13 @@ corpus's ladder, each step one doubling of the one before:
 | `big-03` 8 MiB | 3 151 ms | ×2.0 |
 | **`big-04` 16 MiB** | **164 749 ms** | **×52** |
 
-Linear to 8 MiB, then 52× for one more doubling: a single 16 MiB Markdown file took 165 s, **86% of
-the whole 191 s run over 2005 documents**. The cause is NOT established here and is not guessed at;
-what is established is that the design's per-file-size ceiling is real, sharp, and lands well inside
-the sizes real corpora contain — `kb-abac`'s largest document is 39.6 MiB, past the top of this
-ladder. The ladder should be extended beyond 16 MiB for that reason.
+Linear to 8 MiB, then 52× for one more doubling: that single 16 MiB Markdown file took 165 s, 86% of
+the whole 191 s run over 2005 documents. Neither the cause nor the effect is established — the cause
+is not guessed at, and the effect needs repeating on a quiet machine before it counts. What the
+three lower steps do support, being mutually consistent and cheap enough to be load-insensitive, is
+that per-file cost scales with size at least linearly, so a corpus's largest documents dominate its
+indexing time. `kb-abac`'s largest document is 39.6 MiB, past the top of this ladder; the ladder
+needs extending past 16 MiB either way.
 
 **Cost concentrates in a few documents on a real corpus.** `kb-abac`'s per-file p95 is ~100× its
 p50 (33 ms against 4 881 ms), and the five costliest are all PDFs — the top one a 7.2 s certificate.

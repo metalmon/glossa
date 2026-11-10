@@ -842,6 +842,12 @@ struct BenchExtractArgs {
     /// ceiling, and the memory evidence on platforms where peak RSS is not measured.
     #[arg(long)]
     ladder: bool,
+    /// Ladder sizes in MiB instead of the default doubling, e.g. `--ladder-sizes 8,10,12,14,16` to
+    /// bisect a step one doubling jumped over, or `32,64` to go past the top of it. Implies
+    /// `--ladder`; sizes need not double, and `--generate 0 --ladder-sizes …` measures the ladder
+    /// alone, which is what a replication of one large file costs least as.
+    #[arg(long, value_delimiter = ',')]
+    ladder_sizes: Vec<u64>,
     /// Token to sample `df(token)/n_chunks` for, repeatable. Supplied rather than discovered so
     /// successive phases compare the same ratio; defaults to the generator's planted markers.
     ///
@@ -1586,12 +1592,19 @@ fn verdict_score(v: Verdict) -> f32 {
 
 fn run_bench_extract(args: BenchExtractArgs) -> Result<()> {
     if let Some(files) = args.generate {
+        let ladder_mib = if !args.ladder_sizes.is_empty() {
+            args.ladder_sizes.clone()
+        } else if args.ladder {
+            kb_eval::bench::DEFAULT_LADDER_MIB.to_vec()
+        } else {
+            Vec::new()
+        };
         let stats = kb_eval::bench::generate_corpus(
             &args.corpus,
             &kb_eval::bench::CorpusSpec {
                 files,
                 seed: args.seed,
-                size_ladder: args.ladder,
+                ladder_mib,
             },
         )?;
         cli_fmt::summary(&[

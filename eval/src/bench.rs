@@ -27,11 +27,16 @@ use std::time::{Duration, Instant};
 pub struct CorpusSpec {
     pub files: usize,
     pub seed: u64,
-    /// Append five files doubling from 1 MiB to 16 MiB. This is what exposes the per-file-size
-    /// ceiling the spec asks for — and on Windows, where peak RSS is not measured, it is the
-    /// memory evidence.
-    pub size_ladder: bool,
+    /// Sizes, in MiB, of extra single large files to append under `ladder/`. This is what exposes
+    /// the per-file-size ceiling the spec asks for — and on Windows, where peak RSS is not
+    /// measured, it is the memory evidence. Empty means no ladder. Sizes need not double: to
+    /// bisect a step that one doubling jumped over, pass the intermediate sizes.
+    pub ladder_mib: Vec<u64>,
 }
+
+/// The doubling ladder the first baseline used, kept as a name so a row saying "the default
+/// ladder" means one thing.
+pub const DEFAULT_LADDER_MIB: [u64; 5] = [1, 2, 4, 8, 16];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorpusStats {
@@ -77,12 +82,12 @@ pub fn generate_corpus(dest: &Path, spec: &CorpusSpec) -> Result<CorpusStats> {
         written += 1;
     }
 
-    if spec.size_ladder {
+    if !spec.ladder_mib.is_empty() {
         let dir = dest.join("ladder");
         std::fs::create_dir_all(&dir)?;
-        for step in 0..5u32 {
-            let target = (1u64 << 20) << step; // 1, 2, 4, 8, 16 MiB
-            let path = dir.join(format!("big-{:02}-{}MiB.md", step, target >> 20));
+        for (step, mib) in spec.ladder_mib.iter().enumerate() {
+            let target = mib * (1u64 << 20);
+            let path = dir.join(format!("big-{step:02}-{mib}MiB.md"));
             let len = write_sized_markdown(&path, &mut rng, target)?;
             bytes += len;
             largest = largest.max(len);
@@ -889,7 +894,7 @@ mod tests {
         let spec = CorpusSpec {
             files: 50,
             seed: 7,
-            size_ladder: false,
+            ladder_mib: Vec::new(),
         };
         generate_corpus(a.path(), &spec).unwrap();
         generate_corpus(b.path(), &spec).unwrap();
@@ -905,7 +910,7 @@ mod tests {
             &CorpusSpec {
                 files: 20,
                 seed: 1,
-                size_ladder: false,
+                ladder_mib: Vec::new(),
             },
         )
         .unwrap();
@@ -914,7 +919,7 @@ mod tests {
             &CorpusSpec {
                 files: 20,
                 seed: 2,
-                size_ladder: false,
+                ladder_mib: Vec::new(),
             },
         )
         .unwrap();
@@ -929,7 +934,7 @@ mod tests {
             &CorpusSpec {
                 files: 10,
                 seed: 1,
-                size_ladder: true,
+                ladder_mib: DEFAULT_LADDER_MIB.to_vec(),
             },
         )
         .unwrap();
@@ -943,6 +948,26 @@ mod tests {
     }
 
     #[test]
+    fn a_ladder_can_bisect_a_step_the_doubling_jumped_over() {
+        // The whole point of the field being a list: 8 -> 16 MiB is one doubling, and the step
+        // inside it is what needs sizes the doubling never visits.
+        let d = tempfile::tempdir().unwrap();
+        let st = generate_corpus(
+            d.path(),
+            &CorpusSpec {
+                files: 0,
+                seed: 1,
+                ladder_mib: vec![10, 12],
+            },
+        )
+        .unwrap();
+        assert_eq!(st.files, 2, "no documents, two ladder files");
+        assert!(d.path().join("ladder/big-00-10MiB.md").exists());
+        assert!(d.path().join("ladder/big-01-12MiB.md").exists());
+        assert!(st.largest >= 12 * 1024 * 1024 && st.largest < 13 * 1024 * 1024);
+    }
+
+    #[test]
     fn planted_tokens_are_present_so_a_df_ratio_can_be_sampled() {
         let d = tempfile::tempdir().unwrap();
         generate_corpus(
@@ -950,7 +975,7 @@ mod tests {
             &CorpusSpec {
                 files: 20,
                 seed: 3,
-                size_ladder: false,
+                ladder_mib: Vec::new(),
             },
         )
         .unwrap();
