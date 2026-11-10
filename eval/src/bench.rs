@@ -97,11 +97,7 @@ pub fn generate_corpus(dest: &Path, spec: &CorpusSpec) -> Result<CorpusStats> {
         // sample at all (see `per_file_durations`) — so the ladder ends with a tiny file that sorts
         // after every other path in the corpus. The big file gets a closing tick and a real
         // duration; this one absorbs the finalize and is reported as the row's tail.
-        let dir = dest.join("zz-tail-sentinel");
-        std::fs::create_dir_all(&dir)?;
-        let body = synth_markdown(&mut rng, 0, 1);
-        std::fs::write(dir.join("tiny.md"), body.as_bytes())?;
-        bytes += body.len() as u64;
+        bytes += write_tail_sentinel(dest)?;
         written += 1;
     }
 
@@ -110,6 +106,26 @@ pub fn generate_corpus(dest: &Path, spec: &CorpusSpec) -> Result<CorpusStats> {
         bytes,
         largest,
     })
+}
+
+/// Write the tail sentinel: a tiny document under `zz-tail-sentinel/`, which sorts after every
+/// other path a corpus is likely to hold. Returns its size in bytes.
+///
+/// Its only job is to be walked last. The last file walked gets no per-file sample (a progress line
+/// says when a file *started*, so it has no closing tick), and whatever is left — the tantivy
+/// commit, the manifest, the DF sidecar — lands in the row's tail. With a sentinel, every file the
+/// corpus actually holds gets a real duration and the tail is the finalize alone.
+///
+/// **Only ever write this into a corpus that exists to be measured** — a generated one, or a copy
+/// (`just bench-copy`). It adds a document and a chunk, so a corpus anyone reads from must not get
+/// one (`never-write-into-indexed-corpus`).
+pub fn write_tail_sentinel(dest: &Path) -> Result<u64> {
+    let dir = dest.join("zz-tail-sentinel");
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0);
+    let body = synth_markdown(&mut rng, 0, 1);
+    std::fs::write(dir.join("tiny.md"), body.as_bytes()).context("write tail sentinel")?;
+    Ok(body.len() as u64)
 }
 
 /// One synthetic document: a heading path a few levels deep, prose, and the planted markers.
@@ -297,7 +313,17 @@ pub struct RunOutcome {
     pub exit_ok: bool,
     /// Last lines of stderr, so a failure is diagnosable from the report alone.
     pub stderr_tail: String,
+    /// How long the DF sidecar write took, when the run did one (a `--force` pass or a schema
+    /// migration). `kb index` brackets it with its own stderr lines for exactly this reason, and it
+    /// is the one named phase inside the run's tail — on a real corpus's vocabulary it can dominate
+    /// it, while the generated corpus's 32-word vocabulary makes it free.
+    pub df_write: Option<Duration>,
 }
+
+/// The stderr lines `kb index` brackets its DF sidecar write with (`src/index/store.rs`). Matched
+/// as prefixes: both carry counts after them.
+const DF_WRITE_BEGIN: &str = "writing DF sidecar:";
+const DF_WRITE_END: &str = "DF sidecar written";
 
 /// Parse the canonical summary block (`key: value` pairs, whitespace-separated).
 pub fn parse_summary(line: &str) -> BTreeMap<String, String> {
@@ -353,11 +379,18 @@ pub fn run_index(bin: &Path, corpus: &Path, force: bool) -> Result<RunOutcome> {
 
     let stderr = child.stderr.take().expect("stderr was piped");
     let mut ticks = Vec::new();
+    let mut df_started: Option<Duration> = None;
+    let mut df_write: Option<Duration> = None;
     let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     for line in BufReader::new(stderr).lines() {
         let Ok(line) = line else { break };
         if let Some(t) = parse_progress(&line, started.elapsed()) {
             ticks.push(t);
+        }
+        if line.starts_with(DF_WRITE_BEGIN) {
+            df_started = Some(started.elapsed());
+        } else if line.starts_with(DF_WRITE_END) {
+            df_write = df_started.map(|b| started.elapsed().saturating_sub(b));
         }
         tail.push_back(line);
         if tail.len() > 20 {
@@ -388,6 +421,7 @@ pub fn run_index(bin: &Path, corpus: &Path, force: bool) -> Result<RunOutcome> {
         summary,
         exit_ok: status.success(),
         stderr_tail: tail.into_iter().collect::<Vec<_>>().join("\n"),
+        df_write,
     })
 }
 
@@ -696,6 +730,8 @@ pub struct BenchReport {
     /// The last file's own work plus the run's finalize, which no progress line separates. Read it
     /// against `chunks`, not against the last file's size.
     pub tail_ms: Option<u64>,
+    /// The DF sidecar write, the one named phase inside `tail_ms`. `None` when the run wrote none.
+    pub df_write_ms: Option<u64>,
     pub peak_rss_bytes: Option<u64>,
     /// Machine contention during the run. A row taken at factor 1.0 is comparable with another at
     /// 1.0; one taken at 3.0 is a different experiment.
@@ -742,8 +778,15 @@ impl BenchReport {
             .largest_file_bytes
             .map(|b| format!("{:.1} MiB", b as f64 / (1024.0 * 1024.0)))
             .unwrap_or_else(|| "—".into());
+        // The tail is a lump of several phases; name the one the run timed, rather than leave a
+        // reader of a long tail to guess which phase it was.
+        let tail_cell = match (self.tail_ms, self.df_write_ms) {
+            (Some(t), Some(df)) => format!("{t} ms (df {df})"),
+            (Some(t), None) => format!("{t} ms"),
+            (None, _) => "—".to_string(),
+        };
         format!(
-            "| {} | {} | {} | {} | {} ms | {} / {} ms | {} ms | {} | {} | {} | {} | schema {}→{} | {} / {} ms | x{:.2} / x{:.2} | {} |",
+            "| {} | {} | {} | {} | {} ms | {} / {} ms | {} | {} | {} | {} | {} | schema {}→{} | {} / {} ms | x{:.2} / x{:.2} | {} |",
             self.corpus,
             self.kb_version,
             self.platform,
@@ -751,7 +794,7 @@ impl BenchReport {
             self.wall_ms,
             ms(self.per_file_p50_ms),
             ms(self.per_file_p95_ms),
-            ms(self.tail_ms),
+            tail_cell,
             rss,
             self.chunks.map(|c| c.to_string()).unwrap_or_else(|| "—".into()),
             cps,
@@ -824,6 +867,7 @@ pub fn measure(opts: &BenchOpts) -> Result<BenchReport> {
         per_file_p50_ms: percentile(&durations, 0.50).map(|d| d.as_millis() as u64),
         per_file_p95_ms: percentile(&durations, 0.95).map(|d| d.as_millis() as u64),
         tail_ms: tail(&run.ticks, run.wall).map(|d| d.as_millis() as u64),
+        df_write_ms: run.df_write.map(|d| d.as_millis() as u64),
         peak_rss_bytes: run.peak_rss_bytes,
         contention: run.contention,
         chunks: figures.chunks,

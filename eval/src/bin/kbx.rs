@@ -866,6 +866,12 @@ struct BenchExtractArgs {
     /// Index incrementally instead of with `--force`.
     #[arg(long)]
     no_force: bool,
+    /// Write a tiny `zz-tail-sentinel/tiny.md` into the corpus first, so that every file it already
+    /// holds gets a real per-file duration and the row's Tail is the finalize alone. **Only on a
+    /// corpus that exists to be measured** — a generated one, or a copy from `just bench-copy`: it
+    /// adds a document and a chunk.
+    #[arg(long)]
+    tail_sentinel: bool,
     /// Write the full JSON report here as well as printing the markdown row.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -1612,6 +1618,11 @@ fn run_bench_extract(args: BenchExtractArgs) -> Result<()> {
             ("bytes", stats.bytes.to_string()),
             ("largest", stats.largest.to_string()),
         ]);
+    }
+
+    if args.tail_sentinel {
+        let n = kb_eval::bench::write_tail_sentinel(&args.corpus)?;
+        cli_fmt::summary(&[("tail sentinel", format!("{n} bytes"))]);
     }
 
     // A file wins over repeated flags: it is the only path that carries a Cyrillic token intact.
