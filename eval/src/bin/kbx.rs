@@ -844,8 +844,16 @@ struct BenchExtractArgs {
     ladder: bool,
     /// Token to sample `df(token)/n_chunks` for, repeatable. Supplied rather than discovered so
     /// successive phases compare the same ratio; defaults to the generator's planted markers.
+    ///
+    /// ASCII only, in practice: a non-ASCII argument does not survive argv to a native Windows
+    /// binary (it arrives as one replacement char per cp1251 byte). Use `--df-tokens-file` for a
+    /// Russian corpus — which is most of them.
     #[arg(long = "df-token")]
     df_tokens: Vec<String>,
+    /// Read the tokens from a UTF-8 file instead, one per line (`#` comments and blanks skipped).
+    /// This is the only way to sample a Cyrillic token on Windows.
+    #[arg(long)]
+    df_tokens_file: Option<PathBuf>,
     /// How many `kb read` calls to time. The spec requires the read path, not only indexing.
     #[arg(long, default_value_t = 20)]
     reads: usize,
@@ -1593,9 +1601,23 @@ fn run_bench_extract(args: BenchExtractArgs) -> Result<()> {
         ]);
     }
 
+    // A file wins over repeated flags: it is the only path that carries a Cyrillic token intact.
+    let from_file: Vec<String> = match &args.df_tokens_file {
+        Some(p) => std::fs::read_to_string(p)
+            .with_context(|| format!("read {}", p.display()))?
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(str::to_string)
+            .collect(),
+        None => Vec::new(),
+    };
+
     // Default to the markers the generator plants, so a generated corpus needs no flags and a real
     // corpus is told explicitly which of its own terms to track.
-    let df_tokens: Vec<String> = if args.df_tokens.is_empty() {
+    let df_tokens: Vec<String> = if !from_file.is_empty() {
+        from_file
+    } else if args.df_tokens.is_empty() {
         kb_eval::bench::PLANTED_TOKENS
             .iter()
             .map(|s| s.to_string())
