@@ -88,3 +88,64 @@ per run; append, don't rewrite.
 
 | Corpus | kb | Platform | Files | Wall | per-file p50/p95 | Peak RSS | Chunks | Chunks/s | Largest file | Migration | read p50/p95 | Run |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `kb-abac` (copy) | kb 0.5.7 (none) | windows | 38 | 28451 ms | 49 / 5270 ms | not measured | 2349 | 83 | 39.6 MiB | schema 3→5 | 12 / 13 ms | ok |
+| `kb-abac` (copy, repeat) | kb 0.5.7 (none) | windows | 38 | 26751 ms | 33 / 4881 ms | not measured | 2349 | 88 | 39.6 MiB | schema 5→5 | 11 / 14 ms | ok |
+| `kb-gost` (copy) | kb 0.5.7 (none) | windows | 11 | 1924 ms | 138 / 397 ms | not measured | 173 | 90 | 0.6 MiB | schema 2→5 | 12 / 13 ms | ok |
+| generated, 2000 docs + 1→16 MiB ladder | kb 0.5.7 (none) | windows | 2005 | 191651 ms | 6 / 23 ms | not measured | 29205 | 152 | 16.0 MiB | schema 1→5 | 11 / 13 ms | ok |
+
+**2026-11-10 — first baseline, taken before any omnivorous-extraction change.** Measured with the
+CI artifact `glossa-x86_64-pc-windows-msvc-none` from the `release.yml` dispatch on
+`fix/full-coverage-pass-and-one-search-depth`. The `none` engine is `--no-default-features`: no ONNX
+runtime, no model discovery, so a later delta is attributable to extraction rather than to provider
+start-up. That is **not** the feature set a Windows deployment ships — a `directml` row for the
+shipped set is still owed.
+
+### What these first rows establish
+
+**Indexing one large file is not linear, and the cliff is between 8 and 16 MiB.** From the generated
+corpus's ladder, each step one doubling of the one before:
+
+| File | Time | vs previous step |
+|---|---|---|
+| `big-01` 2 MiB | 773 ms | — |
+| `big-02` 4 MiB | 1 555 ms | ×2.0 |
+| `big-03` 8 MiB | 3 151 ms | ×2.0 |
+| **`big-04` 16 MiB** | **164 749 ms** | **×52** |
+
+Linear to 8 MiB, then 52× for one more doubling: a single 16 MiB Markdown file took 165 s, **86% of
+the whole 191 s run over 2005 documents**. The cause is NOT established here and is not guessed at;
+what is established is that the design's per-file-size ceiling is real, sharp, and lands well inside
+the sizes real corpora contain — `kb-abac`'s largest document is 39.6 MiB, past the top of this
+ladder. The ladder should be extended beyond 16 MiB for that reason.
+
+**Cost concentrates in a few documents on a real corpus.** `kb-abac`'s per-file p95 is ~100× its
+p50 (33 ms against 4 881 ms), and the five costliest are all PDFs — the top one a 7.2 s certificate.
+`kb-gost`, 11 PDFs with nothing above 0.6 MiB, has a p95/p50 of only 2.9×. So "how long does
+indexing take" is answered by which large documents a corpus holds, not by its document count.
+
+**Repeatability, from the two `kb-abac` rows:** chunk count identical (2349 both times, so
+extraction is deterministic), wall within 6%, p95 within 8%, but **p50 within 33%** — a median over
+38 samples is noisy. A later phase showing under ~10% movement on this corpus is therefore not
+showing a signal. This is what the design wanted instead of a regression gate invented in advance.
+
+**Migration is visible per row, and the first run of each corpus did one.** `kb-abac` came in at
+schema 3 and `kb-gost` at **2**, against a current 5 — both working corpora were serving bodies
+produced by older extractors, `kb-gost` by three versions. The repeat row reads `schema 5→5`: the
+same corpus, different input conditions, which is exactly why the column exists.
+
+**`kb-abac` indexed 38 documents against the 34 in its manifest.** The four uppercase `.PDF`
+certificates that commit `3fafe9f` made walkable are in the index for the first time.
+
+### DF ratios (`df(token)/n_chunks`, what the `verify` gate compares against)
+
+| Corpus | Sample |
+|---|---|
+| `kb-abac` | `plc` 0.036 · `modbus` 0.063 · `iec` 0.049 |
+| `kb-gost` | `стандарт` 0.185 · `метод` 0.121 · `требования` 0.179 · `испытания` 0.087 · `температура` 0.000 |
+| generated | `zylathon` 0.166 · `qorvex` 0.034 · `brimtalve` 0.135 · `dunmorrow` 0.003 |
+
+Two things to know before trusting a ratio here. A token must occur **as a whole token**: `gost`
+sampled 0.000 on `kb-gost` because it appears only inside `www.gost.ru`-style tokens, and a
+substring search is no evidence about a token-keyed table. And `температура` sampled 0.000 because
+Russian inflects — the corpus carries `температуры`, not the base form. Pick the form that occurs;
+the echoed ratio is the verification.
