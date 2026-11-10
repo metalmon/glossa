@@ -126,6 +126,12 @@ makes the numbers readable; their names are not.
 | bisect 8/10/12/14/16 MiB, 50k-word vocab | kb 0.5.7 (none) | windows | 6 | 219316 ms | 6458 / 10625 ms | 188292 ms (df 17) | not measured | 33726 | 154 | 16.0 MiB | schema 1→5 | 11 / 12 ms | x1.00 / x1.25 | ok |
 | corpus A (copy, + sentinel) | kb 0.5.7 (none) | windows | 39 | 27339 ms | 36 / 4024 ms | 7126 ms (df 13) | not measured | 2350 | 86 | 39.6 MiB | schema 5→5 | 13 / 17 ms | x1.00 / x1.11 | ok |
 | corpus B (copy, + sentinel) | kb 0.5.7 (none) | windows | 12 | 1888 ms | 103 / 368 ms | 138 ms (df 4) | not measured | 174 | 92 | 0.6 MiB | schema 5→5 | 11 / 14 ms | x1.01 / x1.01 | ok |
+| 16 × 1 MiB, SIMILAR fix | kb 0.5.7 (none) | windows | 17 | 8919 ms | 453 / 566 ms | 372 ms (commit 60, links 0, df 0) | not measured | 9921 | 1112 | 1.0 MiB | schema 5→5 | 12 / 19 ms | x1.04 / x1.53 | ok |
+| ladder 1→16 MiB, SIMILAR fix | kb 0.5.7 (none) | windows | 6 | 25455 ms | 1877 / 15791 ms | 837 ms (commit 69, links 0, df 1) | not measured | 19206 | 755 | 16.0 MiB | schema 5→5 | 14 / 20 ms | x0.96 / x1.44 | ok |
+| bisect 8→16 MiB, SIMILAR fix | kb 0.5.7 (none) | windows | 6 | 43330 ms | 7464 / 9719 ms | 1352 ms (commit 74, links 0, df 1) | not measured | 37161 | 858 | 16.0 MiB | schema 5→5 | 15 / 18 ms | x1.04 / x2.69 | ok |
+| corpus A (copy, + sentinel), SIMILAR fix | kb 0.5.7 (none) | windows | 39 | 34086 ms | 58 / 5046 ms | 6098 ms (commit 113, links 0, df 20) | not measured | 2350 | 69 | 39.6 MiB | schema 5→5 | 13 / 16 ms | x1.01 / x1.35 | ok |
+| corpus A (copy, + sentinel), **directml** | kb 0.5.7 (ort-directml) | windows | 39 | 28580 ms | 34 / 5139 ms | 5245 ms (commit 110, links 0, df 14) | not measured | 2350 | 82 | 39.6 MiB | schema 5→5 | 22 / 31 ms | x1.00 / x3.24 | ok |
+| corpus B (copy, + sentinel), **directml** | kb 0.5.7 (ort-directml) | windows | 12 | 2250 ms | 126 / 460 ms | 125 ms (commit 74, links 0, df 3) | not measured | 174 | 77 | 0.6 MiB | schema 5→5 | 21 / 25 ms | x1.01 / x1.06 | ok |
 **2026-11-10 — first baseline, taken before any omnivorous-extraction change.** Measured with the
 CI artifact `glossa-x86_64-pc-windows-msvc-none` from the `release.yml` dispatch on
 `fix/full-coverage-pass-and-one-search-depth`. The `none` engine is `--no-default-features`: no ONNX
@@ -315,6 +321,63 @@ and on a corpus with a real semantic graph it has something to find), nor which 
 quadratic one — closure, SIMILAR and community detection were timed as one pass. Both are questions
 for the graph layer, not for extraction, and they are now the first thing to look at before any
 format work makes corpora bigger.
+
+### 2026-11-10, fifth pass — the fix, measured against the rows above
+
+`linkpred::jaccard_pairs` now pairs reasoning nodes only (the ontology's structural types are
+excluded from BOTH SIMILAR arms, where before the filter reached only the label-BM25 one).
+Neighbourhoods are still built from every edge. Same corpora, same machine, same binary family:
+
+| Corpus | Chunks | Tail before | Tail after | Wall before → after |
+|---|---|---|---|---|
+| 16 × 1 MiB | 9 921 | 11 402 ms | **372 ms** | 18.7 s → 8.9 s |
+| ladder 1→16 MiB | 19 206 | 67 225 ms | **837 ms** | 82.1 s → 25.5 s |
+| bisect 8→16 MiB | 37 161 | 259 722 ms | **1 352 ms** | 294.3 s → 43.3 s |
+| corpus A | 2 350 | 7 054 ms | 6 098 ms | 30.3 s → 34.1 s |
+
+**The quadratic is gone from the structural case.** 372 / 837 / 1 352 ms over 9.9k / 19.2k / 37.2k
+chunks is flat per chunk (~0.037 ms). Full reindex throughput on the largest synthetic corpus went
+126 → 858 chunks/s.
+
+**Nothing semantic was lost.** Standalone `kb graph generalize`, before → after:
+
+| Corpus | Time | SIMILAR edges | Communities |
+|---|---|---|---|
+| ladder 1→16 MiB | 67 479 → 849 ms | 20 → **0** | 0 → 0 |
+| bisect 8→16 MiB | 288 667 → 1 602 ms | 20 → **0** | 0 → 0 |
+| corpus A | 12 712 → 10 245 ms | 9 356 → **9 151** | 91 → 91 |
+
+The synthetic corpora's SIMILAR edges were all section-to-section — the noise retrieval de-weights —
+and they are now simply not derived. On the corpus with a real reasoning graph, 205 edges of 9 356
+went (2.2%), every community survived, and the pass still costs 10 s: **the pairing loop is still
+quadratic, now in reasoning nodes, which is the set it was written for.** A corpus whose graph is
+genuinely rich still pays for that, and this fix does not claim otherwise.
+
+**What did not improve, and one caution.** Corpus A's wall went slightly UP (30.3 → 34.1 s) and its
+costliest file moved 4 552 → 5 046 ms; both are inside the noise this log already documents for
+single-file samples. That noise turned out to be wider than the ±40% recorded in the second pass:
+the ladder's 16 MiB file has now been sampled at 8 402, 11 981 and 15 791 ms across runs on a quiet
+machine, a spread of 1.9x. **Read a single file's cost as an order of magnitude, never as a
+number** — only whole-corpus wall and tail have been repeatable here (3–4%).
+
+### 2026-11-10 — the `directml` row the baseline owed
+
+Every row above was taken on `--no-default-features` (`none`), which is not what a Windows
+deployment ships. The two rows measured on the shipped feature set, same corpora and same commit:
+
+| Corpus | Engine | Wall | per-file p50/p95 | Tail | read p50/p95 |
+|---|---|---|---|---|---|
+| corpus A | none | 34 086 ms | 58 / 5 046 ms | 6 098 ms | 13 / 16 ms |
+| corpus A | **directml** | 28 580 ms | 34 / 5 139 ms | 5 245 ms | **22 / 31 ms** |
+| corpus B | none | 1 888 ms | 103 / 368 ms | 138 ms | 11 / 14 ms |
+| corpus B | **directml** | 2 250 ms | 126 / 460 ms | 125 ms | **21 / 25 ms** |
+
+**Indexing does not care which engine is compiled in** — the wall difference goes both ways and
+sits inside this log's documented noise, which is what you would expect: nothing in the index path
+scores anything. **The read path roughly doubles**, 13→22 and 11→21 ms at p50. These are CLI
+invocations, so that is ONNX-runtime process start-up, not per-query inference: a `kb read` on the
+shipped build pays about 10 ms more before it does anything. In-process MCP reads pay that once per
+server, not once per call — so this number is a floor for the CLI and says nothing about serving.
 
 ### DF ratios (`df(token)/n_chunks`, what the `verify` gate compares against)
 
