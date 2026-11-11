@@ -7,7 +7,7 @@
 //! the actual SCM/`systemctl` calls are `#[cfg]`-gated and need elevation to run, so they are
 //! compile-verified and exercised operationally.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// A service to register, in binary- and OS-neutral terms: a unique `name`, human labels, the
 /// `program` to run, its `args`, and whether the program pings a systemd watchdog.
