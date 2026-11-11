@@ -49,6 +49,14 @@ impl Extractor for OfficeExtractor {
             // has no text. `rtf.rs` and `odf.rs` have refused this since they were written; this
             // reader is the one that did not, and it is the one that has silently under-extracted
             // before (the `w:pBdr` scanner desync that ran the reader to EOF).
+            //
+            // The cost, taken knowingly: an error is a permanent skip, and `index_file` buffers
+            // before it deletes, so a document EDITED down to no text keeps its last indexed text
+            // under its new signature until a `--force`. That is the better of the two wrongs —
+            // zero text from an office reader is far more often the reader's failure than the
+            // author's intent — and it is what `odf.rs` and `rtf.rs` have always done. The real
+            // repair is a verdict the caller can tell apart ("parsed, genuinely empty" vs "could
+            // not read"), which belongs with the extractor registry, not in this branch.
             return Err(anyhow!(
                 "office produced no chunks for {} — the file parsed but yielded no text",
                 path.display()

@@ -126,6 +126,18 @@ fn is_nonempty_text_block(el: &Element) -> bool {
     }
 }
 
+/// Does this format's `Section::title` name a container, or guess a title?
+///
+/// A spreadsheet's section is a sheet and a presentation's is a slide: the name is the author's,
+/// it addresses the content, and the headings inside it are its children. For `docx`/`doc` there
+/// is no such container — `office_oxide` fills `Section::title` with the text of the section's
+/// *first heading* (`convert_docx.rs:74`, `convert_doc.rs:32`), which is already in
+/// `heading_path`. Prepending that would either duplicate the heading or, worse, hang every later
+/// heading in the document under the first one. `odt` sections carry no title at all.
+fn section_is_container(file_type: &str) -> bool {
+    matches!(file_type, "xlsx" | "xls" | "ods" | "pptx" | "ppt" | "odp")
+}
+
 fn flush_buf(
     path: &Path,
     file_type: &str,
@@ -142,11 +154,21 @@ fn flush_buf(
     if text.trim().is_empty() {
         return;
     }
-    let location = if !heading_path.is_empty() {
-        heading_path.join(" > ")
-    } else {
-        section_title.unwrap_or("").to_string()
-    };
+    // `location` is a path, and the sheet or slide a heading sits in is part of it. Dropping the
+    // container the moment a heading appeared was the bug: two slides that both open with "Intro"
+    // produced the same `location`, and `" > "` is the only thing the graph splits to find
+    // PARENT/CHILD, so the two collapsed into one parent. Not every `Section::title` is a
+    // container, though — see `section_is_container`.
+    let mut segs: Vec<&str> = Vec::new();
+    if let Some(t) = section_title.filter(|t| !t.is_empty()) {
+        let container_of_these_headings =
+            section_is_container(file_type) && heading_path.first().map(String::as_str) != Some(t);
+        if heading_path.is_empty() || container_of_these_headings {
+            segs.push(t);
+        }
+    }
+    segs.extend(heading_path.iter().map(String::as_str));
+    let location = segs.join(" > ");
     out.push(Chunk {
         doc_path: path.to_path_buf(),
         location,
@@ -295,6 +317,76 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].location, "Sheet1");
         assert_eq!(chunks[1].location, "Sheet2");
+    }
+
+    /// Two slides opening with the same heading used to produce the SAME `location`, because a
+    /// heading replaced the slide name instead of hanging under it. `" > "` is the only thing the
+    /// graph splits to find PARENT/CHILD, so the two slides collapsed into one parent node.
+    #[test]
+    fn a_slide_name_is_the_ancestor_of_the_headings_inside_it() {
+        let slide = |name: &str| Section {
+            title: Some(name.into()),
+            elements: vec![
+                Element::Heading(Heading {
+                    level: 1,
+                    content: vec![InlineContent::Text(TextSpan {
+                        text: "Intro".into(),
+                        ..Default::default()
+                    })],
+                    ..Default::default()
+                }),
+                text_para("body"),
+            ],
+            ..Default::default()
+        };
+        let ir = DocumentIR {
+            sections: vec![slide("Slide1"), slide("Slide2")],
+            ..Default::default()
+        };
+        let locs: Vec<String> = chunk_ir(Path::new("a.odp"), &ir, "odp")
+            .iter()
+            .map(|c| c.location.clone())
+            .collect();
+        assert_eq!(locs, ["Slide1 > Intro", "Slide2 > Intro"], "{locs:?}");
+    }
+
+    /// The counter-case that keeps the fix honest: `office_oxide` fills a docx section's title with
+    /// the text of its first heading, so prepending it there would read "H1 > H1" — and would hang
+    /// every later heading in the document under the first one.
+    #[test]
+    fn a_guessed_docx_section_title_is_not_an_ancestor() {
+        let ir = DocumentIR {
+            sections: vec![Section {
+                title: Some("First".into()),
+                elements: vec![
+                    Element::Heading(Heading {
+                        level: 1,
+                        content: vec![InlineContent::Text(TextSpan {
+                            text: "First".into(),
+                            ..Default::default()
+                        })],
+                        ..Default::default()
+                    }),
+                    text_para("a"),
+                    Element::Heading(Heading {
+                        level: 1,
+                        content: vec![InlineContent::Text(TextSpan {
+                            text: "Second".into(),
+                            ..Default::default()
+                        })],
+                        ..Default::default()
+                    }),
+                    text_para("b"),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let locs: Vec<String> = chunk_ir(Path::new("a.docx"), &ir, "docx")
+            .iter()
+            .map(|c| c.location.clone())
+            .collect();
+        assert_eq!(locs, ["First", "Second"], "{locs:?}");
     }
 
     #[test]

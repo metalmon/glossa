@@ -22,7 +22,12 @@ use tantivy::{doc, Index, IndexReader, TantivyDocument, TantivyError};
 //    gains Table elements at all (its table structure used to be dropped silently). `file_sig` is
 //    mtime+size, so an extractor upgrade alone never makes a file stale: without this bump an
 //    existing index would serve the old, under-extracted bodies forever.
-pub const INDEX_SCHEMA_VERSION: u32 = 5;
+// 6: a sheet or slide name is now the first segment of its chunks' `location` (it used to be
+//    dropped the moment the slide contained a heading), so two slides that open with the same
+//    heading stop sharing one `location` — and `" > "` is the only thing the graph splits to
+//    build PARENT/CHILD. Stored locations and the structural edges derived from them both change
+//    for xlsx/xls/ods/pptx/ppt/odp; nothing makes those files stale on their own.
+pub const INDEX_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Clone, Copy)]
 pub struct Fields {

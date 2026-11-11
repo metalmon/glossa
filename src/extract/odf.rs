@@ -1319,11 +1319,9 @@ mod tests {
     #[test]
     fn odp_section_per_slide_with_names() {
         // The odf.rs-level deliverable: each <draw:page> becomes its own
-        // Section, titled from draw:name. (chunk_ir's `location` is NOT
-        // asserted here — it prioritizes an in-slide heading's text over
-        // section_title whenever the slide has one, which both fixture
-        // slides do; see the report for the full explanation. That's
-        // existing, shared, out-of-scope behavior in office_chunk.rs.)
+        // Section, titled from draw:name. `location` is asserted in
+        // `odp_extract_yields_odp_chunks_with_both_slides_text`: the slide name is now the first
+        // segment of it, ahead of any in-slide heading, rather than being replaced by one.
         let xml = read_content_xml(ODP, Path::new("sample.odp")).unwrap();
         let ir = parse_to_ir(&xml, "odp").unwrap();
 
@@ -1354,6 +1352,17 @@ mod tests {
             all_text.contains("Second Heading"),
             "second slide heading missing: {all_text}"
         );
+        // The slide name reaches `location` as the first segment, so two slides that open with
+        // the same heading stay distinguishable (and the graph, which splits on " > ", gets one
+        // parent per slide rather than one shared). Dropping the name whenever a slide had a
+        // heading was the bug this pins.
+        for c in &chunks {
+            assert!(
+                c.location.starts_with("Slide1") || c.location.starts_with("Slide2"),
+                "a chunk lost its slide name: {:?}",
+                c.location
+            );
+        }
         // Section-per-slide boundary actually applies at chunk granularity too:
         // each slide's marker text must land in its OWN chunk, not be merged
         // into one big blob.
