@@ -221,6 +221,15 @@ impl DocIndex {
         })
     }
 
+    /// Is there an index here already? Answers without creating one, which
+    /// `open_or_create_at` cannot: that one does `create_dir_all` plus
+    /// `Index::create_in_dir`, so asking it "how big is the index" on a corpus
+    /// that has none *makes* one. A read-only caller — a metrics scrape, a
+    /// status display — asks this first.
+    pub fn exists(state_base: &Path) -> bool {
+        index_dir_path(state_base).join("meta.json").is_file()
+    }
+
     /// Back-compat wrapper: single empty-label root == state_base == `dir` (co-located, unchanged).
     pub fn open_or_create(dir: &Path) -> anyhow::Result<DocIndex> {
         Self::open_or_create_at(

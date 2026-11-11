@@ -298,6 +298,13 @@ type PprTransitionCache = Option<(
 type DbFileSig = (u128, u64, u128, u64);
 
 impl GraphStore {
+    /// Is there a graph here already? `open` creates one — the directory, the sqlite file and the
+    /// whole schema — so a read-only caller that only wants to report a count asks this first
+    /// rather than bringing a graph into existence by looking at it.
+    pub fn exists(dir: &Path) -> bool {
+        dir.join(".glossa").join("graph.sqlite").is_file()
+    }
+
     pub fn open(dir: &Path) -> anyhow::Result<GraphStore> {
         let gdir = dir.join(".glossa");
         std::fs::create_dir_all(&gdir).with_context(|| format!("create {gdir:?}"))?;

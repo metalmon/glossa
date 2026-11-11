@@ -629,17 +629,30 @@ impl GlossaServer {
         parsed
     }
 
-    /// Prometheus text-exposition metrics for `/metrics`. Cheap, computed at scrape time: index size,
-    /// graph size, and whether the derived layer is stale. (Request-rate/latency are left to the HTTP
-    /// access log / gateway.)
+    /// Prometheus text-exposition metrics for `/metrics`: index size, graph size, and whether the
+    /// derived layer is stale. (Request-rate/latency are left to the HTTP access log / gateway.)
+    ///
+    /// **A scrape observes; it does not create.** Both stores' constructors bring their storage into
+    /// existence — `DocIndex::open_or_create_at` does `create_dir_all` + `Index::create_in_dir`, and
+    /// `GraphStore::open` creates the sqlite file and its whole schema — so the obvious spelling of
+    /// this function made a monitoring poll write to a corpus that had never been indexed. A corpus
+    /// with no index reports zero, which is what `glossa_index_warm` is for distinguishing.
     pub fn metrics_text(&self) -> String {
-        let chunks = crate::index::store::DocIndex::open_or_create(&self.state_base)
-            .ok()
-            .and_then(|idx| idx.index.reader().ok().map(|r| r.searcher().num_docs()))
-            .unwrap_or(0);
-        let (nodes, edges) = match GraphStore::open(&self.state_base) {
-            Ok(g) => (g.node_count().unwrap_or(0), g.edge_count().unwrap_or(0)),
-            Err(_) => (0, 0),
+        let chunks = if crate::index::store::DocIndex::exists(&self.state_base) {
+            crate::index::store::DocIndex::open_or_create(&self.state_base)
+                .ok()
+                .and_then(|idx| idx.index.reader().ok().map(|r| r.searcher().num_docs()))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let (nodes, edges) = if GraphStore::exists(&self.state_base) {
+            match GraphStore::open(&self.state_base) {
+                Ok(g) => (g.node_count().unwrap_or(0), g.edge_count().unwrap_or(0)),
+                Err(_) => (0, 0),
+            }
+        } else {
+            (0, 0)
         };
         let dirty = self.dirty.load(Ordering::Relaxed) as u8;
         let indexing = (self.indexing.load(Ordering::Relaxed) > 0) as u8;
@@ -2734,6 +2747,40 @@ mod tests {
         assert!(text.contains("glossa_index_transient_failures_last_pass 2"));
         assert!(text.contains("glossa_index_permanent_skips 5"));
         assert!(text.contains("glossa_index_empty_mount_holds 1"));
+    }
+
+    /// A monitoring scrape must observe, not create. Both stores' constructors bring their storage
+    /// into existence, so the obvious spelling of `metrics_text` wrote an index and a graph schema
+    /// into a corpus that had never been indexed — found by review, and cheap to pin: after a
+    /// scrape of an untouched directory, nothing has appeared on disk.
+    #[test]
+    fn a_metrics_scrape_creates_neither_index_nor_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let srv = GlossaServer::new_for_test(
+            dir.path().to_path_buf(),
+            Profile::Reader,
+            false,
+            ServerFlags::default(),
+        );
+        let text = srv.metrics_text();
+        assert!(text.contains("glossa_index_chunks 0"), "{text}");
+        assert!(text.contains("glossa_graph_nodes 0"));
+        assert!(
+            !dir.path().join(".glossa").join("graph.sqlite").exists(),
+            "the scrape created a graph store"
+        );
+        assert!(
+            !crate::index::store::DocIndex::exists(dir.path()),
+            "the scrape created an index"
+        );
+        // The strongest form of the claim: the scrape left no trace at all.
+        assert!(
+            !dir.path().join(".glossa").exists()
+                || std::fs::read_dir(dir.path().join(".glossa"))
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(false),
+            "the scrape wrote something under .glossa"
+        );
     }
 
     /// Task 7 spec test: `GlossaServer` reads corpus content from `roots` but every on-disk write
