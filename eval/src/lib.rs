@@ -3,7 +3,6 @@
 
 pub mod backend;
 pub mod bench;
-pub mod bridge_probe;
 pub mod build;
 pub mod calibrate;
 pub mod checkpoint;
