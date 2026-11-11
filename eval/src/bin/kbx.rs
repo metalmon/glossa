@@ -13,7 +13,6 @@ use kb_eval::backend::accounting::{
 };
 use kb_eval::backend::openai::{OpenAiBackend, DEFAULT_MAX_ROUNDS};
 use kb_eval::backend::progress::StatusTicker;
-use kb_eval::backend::AgentBackend;
 use kb_eval::build::{run_build, BuildOpts, BuildStage};
 use kb_eval::calibrate::{self, CalibrateArgs};
 use kb_eval::dataset::Question;

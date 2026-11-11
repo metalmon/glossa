@@ -1,4 +1,4 @@
-use super::{prompt, AgentBackend};
+use super::prompt;
 use crate::backend::loop_compat::execute_tool;
 use crate::backend::transport::ChatTransport;
 use crate::backend::vision::VisionTransport;
@@ -116,21 +116,17 @@ pub struct OpenAiBackend {
 /// default for callers without a lab config (the legacy CLI and tests).
 pub const DEFAULT_MAX_ROUNDS: usize = 50;
 
-impl AgentBackend for OpenAiBackend {
-    fn needs_corpus(&self) -> bool {
-        true
-    }
-
-    fn answer(&self, work: &Path, q: &Question) -> anyhow::Result<String> {
+impl OpenAiBackend {
+    /// Answer one question, discarding the trajectory. The capturing form below is the real
+    /// body; this is the plain entry point `kbx eval` calls.
+    pub fn answer(&self, work: &Path, q: &Question) -> anyhow::Result<String> {
         self.answer_capturing(work, q, None)
     }
-}
 
-impl OpenAiBackend {
-    /// Capture-aware reader. Identical to [`AgentBackend::answer`], but when `capture` is `Some`
+    /// Capture-aware reader. Identical to [`Self::answer`], but when `capture` is `Some`
     /// it records the full chat trajectory (the seed system+user, every assistant/tool round, and
     /// the final answer turn) into the sink for fine-tuning dataset collection (`kbx eval
-    /// --capture`). `capture: None` reproduces `answer` exactly — the trait method just delegates
+    /// --capture`). `capture: None` reproduces `answer` exactly — that entry point just delegates
     /// here with `None`, so the non-capturing path is byte-identical to before.
     pub fn answer_capturing(
         &self,
