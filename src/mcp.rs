@@ -1807,33 +1807,49 @@ impl GlossaServer {
     ) -> Result<CallToolResult, McpError> {
         let started = std::time::Instant::now();
         if let Some(p) = a.path.as_deref() {
-            let idx =
-                crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
-                    .map_err(internal)?;
-            let Some(rel) = idx.canonical_document_path(p) else {
-                return Ok(CallToolResult::success(vec![Content::text(format!(
-                    "not an indexed document: {p}"
-                ))]));
-            };
-            // Explicit call — bounded wait for the lock (mirror freshen_blocking's loop, ~3s).
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-            let mut done = false;
-            loop {
-                if let Some(_g) = crate::index::lock::try_index_lock(&self.state_base) {
-                    crate::index::store::index_one_file_locked_at(
-                        &self.roots,
-                        &self.state_base,
-                        &rel,
-                    )
-                    .map_err(internal)?;
-                    done = true;
-                    break;
-                }
-                if std::time::Instant::now() >= deadline {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
+            /// What the blocking half decided, so the async half can phrase it.
+            enum OneFile {
+                NotIndexed,
+                Busy(String),
+                Done(String),
             }
+            // Everything here is blocking: a tantivy open, a lock wait that SLEEPS up to 3s, and
+            // the extraction itself. Running it on the async worker parked that worker for the
+            // whole of it — a `std::thread::sleep` inside an async fn is the textbook form of the
+            // mistake, and it sat 13 lines above a `spawn_blocking` that got it right.
+            let roots = self.roots.clone();
+            let base = self.state_base.clone();
+            let want = p.to_string();
+            let outcome = tokio::task::spawn_blocking(move || -> anyhow::Result<OneFile> {
+                let idx = crate::index::store::DocIndex::open_or_create_at(&roots, &base)?;
+                let Some(rel) = idx.canonical_document_path(&want) else {
+                    return Ok(OneFile::NotIndexed);
+                };
+                // Explicit call — bounded wait for the lock (mirror freshen_blocking's loop, ~3s).
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                loop {
+                    if let Some(_g) = crate::index::lock::try_index_lock(&base) {
+                        crate::index::store::index_one_file_locked_at(&roots, &base, &rel)?;
+                        return Ok(OneFile::Done(rel));
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Ok(OneFile::Busy(rel));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            })
+            .await
+            .map_err(|e| internal(anyhow::anyhow!("index task failed to run: {e}")))?
+            .map_err(internal)?;
+            let (rel, done) = match outcome {
+                OneFile::NotIndexed => {
+                    return Ok(CallToolResult::success(vec![Content::text(format!(
+                        "not an indexed document: {p}"
+                    ))]))
+                }
+                OneFile::Busy(rel) => (rel, false),
+                OneFile::Done(rel) => (rel, true),
+            };
             if done {
                 self.mark_dirty();
                 return Ok(CallToolResult::success(vec![Content::text(format!(
@@ -1846,8 +1862,17 @@ impl GlossaServer {
             ))]));
         }
         let forced = a.force.unwrap_or(false);
-        let s = crate::index::store::index_dir_at(&self.roots, &self.state_base, forced)
-            .map_err(internal)?;
+        // A whole-corpus pass is minutes on a real corpus — measured at 294 s before the graph
+        // pairing fix and 43 s after, on 37k chunks. Either number is far too long to hold a tokio
+        // worker, and `run_generalize` below already knew that.
+        let roots = self.roots.clone();
+        let base = self.state_base.clone();
+        let s = tokio::task::spawn_blocking(move || {
+            crate::index::store::index_dir_at(&roots, &base, forced)
+        })
+        .await
+        .map_err(|e| internal(anyhow::anyhow!("index task failed to run: {e}")))?
+        .map_err(internal)?;
         self.mark_dirty();
         let mut generalize_note = "";
         if forced {
