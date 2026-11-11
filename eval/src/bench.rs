@@ -7,7 +7,7 @@
 //! extraction path is instrumented to make the measurement possible.
 //!
 //! Per-file durations therefore come from timestamping the `  + <doc_key>` progress lines
-//! `kb index` already writes to stderr (`src/index/store.rs:2187`). Post-run figures — chunk count,
+//! `kb index` already writes to stderr (`src/index/store.rs:2200`). Post-run figures — chunk count,
 //! DF sidecar, manifest schema version — are read from what the run leaves behind.
 
 use anyhow::{Context, Result};
