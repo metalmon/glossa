@@ -62,31 +62,15 @@ pub fn names() -> impl Iterator<Item = &'static str> {
     TEMPLATES.iter().map(|(n, _)| *n)
 }
 
-/// Levenshtein edit distance (small hand-rolled; no dep).
-fn edit_distance(a: &str, b: &str) -> usize {
-    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut cur = vec![0usize; b.len() + 1];
-    for (i, ca) in a.iter().enumerate() {
-        cur[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let cost = if ca == cb { 0 } else { 1 };
-            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
-        }
-        std::mem::swap(&mut prev, &mut cur);
-    }
-    prev[b.len()]
-}
-
 /// Preset names closest to `query` (over names AND aliases, mapped to the canonical name).
 pub fn nearest(query: &str, k: usize) -> Vec<String> {
     let q = query.trim().to_lowercase();
     let mut scored: Vec<(usize, String)> = catalog()
         .into_iter()
         .map(|t| {
-            let mut d = edit_distance(&q, &t.name.to_lowercase());
+            let mut d = crate::graph::query::levenshtein(&q, &t.name.to_lowercase());
             for a in &t.aliases {
-                d = d.min(edit_distance(&q, &a.to_lowercase()));
+                d = d.min(crate::graph::query::levenshtein(&q, &a.to_lowercase()));
             }
             (d, t.name)
         })
