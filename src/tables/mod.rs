@@ -1,7 +1,6 @@
 //! Agent-authored limit tables (`.glossa/notes/<doc>/*.csp`) and constraint compilation.
 
 pub mod csp;
-pub mod schema;
 
 #[cfg(feature = "notebook")]
 pub use crate::notebook::{
@@ -23,7 +22,6 @@ mod wiring;
 #[cfg(feature = "constraint")]
 pub use compile::tables_to_graph;
 #[cfg(feature = "constraint")]
-pub use coverage::{count_csp_files, csp_column_values, csp_tables_per_file};
+pub use coverage::count_csp_files;
 #[cfg(feature = "constraint")]
 pub use report::format_graph_build_output;
-pub use schema::{parse_schema_order, read_schema_order, SchemaOrder};

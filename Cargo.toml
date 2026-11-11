@@ -14,7 +14,6 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
-walkdir = "2"
 ignore = "0.4"
 regex = "1"
 regex-syntax = "0.8"
@@ -35,8 +34,6 @@ rust-stemmers = "1.2"
 rusqlite = { version = "0.40", features = ["bundled", "hooks", "functions"] }
 toml = "1.1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
-postcard = { version = "1", features = ["alloc"] }
-lingua = { version = "1.8", default-features = false, features = ["russian", "english"], optional = true }
 rmcp = { version = "3.1", features = ["server", "transport-io", "transport-streamable-http-server", "macros"] }
 schemars = "1.0"
 base64 = "0.22"
@@ -104,7 +101,6 @@ http-scorer = ["dep:ureq"]
 # + tests/e2e/harness.rs). OFF by default so a normal `cargo test` is completely unaffected; opt in
 # with `--features e2e` (add `,tls` for the HTTPS/mTLS e2e). Carries no extra deps of its own.
 e2e = []
-lingua = ["dep:lingua"]
 constraint = ["dep:glossa-constraint", "notebook"]
 # In-process NLI (entailment) scorer for the answer-grounding gate (opt-in — the default build
 # carries zero ML deps). `nli` pulls in glossa-nli's self-contained CPU linking strategy

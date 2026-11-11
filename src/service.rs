@@ -3,9 +3,9 @@
 //! One shape for both binaries and both OSes: a [`ServiceSpec`] (name + program + args) is turned
 //! into a Windows SCM service (via the `windows-service` crate's `ServiceManager`) or a Linux
 //! systemd unit (rendered here, dropped into `/etc/systemd/system`, driven by `systemctl`). macOS
-//! launchd is not supported yet. The two pure renderers — [`render_systemd_unit`] and
-//! [`windows_bin_path`] — are unit-tested; the actual SCM/`systemctl` calls are `#[cfg]`-gated and
-//! need elevation to run, so they are compile-verified and exercised operationally.
+//! launchd is not supported yet. The pure renderer — [`render_systemd_unit`] — is unit-tested;
+//! the actual SCM/`systemctl` calls are `#[cfg]`-gated and need elevation to run, so they are
+//! compile-verified and exercised operationally.
 
 use std::path::{Path, PathBuf};
 
@@ -88,21 +88,6 @@ fn join_args_shell(args: &[String]) -> String {
         .join(" ")
 }
 
-/// Build the SCM `binPath`-style string (Windows): the program is always quoted, and every arg
-/// containing a space is quoted, then space-joined — avoiding the classic `sc.exe binPath= ` footgun
-/// where an unquoted space splits the path. (The programmatic `install` passes structured args to
-/// the SCM instead; this pure helper mirrors the same quoting for diagnostics/round-tripping.)
-pub fn windows_bin_path(program: &Path, args: &[String]) -> String {
-    let mut parts = vec![format!("\"{}\"", program.display())];
-    for a in args {
-        if a.contains(' ') {
-            parts.push(format!("\"{a}\""));
-        } else {
-            parts.push(a.clone());
-        }
-    }
-    parts.join(" ")
-}
 
 // ---------------------------------------------------------------------------
 // Generic service run-dispatcher: run an arbitrary serve closure under a platform's service
@@ -718,23 +703,6 @@ mod tests {
         assert!(
             u.contains("ExecStart=\"/opt/my kb/kb\" mcp \"/data/base one\""),
             "unit was:\n{u}"
-        );
-    }
-
-    #[test]
-    fn windows_bin_path_quotes_spaces() {
-        let p = windows_bin_path(
-            std::path::Path::new(r"C:\kb\kb.exe"),
-            &[
-                "mcp".into(),
-                r"C:\kb\base one".into(),
-                "--bind".into(),
-                "127.0.0.1:8801".into(),
-            ],
-        );
-        assert_eq!(
-            p,
-            r#""C:\kb\kb.exe" mcp "C:\kb\base one" --bind 127.0.0.1:8801"#
         );
     }
 }

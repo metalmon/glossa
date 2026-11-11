@@ -56,11 +56,11 @@ jobs:
       # no longer usable here: glossa now has two mutually-exclusive NLI engines (`nli`/`nli-dynamic`
       # = ONNX Runtime, XOR `nli-burn` = burn/wgpu), and `--all-features` would enable BOTH → a
       # glossa-nli `compile_error!`. This explicit set is the old `--all-features` minus `nli-burn`
-      # (ORT engine + notebook + e2e + lingua + constraint + tls); the burn engine is covered by its
+      # (ORT engine + notebook + e2e + constraint + tls); the burn engine is covered by its
       # own job below. Covers the `tls` handshake/mTLS/reload tests on both matrix OSes (§3b).
       # `http-scorer` is exercised in its own steps below (on its own, and combined with `tls`).
       - name: cargo test (glossa, all features except burn engine)
-        run: cargo test -p glossa --release --locked --features "notebook e2e lingua constraint nli nli-dynamic tls"
+        run: cargo test -p glossa --release --locked --features "notebook e2e constraint nli nli-dynamic tls"
 
       # `http-scorer` on its own (no tls): the remote NLI/reranker clients (HttpNli/HttpReranker)
       # and the multi-backend reranker wire. Single rustls provider (ureq's ring), so no clash.

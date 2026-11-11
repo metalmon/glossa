@@ -25,19 +25,6 @@ pub fn default_detector() -> DetectFn {
     script_detector()
 }
 
-/// Optional `lingua`-backed detector, for distinguishing same-script languages.
-/// Build with `--features lingua`.
-#[cfg(feature = "lingua")]
-pub fn lingua_detector() -> DetectFn {
-    use lingua::{Language, LanguageDetectorBuilder};
-    let detector =
-        LanguageDetectorBuilder::from_languages(&[Language::English, Language::Russian]).build();
-    Arc::new(move |text: &str| match detector.detect_language_of(text) {
-        Some(Language::Russian) => Algorithm::Russian,
-        _ => Algorithm::English,
-    })
-}
-
 /// A tantivy TokenFilter that picks a stemming algorithm per text (via `detect`),
 /// then stems every token. Tokens must already be lower-cased (chain LowerCaser first).
 #[derive(Clone)]

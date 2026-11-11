@@ -7,10 +7,6 @@ use crate::graph::ontology::Ontology;
 use crate::graph::store::GraphStore;
 use glossa_constraint::{Constraint, FieldConstraints, Problem};
 
-/// Edge types used as parameter edges from constraint nodes to literals.
-#[allow(dead_code)]
-const PARAM_EDGES: &[&str] = &["HAS_MIN", "HAS_MAX", "HAS_PATTERN", "HAS_EXPRESSION"];
-
 /// Load a constraint problem from the graph for a given source document.
 ///
 /// 1. Finds all Field nodes with the given source_path.
