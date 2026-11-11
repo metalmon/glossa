@@ -1352,10 +1352,10 @@ mod tests {
             all_text.contains("Second Heading"),
             "second slide heading missing: {all_text}"
         );
-        // The slide name reaches `location` as the first segment, so two slides that open with
-        // the same heading stay distinguishable (and the graph, which splits on " > ", gets one
-        // parent per slide rather than one shared). Dropping the name whenever a slide had a
-        // heading was the bug this pins.
+        // The slide name reaches `location` as the first segment, so two slides that open with the
+        // same heading stay distinguishable — including in the graph's per-file `seen` map, which
+        // is keyed on this string and used to find a chunk's ancestor. Dropping the name whenever a
+        // slide had a heading was the bug this pins.
         for c in &chunks {
             assert!(
                 c.location.starts_with("Slide1") || c.location.starts_with("Slide2"),

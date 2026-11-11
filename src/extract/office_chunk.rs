@@ -156,9 +156,10 @@ fn flush_buf(
     }
     // `location` is a path, and the sheet or slide a heading sits in is part of it. Dropping the
     // container the moment a heading appeared was the bug: two slides that both open with "Intro"
-    // produced the same `location`, and `" > "` is the only thing the graph splits to find
-    // PARENT/CHILD, so the two collapsed into one parent. Not every `Section::title` is a
-    // container, though — see `section_is_container`.
+    // produced the same `location`, and the graph keys its per-file `seen` map on that string
+    // (`index/store.rs`) while `nearest_ancestor` splits it on `" > "` — so the second container
+    // overwrote the first, and any deeper chunk in either one parented to whichever wrote last.
+    // Not every `Section::title` is a container, though — see `section_is_container`.
     let mut segs: Vec<&str> = Vec::new();
     if let Some(t) = section_title.filter(|t| !t.is_empty()) {
         let container_of_these_headings =
@@ -320,8 +321,9 @@ mod tests {
     }
 
     /// Two slides opening with the same heading used to produce the SAME `location`, because a
-    /// heading replaced the slide name instead of hanging under it. `" > "` is the only thing the
-    /// graph splits to find PARENT/CHILD, so the two slides collapsed into one parent node.
+    /// heading replaced the slide name instead of hanging under it. The graph keys its per-file
+    /// `seen` map on that string, so one slide's entry overwrote the other's and a deeper chunk in
+    /// either slide parented across the boundary.
     #[test]
     fn a_slide_name_is_the_ancestor_of_the_headings_inside_it() {
         let slide = |name: &str| Section {
