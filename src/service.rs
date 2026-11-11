@@ -88,7 +88,6 @@ fn join_args_shell(args: &[String]) -> String {
         .join(" ")
 }
 
-
 // ---------------------------------------------------------------------------
 // Generic service run-dispatcher: run an arbitrary serve closure under a platform's service
 // supervisor (Windows SCM control handler; off Windows, a Ctrl-C bridge). Shared by `kb` and

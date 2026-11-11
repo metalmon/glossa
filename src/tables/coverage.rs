@@ -33,12 +33,8 @@ mod tests {
         assert_eq!(count_csp_files(dir.path(), "no/such.pdf"), 0);
         let mirror = notes_root(dir.path()).join(mirror_dir_for_doc(doc));
         std::fs::create_dir_all(&mirror).unwrap();
-        std::fs::write(mirror.join("height.csp"), "h	D
-0,6	125
-").unwrap();
-        std::fs::write(mirror.join("voltage.CSP"), "Voltage
-220
-").unwrap();
+        std::fs::write(mirror.join("height.csp"), "h\tD\n0,6\t125\n").unwrap();
+        std::fs::write(mirror.join("voltage.CSP"), "Voltage\n220\n").unwrap();
         std::fs::write(mirror.join("notes.md"), "not a table").unwrap();
         assert_eq!(count_csp_files(dir.path(), doc), 2);
     }
