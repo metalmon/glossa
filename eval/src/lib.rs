@@ -14,7 +14,7 @@ pub mod dataset_toml;
 pub mod distil;
 pub mod download;
 pub mod episode;
-pub mod export_tz;
+pub mod train_examples;
 pub mod fcr;
 pub mod finetune;
 pub mod fit;

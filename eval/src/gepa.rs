@@ -6,8 +6,8 @@
 //! - **glob**: TZ `functions.glob` → model emits `glob(pattern)` → gold document path listed?
 //! - **read**: TZ `functions.read` → after prefilled search/grep hits, model emits `read(path,n)` → matches gold?
 
-pub use crate::export_tz::SearchExample;
-use crate::export_tz::{GlobExample, GrepExample, ReadExample, ReadPick};
+pub use crate::train_examples::SearchExample;
+use crate::train_examples::{GlobExample, GrepExample, ReadExample, ReadPick};
 use anyhow::{Context, Result};
 use glossa::grep::GrepOpts;
 use glossa::index::store::DocIndex;
@@ -277,7 +277,7 @@ fn grep_top_k(idx: &DocIndex, pattern: &str, k: usize) -> Vec<glossa::grep::Grep
 
 fn glob_paths(idx: &DocIndex, pattern: &str) -> Vec<String> {
     let text = glossa::tools::glob(idx, pattern, &TraceLog::disabled());
-    crate::export_tz::parse_glob_paths(&text)
+    crate::train_examples::parse_glob_paths(&text)
         .into_iter()
         .filter_map(|p| idx.canonical_document_path(&p))
         .collect()
@@ -2803,7 +2803,7 @@ mod tests {
 
     #[test]
     fn normalize_question_used_for_join() {
-        use crate::export_tz::normalize_question;
+        use crate::train_examples::normalize_question;
         assert_eq!(normalize_question("  a  b "), "a b");
     }
 
