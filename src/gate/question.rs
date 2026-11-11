@@ -33,7 +33,10 @@ impl Stemmers {
     }
 
     fn stem(&self, tok: &str) -> String {
-        let cyrillic = tok.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c));
+        // Per-TOKEN, unlike the index tokenizer's per-text decision: a question may mix scripts,
+        // and stemming a Russian term with the English stemmer would raise a false
+        // "not in the corpus" flag. Only the script range itself is shared.
+        let cyrillic = crate::index::multilang::is_cyrillic(tok);
         if cyrillic {
             self.ru.stem(tok)
         } else {

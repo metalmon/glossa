@@ -10,9 +10,17 @@ pub type DetectFn = Arc<dyn Fn(&str) -> Algorithm + Send + Sync>;
 
 /// Default, zero-dependency detector. RU and EN live in different scripts, so a
 /// single Cyrillic char is a reliable, free signal for Russian; everything else → English.
+/// Does `s` contain a Cyrillic character? The ONE place the script range lives — three call
+/// sites decide "Russian or English" from it, at three different granularities (whole text for
+/// the index tokenizer and for `TermAnalyzer`, a single token for the vocabulary check in
+/// `gate::question`). Those granularities are deliberate and differ; the range must not.
+pub fn is_cyrillic(s: &str) -> bool {
+    s.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c))
+}
+
 pub fn script_detector() -> DetectFn {
     Arc::new(|text: &str| {
-        if text.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c)) {
+        if is_cyrillic(text) {
             Algorithm::Russian
         } else {
             Algorithm::English
@@ -145,7 +153,7 @@ impl TermAnalyzer {
     pub fn terms(&self, text: &str, out: &mut std::collections::BTreeSet<String>) {
         out.clear();
         // Same per-text script detection as `script_detector`: any Cyrillic char → Russian.
-        let cyrillic = text.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c));
+        let cyrillic = is_cyrillic(text);
         let stemmer = if cyrillic { &self.ru } else { &self.en };
         for tok in text.split(|c: char| !c.is_alphanumeric()) {
             if tok.is_empty() {
