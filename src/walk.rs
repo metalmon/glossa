@@ -14,6 +14,7 @@ pub fn extractors() -> Vec<Box<dyn Extractor>> {
         Box::new(crate::extract::odf::OdfExtractor),
         Box::new(OfficeExtractor),
         Box::new(PdfExtractor),
+        Box::new(crate::extract::rtf::RtfExtractor),
     ]
 }
 

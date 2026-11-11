@@ -30,6 +30,7 @@ pub const DEFAULT_IGNORE: &str = "\
 !*.xls
 !*.pptx
 !*.ppt
+!*.rtf
 !*.odt
 !*.ods
 !*.odp
@@ -120,6 +121,29 @@ mod tests {
         );
         assert!(content.contains("!*.pdf") && content.contains("!*.docx"));
         assert!(content.contains("!*.png"), "images stay whitelisted");
+    }
+
+    #[test]
+    fn every_extension_an_extractor_claims_is_whitelisted() {
+        // This file is what the walk obeys, so a type missing here makes its extractor dead code:
+        // `*` drops the file before any extractor is asked. The failure is silent — no skip, no
+        // error, the document simply never appears — which is how four uppercase `.PDF` files sat
+        // outside an index, and how a `.rtf` extractor would have shipped unreachable.
+        for ex in crate::walk::extractors() {
+            for ext in ex.file_types() {
+                assert!(
+                    DEFAULT_IGNORE.contains(&format!("!*.{ext}")),
+                    "an extractor claims .{ext}, but the seeded whitelist does not re-include it"
+                );
+            }
+        }
+        // `extract_file`'s second tier is hardcoded rather than registered, and needs the same.
+        for ext in ["csv", "tsv", "html", "htm"] {
+            assert!(
+                DEFAULT_IGNORE.contains(&format!("!*.{ext}")),
+                "the streaming tier handles .{ext}, but the whitelist does not re-include it"
+            );
+        }
     }
 
     #[test]

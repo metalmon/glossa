@@ -50,6 +50,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_office_reader_declines_rtf_bytes_rather_than_half_reading_them() {
+        // `extract_file`'s mislabeled-extension rescue rests on this: a `.doc` that is really RTF
+        // must either fail or produce nothing, so the rescue can see it declined. The dangerous
+        // third outcome is a reader that "succeeds" with garbage chunks — then the file is indexed
+        // as mangled text and nothing downstream can tell. That is the docx under-extraction class
+        // we have already been bitten by, so it is pinned here rather than assumed.
+        let r = OfficeExtractor.extract(
+            Path::new("mislabelled.doc"),
+            br"{\rtf1\ansi\pard Real text lives here.\par}",
+        );
+        match r {
+            Err(_) => {}
+            Ok(cs) => assert!(
+                cs.is_empty(),
+                "the office reader claimed to read RTF, so the rescue will never fire: {:?}",
+                cs.iter().map(|c| &c.text).collect::<Vec<_>>()
+            ),
+        }
+    }
+
+    #[test]
     fn extracts_text_from_docx_fixture() {
         let bytes = include_bytes!("../../tests/fixtures/sample.docx");
         let chunks = OfficeExtractor

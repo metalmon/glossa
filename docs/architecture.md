@@ -49,6 +49,7 @@ Provenance on graph nodes records `source_path`, optional range, file signature,
 | PDF | [pdf_oxide](https://github.com/yfedoseev/pdf_oxide) | Per-page text; blank pages indexed empty; page raster for vision agents (bounded at 16 megapixels, scaled to fit); embedded image extraction; scans indexed by filename if no text |
 | Office (OOXML + legacy) | [office_oxide](https://github.com/yfedoseev/office_oxide) | doc/docx, xls/xlsx, ppt/pptx; `DocumentIR` → merge-cell densify → IR-level chunking (not whole-doc markdown) |
 | OpenDocument | built-in | odt/ods/odp; `content.xml` parsed to `DocumentIR` (headings, tables with merged cells / repeats / clamps, section-per-sheet/slide), reusing the office chunker |
+| RTF | built-in | rtf; control-word reader → `DocumentIR`, reusing the office chunker. Code pages come from the file (`\ansicpg`, per-font `\fcharset`, `\'hh`, `\uN`), heading level from the stylesheet's `\outlinelevel` (English style names as a fallback), tables from `\trowd`/`\cell`/`\row`. `\pict`, headers/footers and footnotes are skipped. **A file whose extension lies is rescued:** when the reader that owns the extension fails and the bytes start with `{\rtf`, RTF is tried — the `.doc` that is really RTF |
 | Charts | built-in | OOXML (`charts/chartN.xml` cache) and ODF (embedded local `<table:table>`, or cell-range refs resolved against the sheet) → chart **data** as a searchable GFM table, one chunk per chart |
 | Text-like | built-in | md, txt, json, yaml, xml, html, csv, source code; charset detection |
 
@@ -62,6 +63,7 @@ Binary files are skipped silently. Extraction is streaming (no fixed size cap).
 - **Legacy binary charts are not extracted.** Charts embedded in binary `.doc`/`.xls`/`.ppt` (OLE/BIFF) are skipped — office_oxide exposes no chart parser for those, and no BIFF chart parser is built in. OOXML and ODF charts are covered.
 - **Legacy binary embedded images:** `.doc`/`.xls` raster pictures are extracted; `.ppt` embedded images are not (office_oxide returns none). Vector metafiles (EMF/WMF/PICT) are skipped (not rasterized).
 - **ODF cell-range charts** are resolved against the sheet in the same document; cross-document/cross-sheet references, multi-column category ranges, and merged-cell regions inside a referenced range are best-effort and may under-resolve. The chart is skipped (with a log warning), never crashing extraction.
+- **RTF headings depend on the producer.** The heading level comes from `\outlinelevel` in the stylesheet, which is language-independent, with an English style name (`heading 2`) as a fallback. A producer that localises its style names *and* omits the outline level yields paragraphs, not headings — the chunks are still correct text, they just carry no heading path. Direct formatting (a bold, larger line standing in for a heading) is not promoted either: that would be a heuristic, and an unmeasured heuristic that invents structure is worse than a flat document.
 
 ## Index layer
 

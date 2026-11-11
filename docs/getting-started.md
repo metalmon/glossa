@@ -61,6 +61,8 @@ kb index ./my-corpus --force
 
 Indexing respects `.gitignore`/`.ignore` by default. On a corpus with no ignore file, the first `kb index` seeds a default `.ignore` that whitelists the file types glossa can extract (documents, images, common text/code) so installers, archives and temp files aren't read as text — edit it to tune what's indexed. A corrupt/unreadable file is skipped and listed in the run's error summary, never aborting the index. Use `kb search --no-ignore` when you need to include ignored paths in scans.
 
+Two consequences worth knowing when a release adds a file type. An existing `.ignore` is never rewritten — yours is yours — so a corpus seeded before the type existed needs the line added by hand (`!*.rtf`, say); a fresh corpus gets it from the seed. And a file that was skipped as *permanently* unreadable has its signature recorded, so a later incremental pass treats it as unchanged: documents that a new release can suddenly read come back with `kb index --force`, not on the next freshen.
+
 ## Search
 
 Run commands from the corpus directory (or any subdirectory — glossa finds the nearest `.glossa/` root).
