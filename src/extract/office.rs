@@ -41,6 +41,19 @@ impl Extractor for OfficeExtractor {
         chunks.extend(crate::extract::ooxml_chart::extract_charts(
             path, bytes, &ext,
         ));
+        if chunks.is_empty() {
+            // "Parsed fine, produced nothing" is the failure that hides. An error is listed in the
+            // run summary and retried on the next pass; `Ok(vec![])` enters the manifest as
+            // indexed-and-empty WITH its signature recorded, so the document is never looked at
+            // again — and nothing in the output distinguishes it from a document that genuinely
+            // has no text. `rtf.rs` and `odf.rs` have refused this since they were written; this
+            // reader is the one that did not, and it is the one that has silently under-extracted
+            // before (the `w:pBdr` scanner desync that ran the reader to EOF).
+            return Err(anyhow!(
+                "office produced no chunks for {} — the file parsed but yielded no text",
+                path.display()
+            ));
+        }
         Ok(chunks)
     }
 }
@@ -68,6 +81,47 @@ mod tests {
                 cs.iter().map(|c| &c.text).collect::<Vec<_>>()
             ),
         }
+    }
+
+    /// A docx that opens cleanly but carries no text must be a verdict, not `Ok(vec![])`.
+    /// Built by repacking the real fixture with an empty body, so everything else about the
+    /// package stays a genuine docx and the only thing under test is the empty result.
+    #[test]
+    fn a_document_that_opens_but_yields_no_text_is_an_error_not_an_empty_success() {
+        use std::io::{Read as _, Write as _};
+        const EMPTY_BODY: &[u8] = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:sectPr/></w:body></w:document>"#;
+        let mut zr = zip::ZipArchive::new(Cursor::new(
+            include_bytes!("../../tests/fixtures/sample.docx").to_vec(),
+        ))
+        .unwrap();
+        let names: Vec<String> = zr
+            .file_names()
+            .filter(|n| !n.ends_with('/'))
+            .map(|s| s.to_string())
+            .collect();
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            for name in names {
+                let mut bytes = Vec::new();
+                zr.by_name(&name).unwrap().read_to_end(&mut bytes).unwrap();
+                zw.start_file(&name, opts).unwrap();
+                zw.write_all(if name == "word/document.xml" {
+                    EMPTY_BODY
+                } else {
+                    bytes.as_slice()
+                })
+                .unwrap();
+            }
+            zw.finish().unwrap();
+        }
+        let e = OfficeExtractor
+            .extract(Path::new("blank.docx"), &buf)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("no chunks"), "{e}");
     }
 
     #[test]
