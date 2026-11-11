@@ -1,8 +1,10 @@
 name: tests
 
-# Standalone TEST workflow, runnable on ANY branch (unlike ci.yml, which is
-# master/main-only). Triggers on every push and PR, plus manual dispatch, so a
-# feature branch can be verified without opening a PR to master first.
+# The single CI workflow: format, lint and test, on ANY branch. Triggers on every push and PR,
+# plus manual dispatch, so a feature branch is verified without opening a PR to master first.
+# (It absorbed the master/main-only `ci.yml`, which ran the same suite a second time on every
+# push to master; the one step that was unique to it is the default-features `http-scorer` test
+# below.)
 on:
   push:
   pull_request:
@@ -29,10 +31,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Format + lint gate on EVERY branch (ci.yml runs these only on master/main, so a feature
-      # branch would otherwise merge unlinted). `cargo fmt --check` is OS-independent → run once on
-      # Linux; clippy runs on the full matrix so Windows-`cfg` code is linted too. `-D warnings`
-      # matches ci.yml.
+      # Format + lint gate on EVERY branch. `cargo fmt --check` is OS-independent → run once on
+      # Linux; clippy runs on the full matrix so Windows-`cfg` code is linted too.
       - name: cargo fmt --check
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all -- --check
@@ -67,6 +67,12 @@ jobs:
       - name: cargo test (glossa, http-scorer feature)
         run: cargo test -p glossa --release --locked --no-default-features --features http-scorer
 
+      # Same clients WITH the default feature set on top (notebook): the combination the old
+      # ci.yml tested and this file did not — it is the one that catches a clash between a default
+      # feature and the remote-scorer wiring.
+      - name: cargo test (glossa, http-scorer + default features)
+        run: cargo test -p glossa --release --locked --features http-scorer
+
       # Provider-coexistence guard: `tls` + `http-scorer` in ONE build link TWO rustls providers
       # (tls's aws-lc-rs + ureq's ring). `tls.rs` names the provider explicitly at every builder, so
       # the tls handshake/mTLS tests must still pass here — before the explicit fix they panicked
@@ -93,8 +99,7 @@ jobs:
       # time, so it builds and its non-model tests run on a plain runner. The burn/Vulkan side of
       # the same surface is covered by the burn step below, which builds the whole `kb-eval`
       # package and therefore `kbi` with it — the server is engine-neutral now, so BOTH engines
-      # have to compile it. ci.yml lints this too, but only on master/main, one merge too late.
-      # Linux-only: the gates are not OS-specific.
+      # have to compile it. Linux-only: the gates are not OS-specific.
       - name: cargo clippy (kb-eval, EP-gated server surface, -D warnings)
         if: matrix.os == 'ubuntu-latest'
         run: cargo clippy -p kb-eval --features "http-scorer nli-cuda" --all-targets --locked -- -D warnings

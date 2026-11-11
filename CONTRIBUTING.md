@@ -28,7 +28,7 @@ On Windows, `just` invokes **`kb-eval.exe`** and **`kb-train.exe`**. After pulli
 
 ### CI and releases
 
-- **CI** (`.github/workflows/ci.yml`): push/PR → tests on Ubuntu + Windows, `cargo check` on Ubuntu.
+- **CI** (`.github/workflows/tests.yml`): every push/PR on any branch → fmt, clippy and tests on Ubuntu + Windows, plus the feature-gated surfaces (http-scorer, constraint, the EP-gated server, the burn engine).
 - **Releases** (`.github/workflows/release.yml`): push a tag `v1.0.0` → GitHub Release with `kb` for Linux, Windows, macOS (arm64 + x64).
 
 Release workflow (CI and Release are independent — push commit first, then tag):
