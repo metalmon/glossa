@@ -4,6 +4,40 @@ All notable changes to glossa are documented here. Release tags ship **`kb`**, *
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.9] — 2026-11-11
+
+### Added
+
+- **RTF is a supported document type, and a `.doc` that is really RTF is no longer lost.** The
+  reported failure: a producer saves RTF under Word's old `.doc` extension, the reader that owns
+  `.doc` refuses it on the magic bytes, and the document is recorded as a permanent skip that no
+  later incremental pass retries. RTF now has its own reader, and when the extractor that owns an
+  extension declines a file whose bytes start with `{\rtf`, the RTF reader is tried instead.
+  "Declines" covers both doors: an error, and the worse one — parsed successfully into zero chunks,
+  which produces no error at all and enters the manifest as indexed-and-empty.
+
+  RTF is chunked at the same grade as docx and ODF, through the same chunker, so it carries a
+  heading path and its tables arrive as tables. Code pages come from the file itself (`\ansicpg`,
+  per-font `\fcharset`, `\'hh` byte escapes, `\uN` with its ASCII substitute dropped), so a
+  document in a legacy encoding reads correctly instead of as mojibake. Heading level comes from
+  the stylesheet's `\outlinelevel`, which is language-independent, with the English style name as a
+  fallback; a producer that localises its style names *and* omits the outline level yields
+  paragraphs rather than guessed headings, and direct formatting is never promoted on a hunch.
+  `\pict`, headers, footers and footnotes are skipped. Table cells carry the same budget as ODF:
+  nothing in the format bounds how many a file may emit.
+
+  Verified end to end on a CI-built binary over real producer output, not only fixtures — a Word
+  sample, a 754 KB court decision with eight outline levels, and a cp1251 document with 2 649 byte
+  escapes all came back as chunks with their text intact and their tables as GFM tables. A file
+  named `.rtf` that is not RTF, and an RTF carrying no text, are both refused by name and reason
+  rather than indexed empty.
+
+  **Two things to do after upgrading.** `.rtf` joins the seeded whitelist, but an existing
+  `.ignore` is never rewritten — add `!*.rtf` to a corpus seeded before this release (a `.doc`
+  carrying RTF needs nothing, since `.doc` was always whitelisted). And a file already recorded as
+  a permanent skip carries its signature in the manifest, so an incremental pass treats it as
+  unchanged: the documents this fixes come back with `kb index --force`.
+
 ## [0.5.8] — 2026-11-11
 
 ### Fixed
