@@ -64,6 +64,30 @@ Known extraction limits, not a bug to work around with a different flag:
 
 Full list: [architecture.md § Known extraction limitations](architecture.md#known-extraction-limitations).
 
+## A document is missing from the index and the run reported it as skipped
+
+The error summary names the file and the reason; `kb index` also logs each one as
+`permanent read failure; skipping (not retried)`. Three reasons are common, and the first two are
+the file telling you what it really is:
+
+- **The extension lies.** A `.doc` that is really RTF (a producer saved RTF under Word's old
+  extension) is read as RTF from 0.5.9 on, both when the `.doc` reader errors and when it returns
+  nothing at all. Before 0.5.9 the file was skipped permanently.
+- **The file is not the format it claims.** A `.rtf` that does not start with `{\rtf` is refused by
+  name and reason rather than indexed as empty, which is the failure that hides.
+- **The document has no extractable text.** A valid file whose body is empty (or a scan with no text
+  layer) yields no chunks and is refused rather than entering the index empty. For scans, the
+  filename is still indexed so the document is findable.
+
+**A skipped file is not retried by a later incremental pass.** Its signature is recorded in the
+manifest, so the next run treats it as unchanged. After an upgrade that can read something it
+previously could not, bring those documents back with `kb index --force` — a freshen will not do it.
+
+And if a whole *type* is missing rather than one file, check the whitelist: `.ignore` is seeded once
+and never rewritten, so a corpus created before a release added a type needs the line by hand
+(`!*.rtf`, for instance). A type with no line is dropped by `*` before any extractor is asked, which
+produces no error at all.
+
 ## Many nodes report `ungrounded` after reindexing or re-addressing a corpus
 
 The documents are still there — what changed is their **key**. A document's key is its path
