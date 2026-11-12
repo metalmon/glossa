@@ -366,13 +366,24 @@ pub fn exec(
     match name {
         "search" => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
             let glob = args.get("glob").and_then(|v| v.as_str());
             let file_type = args.get("file_type").and_then(|v| v.as_str());
             let scope = args.get("scope").and_then(|v| v.as_str());
             // The agent index was opened from `root`; its `.glossa` dir carries any `[rerank]`
             // config (none by default -> plain BM25, identical to before).
             let glossa_dir = root.join(".glossa");
+            // The depth MUST come from the same resolver the MCP server and the CLI use
+            // (`mcp.rs`, `main.rs` — see `retrieve::config::search_limit_or_default`: "Every entry
+            // point MUST go through this rather than keeping a fallback of its own"). This arm kept
+            // its own fallback of 10 against production's 50, and because `retrieve_with` sizes the
+            // rerank pool as `pool_size.max(limit)`, that was a five-times-smaller candidate set —
+            // a different top, not merely fewer rows. Every FCR and retrieval@k number this harness
+            // has produced was measured at that depth.
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize)
+                .unwrap_or_else(|| glossa::retrieve::config::search_limit_or_default(&glossa_dir));
             let (body, titles) = run_search(
                 idx,
                 &glossa_dir,
@@ -779,6 +790,50 @@ mod tests {
         )
         .0;
         assert!(out2.contains("seventh"), "digit-strip fallback: {out2}");
+    }
+
+    /// The harness must resolve search depth the way the server does. It kept its own fallback of
+    /// 10 while `mcp.rs` and `main.rs` both resolve `search_limit_or_default` (50 by default), and
+    /// because `retrieve_with` sizes the rerank pool as `pool_size.max(limit)` that was a
+    /// five-times-smaller candidate set, i.e. a different top rather than a shorter list. Every
+    /// FCR and retrieval@k number this harness produced was measured at the wrong depth, and
+    /// nothing could catch it: the two surfaces share no type, and the parity test covers names.
+    ///
+    /// 12 chunks, no `limit` argument, no `ontology.toml` — so the shared default (50) applies and
+    /// all 12 must come back. At the old fallback exactly 10 did.
+    #[test]
+    fn search_without_an_explicit_limit_uses_the_same_depth_as_the_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let chunks: Vec<Chunk> = (1..=12)
+            .map(|i| Chunk {
+                doc_path: PathBuf::from(format!("d{i}.md")),
+                location: String::new(),
+                file_type: "md".into(),
+                text: format!("needle chunk number {i}"),
+            })
+            .collect();
+        idx.write_chunks(&chunks).unwrap();
+        let trace = TraceLog::disabled();
+
+        let (body, _ids, _imgs) = exec(
+            "search",
+            &json!({"query": "needle"}),
+            dir.path(),
+            &idx,
+            None,
+            &glossa::tools::ChainSpec::default(),
+            &trace,
+        );
+
+        let hits = (1..=12)
+            .filter(|i| body.contains(&format!("d{i}.md")))
+            .count();
+        assert_eq!(
+            hits, 12,
+            "all 12 hits must come back at the shared default depth \
+             (`search_limit_or_default` = 50); a fallback of its own caps this at 10.\nbody:\n{body}"
+        );
     }
 
     /// `exec("verify", ...)` must have a real arm — not fall through to "unknown tool: verify".

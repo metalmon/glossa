@@ -1069,9 +1069,16 @@ impl GraphStore {
         })
     }
 
-    /// Delete only the DOCUMENT-DERIVED layer (origin `auto-*`: structural + lexical), preserving
-    /// the agent/curated reasoning graph. Used by `index_dir(force=true)` so a reindex rebuilds the
+    /// Delete only the layer the document walk rebuilds, preserving the agent/curated reasoning
+    /// graph. Used by `index_dir` on `--force` and on a schema migration so a reindex rebuilds the
     /// structure from documents without destroying hand/agent-built knowledge. Returns count removed.
+    ///
+    /// The predicate names `auto-structural` exactly rather than matching `auto-%`. The generalize
+    /// pass stamps its derived edges `auto-generalized` so that a reindex does not fight it
+    /// (`generalize/apply.rs:4-6`) — and `LIKE 'auto-%'` matched those too, so every `--force` and
+    /// every schema migration silently erased the layer it promised to leave alone.
+    /// `auto-structural` is the only `auto-*` origin the walk writes (`graph/build.rs:22,40,55`);
+    /// `auto-lexical` appears in the taxonomy comment above `Provenance` and has no producer.
     pub fn delete_auto(&self) -> anyhow::Result<usize> {
         let c = self.conn();
         // auto-* nodes never carry authored validity today, but clean up defensively so every
@@ -1079,14 +1086,14 @@ impl GraphStore {
         // that assumption ever changes.
         c.execute(
             "DELETE FROM node_validity WHERE node_id IN \
-             (SELECT id FROM nodes WHERE origin LIKE 'auto-%')",
+             (SELECT id FROM nodes WHERE origin = 'auto-structural')",
             [],
         )
         .context("delete node_validity for auto nodes")?;
-        c.execute("DELETE FROM nodes WHERE origin LIKE 'auto-%'", [])
+        c.execute("DELETE FROM nodes WHERE origin = 'auto-structural'", [])
             .context("delete auto nodes")?;
         let nodes_deleted = c.changes() as usize;
-        c.execute("DELETE FROM edges WHERE origin LIKE 'auto-%'", [])
+        c.execute("DELETE FROM edges WHERE origin = 'auto-structural'", [])
             .context("delete auto edges")?;
         let edges_deleted = c.changes() as usize;
         Ok(nodes_deleted + edges_deleted)
@@ -3095,6 +3102,58 @@ mod tests {
 
         assert_eq!(reader.get_node("vis:test").unwrap(), Some(n));
         assert_eq!(reader.node_count().unwrap(), 1);
+    }
+
+    /// `delete_auto` must spare the generalization layer. `generalize/apply.rs` stamps its derived
+    /// edges `auto-generalized` expressly so a reindex does not fight it; `delete_auto` matched
+    /// `auto-%`, which included them, so every `--force` and every schema migration erased that
+    /// layer in silence. Both directions are asserted: the structural layer still goes.
+    #[test]
+    fn delete_auto_spares_the_generalized_layer_and_still_drops_the_structural_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+
+        let derived = || Provenance {
+            source_path: "auto-generalized".into(),
+            range: None,
+            file_sig: None,
+            origin: "auto-generalized".into(),
+            confidence: 0.5,
+            created_at: 0,
+        };
+        for (id, p) in [("s1", prov()), ("g1", derived()), ("g2", derived())] {
+            g.put_node(&Node {
+                id: id.into(),
+                node_type: "Fact".into(),
+                label: id.into(),
+                aliases: vec![],
+                prov: p,
+            })
+            .unwrap();
+        }
+        g.put_edge(&Edge {
+            from: "g1".into(),
+            to: "g2".into(),
+            edge_type: "SIMILAR".into(),
+            prov: derived(),
+        })
+        .unwrap();
+
+        g.delete_auto().unwrap();
+
+        assert!(
+            g.get_node("s1").unwrap().is_none(),
+            "the document-derived layer is what a reindex rebuilds, so it must go"
+        );
+        assert!(
+            g.get_node("g1").unwrap().is_some() && g.get_node("g2").unwrap().is_some(),
+            "generalized nodes survived a reindex"
+        );
+        assert_eq!(
+            crate::graph::traverse::neighbors(&g, "g1", None, 1).unwrap(),
+            vec!["g2".to_string()],
+            "the derived SIMILAR edge survived a reindex"
+        );
     }
 
     #[test]
