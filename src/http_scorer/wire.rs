@@ -109,8 +109,16 @@ pub fn build_rerank_body(
 /// `res->score = embd[0]` straight from a classification head that has no sigmoid
 /// (`tools/server/server-context.cpp`, `src/llama-graph.cpp`, read at 0be8468). `cohere` and `jina`
 /// return a score they normalized and offer no raw option.
+///
+/// Normalizes its own input rather than trusting the caller to have done it. `HttpReranker` does
+/// normalize at construction (`client.rs:114`, pinned by a test), but this is a free `pub fn` whose
+/// correctness otherwise rests on an invariant its signature cannot state — and getting it wrong
+/// returns `false`, which silently drops every `rel_rerank` while stderr says the server normalized.
 pub fn backend_emits_logits(backend: &str) -> bool {
-    matches!(backend, "tei" | "kbi" | "vllm" | "llamacpp")
+    matches!(
+        backend.trim().to_ascii_lowercase().as_str(),
+        "tei" | "kbi" | "vllm" | "llamacpp"
+    )
 }
 
 pub fn build_predict_request(premise: &str, hypotheses: &[&str]) -> PredictRequest {

@@ -45,22 +45,26 @@ pub struct EdgeSpec {
     pub confidence: Option<f32>,
 }
 
-/// Resolve `source_path` against the corpus `root` — matching every staleness CONSUMER
-/// (`hygiene::stale_nodes`, `doctor::doctor`, `tools::StaleChecker`), which all re-stat
-/// `root.join(source_path)`. Stamping against the bare (CWD-relative) path here used to
-/// silently defeat staleness whenever the process CWD differed from the corpus root (the
-/// normal MCP-server deployment).
+/// Resolve `source_path` through `doc_file_in` — the same resolver every staleness CONSUMER uses
+/// (`hygiene::stale_nodes`, `tools::StaleChecker`, `doctor::doctor`). It had been joining a single
+/// `root` instead, which agrees with `doc_file_in` for a lone unlabelled root and disagrees for
+/// every labelled one: a node grounded in a SECONDARY root was stamped from
+/// `<primary>/<label>/<rel>`, a path that does not exist, so `file_sig` failed, the node was
+/// written with `file_sig: None`, and every reader then treated it as never stale (they early-return
+/// on a missing stamp) while `doctor` counted it as unverifiable. Stamping against the bare
+/// (CWD-relative) path, an earlier form, silently defeated staleness whenever the process CWD
+/// differed from the corpus root (the normal MCP-server deployment).
 ///
 /// A blank (or all-whitespace) `source_path` — an ungrounded node/edge, now legal — must stay
 /// `None`: `root.join("")` resolves to `root` itself, so `file_sig` would happily stat the corpus
 /// DIRECTORY and stamp the node with the root's mtime/size. `hygiene::stale_nodes` then flips that
 /// ungrounded node to "stale" every time anything else in the corpus changes — a false, unclearable
 /// staleness with no real file behind it.
-fn stat_sig(root: &std::path::Path, source_path: &str) -> Option<FileSig> {
+fn stat_sig(roots: &[crate::root::Root], source_path: &str) -> Option<FileSig> {
     if source_path.trim().is_empty() {
         return None;
     }
-    crate::index::store::file_sig(&root.join(source_path)).ok()
+    crate::index::store::file_sig(&crate::index::store::doc_file_in(roots, source_path)).ok()
 }
 
 /// Result of applying an agent upsert batch (after dedup by label+type).
@@ -82,7 +86,7 @@ pub fn apply_upsert(
     nodes: Vec<NodeSpec>,
     edges: Vec<EdgeSpec>,
     now: u64,
-    root: &std::path::Path,
+    roots: &[crate::root::Root],
     origin: &str,
 ) -> anyhow::Result<ApplyUpsertResult> {
     use std::collections::HashMap;
@@ -90,7 +94,7 @@ pub fn apply_upsert(
     let prov = |source_path: &str, range: Option<String>, confidence: Option<f32>| Provenance {
         source_path: source_path.to_string(),
         range,
-        file_sig: stat_sig(root, source_path),
+        file_sig: stat_sig(roots, source_path),
         origin: origin.into(),
         confidence: confidence.unwrap_or(0.8),
         created_at: now,
@@ -425,6 +429,14 @@ pub fn apply_update(
 mod tests {
     use super::*;
 
+    /// One unlabelled root, the shape `doc_file_in` treats as `root.join(key)`.
+    fn one_root(p: &std::path::Path) -> Vec<crate::root::Root> {
+        vec![crate::root::Root {
+            label: String::new(),
+            path: p.to_path_buf(),
+        }]
+    }
+
     const ONT: &str = r#"
 [entities.Organization]
 props = ["name"]
@@ -531,7 +543,7 @@ strict = true
             range: None,
             confidence: Some(0.9),
         }];
-        let r = apply_upsert(&g, &ont, nodes, edges, 123, dir.path(), "agent").unwrap();
+        let r = apply_upsert(&g, &ont, nodes, edges, 123, &one_root(dir.path()), "agent").unwrap();
         assert_eq!((r.nodes_written, r.edges_written), (2, 1));
         assert_eq!(g.node_count().unwrap(), 2);
         let org = g.get_node("org:acme").unwrap().unwrap();
@@ -545,8 +557,46 @@ strict = true
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = Ontology::parse(ONT).unwrap();
         let nodes = vec![node("x", "Alien", "x", "d.docx")];
-        assert!(apply_upsert(&g, &ont, nodes, vec![], 1, dir.path(), "agent").is_err());
+        assert!(apply_upsert(&g, &ont, nodes, vec![], 1, &one_root(dir.path()), "agent").is_err());
         assert_eq!(g.node_count().unwrap(), 0);
+    }
+
+    /// A node grounded in a SECONDARY root must get a real staleness stamp. `stat_sig` joined one
+    /// root (`primary_root()`) while every reader resolves through the label-aware `doc_file_in`,
+    /// so for `source_path = "b/doc.md"` the stamp was taken from `<primary>/b/doc.md` — a path
+    /// that does not exist. `file_sig` failed, `.ok()` made it `None`, and every staleness reader
+    /// early-returns on a missing stamp: the node became permanently un-stale while `doctor`
+    /// counted it as unverifiable. Single-root corpora never saw it, because `doc_file_in` of one
+    /// unlabelled root IS `root.join(key)`.
+    #[test]
+    fn a_node_in_a_secondary_root_gets_a_real_staleness_stamp() {
+        let state = tempfile::tempdir().unwrap();
+        let root_a = tempfile::tempdir().unwrap();
+        let root_b = tempfile::tempdir().unwrap();
+        std::fs::write(root_b.path().join("doc.md"), b"# T\nbody\n").unwrap();
+
+        let roots = vec![
+            crate::root::Root {
+                label: "a".into(),
+                path: root_a.path().to_path_buf(),
+            },
+            crate::root::Root {
+                label: "b".into(),
+                path: root_b.path().to_path_buf(),
+            },
+        ];
+
+        let g = GraphStore::open(state.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        let nodes = vec![node("sym:x", "Symptom", "Fieldbus loss", "b/doc.md")];
+        apply_upsert(&g, &ont, nodes, vec![], 1, &roots, "agent").unwrap();
+
+        let n = g.get_node("sym:x").unwrap().expect("node written");
+        assert!(
+            n.prov.file_sig.is_some(),
+            "a node under the labelled root `b` must carry a stamp; \
+             joining the primary root instead leaves it None and therefore never stale"
+        );
     }
 
     #[test]
@@ -576,7 +626,7 @@ strict = true
             "RESOLVED_BY",
             "case1.docx",
         )];
-        apply_upsert(&g, &ont, nodes1, edges1, 1, dir.path(), "agent").unwrap();
+        apply_upsert(&g, &ont, nodes1, edges1, 1, &one_root(dir.path()), "agent").unwrap();
 
         // Second upsert: DIFFERENT id but SAME label (different case + extra space) → dedup
         let nodes2 = vec![
@@ -599,7 +649,7 @@ strict = true
             "RESOLVED_BY",
             "case2.docx",
         )];
-        apply_upsert(&g, &ont, nodes2, edges2, 2, dir.path(), "agent").unwrap();
+        apply_upsert(&g, &ont, nodes2, edges2, 2, &one_root(dir.path()), "agent").unwrap();
 
         // Only 1 Symptom node (deduped — first id wins)
         let all = g.all_nodes().unwrap();
@@ -641,7 +691,7 @@ strict = true
             "RESOLVED_BY",
             "test.docx",
         )];
-        apply_upsert(&g, &ont, nodes, edges, 1, dir.path(), "agent").unwrap();
+        apply_upsert(&g, &ont, nodes, edges, 1, &one_root(dir.path()), "agent").unwrap();
 
         assert_eq!(g.node_count().unwrap(), 2);
         assert_eq!(g.edge_count().unwrap(), 1);
@@ -677,7 +727,7 @@ strict = true
             vec![node("sym:test", "Symptom", "Test symptom", "test.docx")],
             vec![],
             1,
-            dir.path(),
+            &one_root(dir.path()),
             "agent",
         )
         .unwrap();
@@ -709,7 +759,7 @@ strict = true
             vec![node("sym:t", "Symptom", "Test pump symptom", "t.docx")],
             vec![],
             1,
-            dir.path(),
+            &one_root(dir.path()),
             "agent",
         )
         .unwrap();
@@ -743,7 +793,7 @@ strict = true
             Some("2020-01-01"),
             Some("2020-12-31"),
         )];
-        apply_upsert(&g, &ont, nodes, vec![], 1, dir.path(), "agent").unwrap();
+        apply_upsert(&g, &ont, nodes, vec![], 1, &one_root(dir.path()), "agent").unwrap();
 
         let v = g
             .validity_for("sym:bounded")
@@ -766,7 +816,7 @@ strict = true
             "Unbounded symptom",
             "test.docx",
         )];
-        apply_upsert(&g, &ont, nodes, vec![], 1, dir.path(), "agent").unwrap();
+        apply_upsert(&g, &ont, nodes, vec![], 1, &one_root(dir.path()), "agent").unwrap();
 
         assert!(
             g.validity_for("sym:unbounded").unwrap().is_none(),
@@ -794,7 +844,7 @@ strict = true
             )],
             vec![],
             1,
-            dir.path(),
+            &one_root(dir.path()),
             "agent",
         )
         .unwrap();
@@ -808,7 +858,7 @@ strict = true
             Some("2021-06"),
             None,
         )];
-        let r = apply_upsert(&g, &ont, nodes2, vec![], 2, dir.path(), "agent").unwrap();
+        let r = apply_upsert(&g, &ont, nodes2, vec![], 2, &one_root(dir.path()), "agent").unwrap();
         assert_eq!(
             r.merged,
             vec![("sym:second".to_string(), "sym:first".to_string())]
@@ -839,7 +889,7 @@ strict = true
             Some("not-a-date"),
             None,
         )];
-        assert!(apply_upsert(&g, &ont, nodes, vec![], 1, dir.path(), "agent").is_err());
+        assert!(apply_upsert(&g, &ont, nodes, vec![], 1, &one_root(dir.path()), "agent").is_err());
         assert_eq!(
             g.node_count().unwrap(),
             0,
@@ -857,7 +907,15 @@ strict = true
         let ont = Ontology::parse(VALIDITY_ONT).unwrap();
 
         let untimed = node("rec:x", "Record", "Untimed record", "a.md");
-        let result = apply_upsert(&g, &ont, vec![untimed], vec![], 1, dir.path(), "agent");
+        let result = apply_upsert(
+            &g,
+            &ont,
+            vec![untimed],
+            vec![],
+            1,
+            &one_root(dir.path()),
+            "agent",
+        );
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected an untimed requires_validity node to be rejected"),
@@ -888,7 +946,16 @@ strict = true
             Some("2024-01-01"),
             None,
         );
-        let r = apply_upsert(&g, &ont, vec![timed], vec![], 1, dir.path(), "agent").unwrap();
+        let r = apply_upsert(
+            &g,
+            &ont,
+            vec![timed],
+            vec![],
+            1,
+            &one_root(dir.path()),
+            "agent",
+        )
+        .unwrap();
         assert_eq!(r.nodes_written, 1);
         assert!(g
             .validity_for("rec:y")
@@ -921,7 +988,7 @@ strict = true
             )],
             vec![],
             1,
-            dir.path(),
+            &one_root(dir.path()),
             "agent",
         )
         .unwrap();
@@ -929,7 +996,16 @@ strict = true
         // Second upsert: SAME node (re-sent, e.g. to touch its label/source), no valid_from this
         // time — must still be accepted because the graph already has one for this canonical id.
         let retouch = node("rec:z", "Record", "Already-timed record", "a.md");
-        let r = apply_upsert(&g, &ont, vec![retouch], vec![], 2, dir.path(), "agent").unwrap();
+        let r = apply_upsert(
+            &g,
+            &ont,
+            vec![retouch],
+            vec![],
+            2,
+            &one_root(dir.path()),
+            "agent",
+        )
+        .unwrap();
         assert_eq!(r.nodes_written, 1);
     }
 
@@ -946,7 +1022,7 @@ strict = true
             vec![node("sym:a", "Symptom", "Pump fails", "t.docx")],
             vec![],
             1,
-            dir.path(),
+            &one_root(dir.path()),
             "agent",
         )
         .unwrap();
@@ -983,7 +1059,16 @@ strict = true
         let ont = Ontology::parse(VALIDITY_ONT).unwrap();
 
         let note = node("note:a", "Note", "A note", "a.md");
-        let r = apply_upsert(&g, &ont, vec![note], vec![], 1, dir.path(), "agent").unwrap();
+        let r = apply_upsert(
+            &g,
+            &ont,
+            vec![note],
+            vec![],
+            1,
+            &one_root(dir.path()),
+            "agent",
+        )
+        .unwrap();
         assert_eq!(r.nodes_written, 1);
     }
 }

@@ -411,12 +411,12 @@ pub fn import_layer(
     ont: &Ontology,
     e: GraphExport,
     now: u64,
-    root: &std::path::Path,
+    roots: &[crate::root::Root],
     mode: ImportMode,
 ) -> anyhow::Result<(usize, usize, usize)> {
     match mode {
-        ImportMode::Merge => import_merge_layer(g, ont, e, now, root),
-        ImportMode::Replace => import_replace_layer(g, ont, e, now, root),
+        ImportMode::Merge => import_merge_layer(g, ont, e, now, roots),
+        ImportMode::Replace => import_replace_layer(g, ont, e, now, roots),
     }
 }
 
@@ -427,9 +427,9 @@ pub fn import_merge_layer(
     ont: &Ontology,
     e: GraphExport,
     now: u64,
-    root: &std::path::Path,
+    roots: &[crate::root::Root],
 ) -> anyhow::Result<(usize, usize, usize)> {
-    let r = apply_upsert(g, ont, e.nodes, e.edges, now, root, "agent")?;
+    let r = apply_upsert(g, ont, e.nodes, e.edges, now, roots, "agent")?;
     Ok((0, r.nodes_written, r.edges_written))
 }
 
@@ -439,19 +439,27 @@ pub fn import_replace_layer(
     ont: &Ontology,
     e: GraphExport,
     now: u64,
-    root: &std::path::Path,
+    roots: &[crate::root::Root],
 ) -> anyhow::Result<(usize, usize, usize)> {
     let mut pruned = 0usize;
     for t in &e.exported_types {
         pruned += g.delete_by_type(t)?;
     }
-    let r = apply_upsert(g, ont, e.nodes, e.edges, now, root, "agent")?;
+    let r = apply_upsert(g, ont, e.nodes, e.edges, now, roots, "agent")?;
     Ok((pruned, r.nodes_written, r.edges_written))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One unlabelled root — the shape `doc_file_in` treats as `root.join(key)`.
+    fn one_root(p: &std::path::Path) -> Vec<crate::root::Root> {
+        vec![crate::root::Root {
+            label: String::new(),
+            path: p.to_path_buf(),
+        }]
+    }
     use crate::graph::agent::apply_upsert;
     use crate::graph::ontology::Ontology;
     use crate::graph::store::{GraphStore, Node, Provenance};
@@ -596,7 +604,7 @@ to = ["Resolution"]
             range: None,
             confidence: None,
         }];
-        apply_upsert(&g, &ont, nodes, edges, 1, dir.path(), "agent").unwrap();
+        apply_upsert(&g, &ont, nodes, edges, 1, &one_root(dir.path()), "agent").unwrap();
 
         // Also insert a structural Document node directly
         g.put_node(&Node {
@@ -626,7 +634,8 @@ to = ["Resolution"]
         // import_replace_layer into a fresh store
         let dir2 = tempfile::tempdir().unwrap();
         let g2 = GraphStore::open(dir2.path()).unwrap();
-        let (pruned, n, ed) = import_replace_layer(&g2, &ont, export, 2, dir2.path()).unwrap();
+        let (pruned, n, ed) =
+            import_replace_layer(&g2, &ont, export, 2, &one_root(dir2.path())).unwrap();
         assert_eq!(pruned, 0); // nothing to prune in a fresh store
         assert_eq!(n, 2);
         assert_eq!(ed, 1);
@@ -657,14 +666,15 @@ to = ["Resolution"]
             }],
             vec![],
             1,
-            dir.path(),
+            &one_root(dir.path()),
             "agent",
         )
         .unwrap();
 
         // Incoming export carries a DIFFERENT Symptom (+ a Resolution and an edge).
         let export = make_export(); // s1/Label A (Symptom), r1/Fix it (Resolution), s1->r1
-        let (pruned, n, ed) = import_merge_layer(&g, &ont, export, 2, dir.path()).unwrap();
+        let (pruned, n, ed) =
+            import_merge_layer(&g, &ont, export, 2, &one_root(dir.path())).unwrap();
         assert_eq!(pruned, 0, "merge must never prune");
         assert_eq!(n, 2);
         assert_eq!(ed, 1);
@@ -706,14 +716,21 @@ to = ["Resolution"]
             }],
             vec![],
             1,
-            dir.path(),
+            &one_root(dir.path()),
             "agent",
         )
         .unwrap();
 
         // Replace with a file that carries a DIFFERENT Symptom → the pre-existing one is pruned.
-        let (pruned, n, _ed) =
-            import_layer(&g, &ont, make_export(), 2, dir.path(), ImportMode::Replace).unwrap();
+        let (pruned, n, _ed) = import_layer(
+            &g,
+            &ont,
+            make_export(),
+            2,
+            &one_root(dir.path()),
+            ImportMode::Replace,
+        )
+        .unwrap();
         assert_eq!(pruned, 1, "replace pruned the pre-existing Symptom");
         assert_eq!(n, 2);
         assert!(
@@ -783,7 +800,7 @@ to = ["Resolution"]
             }],
             vec![],
             1,
-            dir.path(),
+            &one_root(dir.path()),
             "agent",
         )
         .unwrap();
