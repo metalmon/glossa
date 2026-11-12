@@ -572,7 +572,15 @@ impl GlossaServer {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let _ = crate::graph::ops::graph_generalize(&g, &ont, now);
+        // `graph_generalize` renders both outcomes as prose, so the only way this loop can tell a
+        // failing pass from a working one is to look at what came back. Dropping it with `let _ =`
+        // meant a pass that failed on every maintenance cycle was silent — no log, no metric.
+        let outcome = crate::graph::ops::graph_generalize(&g, &ont, now);
+        if outcome.starts_with("graph_generalize error:") {
+            tracing::warn!(outcome = %outcome, "background generalize pass failed");
+        } else {
+            tracing::debug!(outcome = %outcome, "background generalize pass");
+        }
         let _ = FileExt::unlock(&_lock);
     }
 

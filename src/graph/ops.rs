@@ -1402,6 +1402,12 @@ pub fn graph_update(g: &GraphStore, nodes: Vec<NodeUpdate>) -> String {
 /// tool and the eval enricher so both emit identical output. `apply_merges` stays off
 /// (from_ontology defaults), so it never deletes or merges nodes. Hygiene (ungrounded/stale/
 /// incomplete detection + prune) is a separate concern — see `graph::doctor`.
+/// Run the generalization pass and render its outcome for a tool response.
+///
+/// Returns prose for BOTH outcomes, like its neighbours here — which is why the failure arm also
+/// logs: the server's background maintenance loop calls this and discards the string
+/// (`mcp.rs`), so without the log a pass that fails on every cycle is completely silent. Giving
+/// these operations a structured outcome (as `graph_upsert` already has) is the real repair.
 pub fn graph_generalize(g: &GraphStore, ont: &Ontology, now: u64) -> String {
     let opts = crate::graph::generalize::apply::Opts::from_ontology(ont, now);
     match crate::graph::generalize::apply::generalize(g, &opts) {
@@ -1409,7 +1415,10 @@ pub fn graph_generalize(g: &GraphStore, ont: &Ontology, now: u64) -> String {
             "generalized: inferred_edges={} similar_edges={} communities={} merge_candidates={}",
             r.inferred_edges, r.similar_edges, r.communities, r.merge_candidates
         ),
-        Err(e) => format!("graph_generalize error: {e}"),
+        Err(e) => {
+            tracing::warn!(error = %e, "graph_generalize failed");
+            format!("graph_generalize error: {e}")
+        }
     }
 }
 
