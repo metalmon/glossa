@@ -34,6 +34,17 @@ pub fn read_region(path: &Path, location: Option<&str>) -> anyhow::Result<String
     Ok(selected.join("\n"))
 }
 
+/// Extract `path` and return the text of its 1-based Nth chunk — the same per-document ordinal
+/// `search_chunks` assigns (Task 1). `None` when the file now has fewer chunks than `ord`: the file
+/// changed since the hit was recorded, and the caller must say so rather than guess at a shifted
+/// chunk.
+pub fn nth_chunk(path: &Path, ord: u64) -> anyhow::Result<Option<String>> {
+    let mut chunks = Vec::new();
+    crate::extract::extract_file(path, &mut |c| chunks.push(c))?;
+    let i = ord.checked_sub(1).and_then(|i| usize::try_from(i).ok());
+    Ok(i.and_then(|i| chunks.into_iter().nth(i)).map(|c| c.text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

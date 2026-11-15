@@ -1673,7 +1673,7 @@ fn main() -> anyhow::Result<()> {
             };
             let mut rg_lines: Vec<String> = Vec::new();
             let mut display: Vec<glossa::cli_fmt::DisplayHit> = Vec::new();
-            let mut records: Vec<(String, String)> = Vec::new();
+            let mut records: Vec<glossa::cli_fmt::LastHit> = Vec::new();
 
             if !scan {
                 glossa::index::store::ensure_fresh_at(&rr.roots, &rr.state_base)?; // file-first: pick up new/changed docs
@@ -1710,9 +1710,14 @@ fn main() -> anyhow::Result<()> {
                         score: Some(h.score),
                         ord: Some(h.ord),
                     });
-                    // Persist the chunk ORDINAL so `kb read <#>` resolves it through the same core as
-                    // the MCP `read` tool (`path#ord`), not a heading/`p.N` substring.
-                    records.push((h.path.clone(), h.ord.to_string()));
+                    // Persist the chunk ordinal AND how it was found, so `kb read <#>` resolves it
+                    // through the same core as the MCP `read` tool (`path#ord`), never by guessing
+                    // from the shape of the ordinal column.
+                    records.push(glossa::cli_fmt::LastHit {
+                        path: h.path.clone(),
+                        ord: h.ord,
+                        source: glossa::cli_fmt::HitSource::Index,
+                    });
                 }
             } else {
                 let opts = QueryOpts {
@@ -1725,8 +1730,8 @@ fn main() -> anyhow::Result<()> {
                 let chunks = collect_chunks(&rr.root, glob.as_deref(), !no_ignore)?;
                 for h in search_chunks(&chunks, &re, limit) {
                     let p = h.doc_path.display().to_string();
-                    // Drop a `p.N` page label from the shown location (deprecated form); the record
-                    // below keeps the RAW location — a scan hit is read back by that label.
+                    // Drop a `p.N` page label from the shown location (deprecated form) — display
+                    // only; the record below carries the chunk ordinal, not this label.
                     let shown_loc = glossa::cli_fmt::display_location(&h.location).unwrap_or("");
                     rg_lines.push(format!("{}:{}:{}: {}", p, shown_loc, h.line, h.snippet));
                     display.push(glossa::cli_fmt::DisplayHit {
@@ -1734,10 +1739,15 @@ fn main() -> anyhow::Result<()> {
                         location: shown_loc.to_string(),
                         snippet: h.snippet.clone(),
                         score: None,
-                        // Raw-file scan has no chunk ordinal — its `read <#>` stays location-based.
-                        ord: None,
+                        ord: Some(h.ord),
                     });
-                    records.push((p, h.location.clone()));
+                    // A scan hit is read back by re-extracting the file and taking its Nth chunk
+                    // (`nth_chunk`), never through the index — see the `kb read <#>` arm below.
+                    records.push(glossa::cli_fmt::LastHit {
+                        path: p,
+                        ord: h.ord,
+                        source: glossa::cli_fmt::HitSource::Scan,
+                    });
                 }
             }
 
@@ -1781,9 +1791,10 @@ fn main() -> anyhow::Result<()> {
 
             // A bare number (no `#` anchor, no existing file by that name) is the Nth hit of the last
             // `kb search` — a CLI convenience the MCP tool doesn't need (its results already carry the
-            // `path#n` token). Behaviour is unchanged: resolve it from the persisted last-search
-            // records and read that chunk straight from the index (cwd-independent — the stored path
-            // is the index key), falling back to opening the file only when the chunk isn't indexed.
+            // `path#n` token). Resolve it from the persisted last-search record, which carries HOW
+            // the hit was found: an index hit reads through the index core, a `--scan` hit
+            // re-extracts the file directly (see the match below) — never a guess from the record's
+            // shape.
             let last_search_n = (!target.contains('#') && !std::path::Path::new(&target).exists())
                 .then(|| target.parse::<usize>().ok())
                 .flatten();
@@ -1792,10 +1803,13 @@ fn main() -> anyhow::Result<()> {
                 let rec = glossa::cli_fmt::read_last_search(&rr.state_base)
                     .and_then(|c| glossa::cli_fmt::nth_record(&c, k));
                 match rec {
-                    // Index search recorded the chunk ORDINAL → resolve `path#ord` through the same
-                    // core as the MCP `read` tool (identical output, incl. the `── path#ord ──` head).
-                    Some((p, loc)) if loc.parse::<u64>().is_ok() => {
-                        let ord = loc.parse::<u64>().unwrap();
+                    // Recorded by an index search → resolve `path#ord` through the same core as
+                    // the MCP `read` tool (identical output, incl. the `── path#ord ──` head).
+                    Some(glossa::cli_fmt::LastHit {
+                        path,
+                        ord,
+                        source: glossa::cli_fmt::HitSource::Index,
+                    }) => {
                         glossa::index::store::ensure_fresh_at(&rr.roots, &rr.state_base)?;
                         let idx = glossa::index::store::DocIndex::open_or_create_at(
                             &rr.roots,
@@ -1811,7 +1825,7 @@ fn main() -> anyhow::Result<()> {
                             root,
                             &idx,
                             graph.as_ref(),
-                            &p,
+                            &path,
                             ord,
                             false,
                             &glossa::trace::TraceLog::disabled(),
@@ -1821,40 +1835,29 @@ fn main() -> anyhow::Result<()> {
                             println!();
                         }
                     }
-                    // `--scan` result: no chunk ordinal, only a location label — read by that label
-                    // (the legacy path; a raw-file scan has no `path#ord` to hand the MCP core).
-                    Some((p, loc)) => {
-                        let loc_opt = if loc.is_empty() || loc == "(no-text)" {
-                            None
-                        } else {
-                            Some(loc.clone())
-                        };
-                        let from_index = loc_opt.as_deref().and_then(|l| {
-                            glossa::index::store::DocIndex::open_or_create_at(
-                                &rr.roots,
-                                &rr.state_base,
-                            )
-                            .ok()
-                            .and_then(|idx| idx.read_chunk(&p, l).ok().flatten())
-                        });
-                        match from_index {
-                            Some(body) => {
-                                if glossa::cli_fmt::stdout_is_tty() {
-                                    // Drop a `p.N` page label from the head (deprecated form).
-                                    let head = match glossa::cli_fmt::display_location(&loc) {
-                                        Some(l) => format!("── {p} · {l} ──"),
-                                        None => format!("── {p} ──"),
-                                    };
-                                    println!("{}", glossa::cli_fmt::dim(&head));
-                                }
-                                print!("{body}");
-                                if !body.ends_with('\n') {
-                                    println!();
-                                }
+                    // Recorded by `--scan` → re-extract the file and take its Nth chunk directly.
+                    // Never through the index: a scan corpus may have none, and even when one
+                    // exists its ordinal space is independent of the raw file on disk right now.
+                    Some(glossa::cli_fmt::LastHit {
+                        path,
+                        ord,
+                        source: glossa::cli_fmt::HitSource::Scan,
+                    }) => match glossa::read::nth_chunk(std::path::Path::new(&path), ord)? {
+                        Some(text) => {
+                            if glossa::cli_fmt::stdout_is_tty() {
+                                println!("{}", glossa::cli_fmt::dim(&format!("── {path} ──")));
                             }
-                            None => print_read(std::path::Path::new(&p), loc_opt.as_deref())?,
+                            print!("{text}");
+                            if !text.ends_with('\n') {
+                                println!();
+                            }
                         }
-                    }
+                        // The file has fewer chunks than it did at search time — say so rather
+                        // than silently read whatever now sits at that ordinal.
+                        None => anyhow::bail!(
+                            "no chunk #{ord} in {path} — the file changed since the search; run the search again"
+                        ),
+                    },
                     None => println!("no result #{k} (run a search first)"),
                 }
             } else {
