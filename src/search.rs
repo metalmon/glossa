@@ -100,11 +100,17 @@ mod tests {
     }
 
     #[test]
-    fn respects_limit() {
+    fn respects_limit_and_shares_ordinal_across_matches_in_one_chunk() {
         let chunks = vec![chunk("cat\ncat\ncat\n")];
         let re = Regex::new("cat").unwrap();
         let hits = search_chunks(&chunks, &re, 2);
         assert_eq!(hits.len(), 2);
+        // Both hits come from the same chunk, so the ordinal is computed
+        // once for the chunk and must be identical on every hit it produces
+        // — a regression that recomputed `ord` per matching line (instead of
+        // once per chunk, before the inner loop) would still pass every
+        // other assertion here but diverge on this one.
+        assert_eq!(hits[0].ord, hits[1].ord);
     }
 
     #[test]
@@ -113,5 +119,19 @@ mod tests {
         let re = Regex::new("cat").unwrap();
         let hits = search_chunks(&chunks, &re, 0);
         assert_eq!(hits.len(), 0);
+    }
+
+    #[test]
+    fn non_matching_chunk_still_consumes_an_ordinal() {
+        // Chunk 2 has no matching line but must still advance the counter,
+        // so chunk 3's hit reports ord 3, not 2. A regression that gated the
+        // counter on `re.is_match` (incrementing only when a chunk produces
+        // a hit) would instead report ord 2 here.
+        let chunks = vec![chunk("cat\n"), chunk("dog\n"), chunk("cat\n")];
+        let re = Regex::new("cat").unwrap();
+        let hits = search_chunks(&chunks, &re, 10);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].ord, 1);
+        assert_eq!(hits[1].ord, 3);
     }
 }
