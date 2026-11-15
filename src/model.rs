@@ -77,7 +77,12 @@ mod tests {
     fn a_segment_may_contain_the_separator() {
         let loc = Location::Path(vec!["A > B".into(), "C".into()]);
         assert_eq!(loc.display(), "A > B > C");
-        assert_eq!(loc, Location::Path(vec!["A > B".into(), "C".into()]));
+        match loc {
+            Location::Path(segments) => {
+                assert_eq!(segments, vec!["A > B".to_string(), "C".to_string()])
+            }
+            Location::Label(_) => panic!("expected a Path"),
+        }
     }
 
     #[test]
