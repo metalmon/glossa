@@ -1602,7 +1602,9 @@ fn is_lock_busy(e: &anyhow::Error) -> bool {
 /// (capped attempts) clears it; on other platforms the first attempt succeeds. `is_transient_fs`
 /// decides what counts as transient; a structural error propagates immediately, and even a
 /// persistently-transient-looking error propagates once the attempt cap is hit (never an infinite loop).
-fn with_writer_retry<T>(mut op: impl FnMut() -> tantivy::Result<T>) -> tantivy::Result<T> {
+pub(crate) fn with_writer_retry<T>(
+    mut op: impl FnMut() -> tantivy::Result<T>,
+) -> tantivy::Result<T> {
     let mut attempt = 0u32;
     loop {
         match op() {

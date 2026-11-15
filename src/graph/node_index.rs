@@ -56,7 +56,13 @@ impl NodeIndex {
         std::fs::create_dir_all(&p).with_context(|| format!("create {p:?}"))?;
         let index = match Index::create_in_dir(&p, schema.clone()) {
             Ok(i) => i,
-            Err(TantivyError::IndexAlreadyExists) => Index::open_in_dir(&p)?,
+            // Opening reads `meta.json`; on Windows that read can hit a transient lock or partial
+            // read while another pass is mid temp+rename. The document index drives the same open
+            // through this bounded retry — this one was left bare, which is why it is the node
+            // index that surfaces "Access is denied. (os error 5)" on the Windows CI leg.
+            Err(TantivyError::IndexAlreadyExists) => {
+                crate::index::store::with_writer_retry(|| Index::open_in_dir(&p))?
+            }
             Err(e) => return Err(e.into()),
         };
         index
@@ -99,7 +105,11 @@ impl NodeIndex {
     /// label and aliases independently (a Russian alias on an English-leaning label must still be
     /// stemmed as Russian — otherwise a Russian query never matches it).
     pub fn rebuild(&self, docs: &[(String, Vec<String>)]) -> anyhow::Result<()> {
-        let mut writer = self.index.writer(15_000_000)?;
+        // Acquiring the writer takes tantivy's lock file and allocates its arena — the step that
+        // intermittently fails with "Access is denied. (os error 5)" on Windows when Defender or a
+        // lingering handle still holds a just-created file. Bounded retry, the same one the
+        // document index uses; on other platforms the first attempt succeeds.
+        let mut writer = crate::index::store::with_writer_retry(|| self.index.writer(15_000_000))?;
         writer.delete_all_documents()?;
         for (id, texts) in docs {
             let mut d = TantivyDocument::default();
@@ -109,7 +119,8 @@ impl NodeIndex {
             }
             writer.add_document(d)?;
         }
-        writer.commit()?;
+        // Commit writes and renames segment files, so it is exposed to the same transient hold.
+        crate::index::store::with_writer_retry(|| writer.commit())?;
         self.reader.reload()?;
         Ok(())
     }
