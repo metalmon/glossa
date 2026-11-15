@@ -584,7 +584,8 @@ mod tests {
             "score precedes the path"
         );
         // The chunk ordinal is appended to line 1 as the copy-ready `path#ord` token (fed to
-        // `kb read`); a hit with no ordinal (`--scan`) shows the bare path.
+        // `kb read`); a hit with no ordinal at all (no chunk to address, not `--scan` — every
+        // index AND scan hit carries one) shows the bare path.
         assert!(
             s.contains("deep\\longname.pdf#7"),
             "index hit leads with the copy-ready path#ord token: {s}"

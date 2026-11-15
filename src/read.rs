@@ -18,8 +18,10 @@ pub fn read_doc_text(path: &Path) -> anyhow::Result<String> {
 /// Extract `path` and return the text of its 1-based Nth chunk — the same per-document ordinal
 /// `search_chunks` assigns (Task 1). `None` when the file now has fewer chunks than `ord`: the file
 /// changed since the hit was recorded, and the caller must say so rather than guess at a shifted
-/// chunk.
+/// chunk. Errors on `ord == 0`: ordinals are 1-based, so 0 is never a "file changed" case — only
+/// reachable from a hand-edited TSV.
 pub fn nth_chunk(path: &Path, ord: u64) -> anyhow::Result<Option<String>> {
+    anyhow::ensure!(ord != 0, "chunk ordinal 0 is invalid: ordinals are 1-based");
     let mut chunks = Vec::new();
     crate::extract::extract_file(path, &mut |c| chunks.push(c))
         .with_context(|| format!("reading {}", path.display()))?;

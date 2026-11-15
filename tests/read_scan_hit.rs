@@ -90,3 +90,34 @@ fn a_changed_file_and_an_out_of_range_n_both_say_so() {
         .success()
         .stdout(predicates::str::contains("no result #9"));
 }
+
+/// `root.rs` never absolutizes a relative root, so a `--scan` record built against one must still
+/// open from a DIFFERENT working directory later — `nth_chunk` opens the recorded path directly,
+/// with no index to fall back on. Here the search runs with the relative root `corpus` (cwd =
+/// `dir_a`), then `kb read` runs with cwd = an unrelated `dir_b`, pointed at the same corpus only
+/// via an absolute `--root`. If the recorded path was kept relative (to `dir_a`), resolving it
+/// against `dir_b`'s cwd opens nothing and the read fails.
+#[test]
+fn a_scan_hit_reads_back_from_a_different_working_directory() {
+    let dir_a = tempfile::tempdir().unwrap();
+    let corpus = dir_a.path().join("corpus");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::write(corpus.join("doc.md"), "# 2024\nfirst section needle\n").unwrap();
+
+    Command::cargo_bin("kb")
+        .unwrap()
+        .current_dir(dir_a.path())
+        .args(["search", "--scan", "needle", "corpus"])
+        .assert()
+        .success();
+
+    let dir_b = tempfile::tempdir().unwrap();
+    Command::cargo_bin("kb")
+        .unwrap()
+        .current_dir(dir_b.path())
+        .args(["read", "1", "--root"])
+        .arg(&corpus)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("first section needle"));
+}

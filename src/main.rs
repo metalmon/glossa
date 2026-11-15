@@ -223,8 +223,9 @@ enum Cmd {
         /// Max number of hits [default: the corpus's `[retrieval].search_limit`, else 100].
         #[arg(short = 'l', long)]
         limit: Option<usize>,
-        /// Raw ripgrep regex over file text instead of the BM25 index (slower, not stemmed; matches
-        /// are line-based, so they carry no `path#N` chunk ref).
+        /// Raw ripgrep regex over file text instead of the BM25 index (slower, not stemmed). Each
+        /// hit still carries a `path#N` chunk ref; `kb read <N>` resolves it by re-extracting the
+        /// file, not as an index reference.
         #[arg(short = 's', long)]
         scan: bool,
         /// Disable .gitignore/.ignore/hidden filtering (index everything).
@@ -1730,6 +1731,18 @@ fn main() -> anyhow::Result<()> {
                     // not this label.
                     let shown_loc = glossa::cli_fmt::display_location(&h.location).unwrap_or("");
                     rg_lines.push(format!("{}:{}:{}: {}", p, shown_loc, h.line, h.snippet));
+                    // A scan hit now prints a copy-ready `path#ord` token. Pasting that token back
+                    // into `kb read path#N` does NOT take this scan path — it takes the
+                    // `#`-anchor branch below, which resolves through the index. For an ordinary
+                    // single unlabelled root on an indexed corpus that reads the same chunk,
+                    // because index and scan ordinals are both 1-based over the same
+                    // `extract_file` sequence. It diverges where `--scan` is most useful: on an
+                    // unindexed corpus it silently builds the index; under a labelled root the
+                    // index keys `doc_key` = `label/relpath` while the scan record carries the raw
+                    // walked path, so path repair may land on a different document; and
+                    // `--scan -u` can reach a file the index excludes entirely. Deliberate: the
+                    // owner has ruled auto-indexing declared behaviour, and the ordinal-locator
+                    // contract wants the token printed regardless.
                     display.push(glossa::cli_fmt::DisplayHit {
                         file: glossa::cli_fmt::rel_file(&rr.root, &p),
                         location: shown_loc.to_string(),
@@ -1739,8 +1752,20 @@ fn main() -> anyhow::Result<()> {
                     });
                     // A scan hit is read back by re-extracting the file and taking its Nth chunk
                     // (`nth_chunk`), never through the index — see the `kb read <#>` arm below.
+                    // The record must stay openable from a different working directory than this
+                    // search ran in (`nth_chunk` opens it directly, no index to fall back on), so
+                    // a relative walked path is absolutized against the CWD here. Not
+                    // `canonicalize`: on Windows that prefixes `\\?\`, which then leaks into error
+                    // messages and display.
+                    let stored_path = if std::path::Path::new(&p).is_absolute() {
+                        p
+                    } else {
+                        std::env::current_dir()
+                            .map(|cwd| cwd.join(&p).display().to_string())
+                            .unwrap_or(p)
+                    };
                     records.push(glossa::cli_fmt::LastHit {
-                        path: p,
+                        path: stored_path,
                         ord: h.ord,
                         source: glossa::cli_fmt::HitSource::Scan,
                     });
