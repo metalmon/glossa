@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::path::Path;
 
 /// Read a document's text, optionally narrowed to a `location` (heading/sheet/page),
@@ -40,7 +41,8 @@ pub fn read_region(path: &Path, location: Option<&str>) -> anyhow::Result<String
 /// chunk.
 pub fn nth_chunk(path: &Path, ord: u64) -> anyhow::Result<Option<String>> {
     let mut chunks = Vec::new();
-    crate::extract::extract_file(path, &mut |c| chunks.push(c))?;
+    crate::extract::extract_file(path, &mut |c| chunks.push(c))
+        .with_context(|| format!("reading {}", path.display()))?;
     let i = ord.checked_sub(1).and_then(|i| usize::try_from(i).ok());
     Ok(i.and_then(|i| chunks.into_iter().nth(i)).map(|c| c.text))
 }

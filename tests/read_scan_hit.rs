@@ -37,6 +37,13 @@ fn a_scan_hit_reads_its_own_chunk_without_an_index() {
         .success()
         .stdout(predicates::str::contains("first section needle"))
         .stdout(predicates::str::contains("second section").not());
+
+    // The read itself must not have built an index either — this phase's headline guarantee is
+    // that a scan hit resolves WITHOUT one, not just that the preceding search didn't build one.
+    assert!(
+        !dir.path().join(".glossa/index").exists(),
+        "kb read <n> on a --scan hit must not build an index"
+    );
 }
 
 /// Pins the two Review Focus cases the test above doesn't reach: a recorded scan hit whose
@@ -73,11 +80,13 @@ fn a_changed_file_and_an_out_of_range_n_both_say_so() {
             "the file changed since the search",
         ));
 
-    // n beyond the recorded hits is a message, not a panic or an empty print:
+    // n beyond the recorded hits is a message, not a panic or an empty print — and, unlike the
+    // changed-file case above, it succeeds: there is no chunk to have changed underneath.
     Command::cargo_bin("kb")
         .unwrap()
         .current_dir(dir.path())
         .args(["read", "9"])
         .assert()
+        .success()
         .stdout(predicates::str::contains("no result #9"));
 }
