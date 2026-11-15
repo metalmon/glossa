@@ -267,17 +267,13 @@ pub fn rel_file(root: &Path, p: &str) -> String {
     }
 }
 
-/// The location label worth showing beside a hit or in a read header. A bare `p.N` page label is
-/// the deprecated form we no longer surface: it only duplicates the `#ord` already carried by the
-/// `path#ord` ref (line 1 of a hit / the `── path#ord ──` head). Headings and section labels are
-/// kept — they add context the numeric ref doesn't. `None` means "nothing to show"; callers put it
-/// in the label slot via `.unwrap_or("")`. Mirrors `RankedHit::display_line`'s p.N suppression.
+/// The location label worth showing beside a hit or in a read header. Now that the ordinal
+/// (`path#ord`) is the chunk's address and `location` is just a display label, a `p.N` page label
+/// is a label like any other — it used to be stripped here on the theory that it duplicated the
+/// `#ord` already in the ref, but that argument belonged to the world where the two were different
+/// addresses for the same thing. `None` means "nothing to show" (an empty label — e.g. a
+/// heading-less chunk); callers put it in the label slot via `.unwrap_or("")`.
 pub fn display_location(location: &str) -> Option<&str> {
-    if let Some(d) = location.strip_prefix("p.") {
-        if !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()) {
-            return None;
-        }
-    }
     (!location.is_empty()).then_some(location)
 }
 
@@ -515,18 +511,16 @@ mod tests {
         }
     }
 
-    /// `p.N` page labels are the deprecated form (redundant with the `#ord` in the ref) → suppressed
-    /// everywhere they'd be shown; headings and other labels survive.
+    /// An empty location is the only thing `display_location` hides; every other label, `p.N`
+    /// page labels included, passes through unchanged.
     #[test]
-    fn display_location_drops_page_labels_keeps_headings() {
-        assert_eq!(display_location("p.14"), None);
-        assert_eq!(display_location("p.350"), None);
+    fn display_location_only_hides_an_empty_label() {
         assert_eq!(display_location(""), None);
         assert_eq!(display_location("Introduction"), Some("Introduction"));
-        assert_eq!(display_location("4.1.3 Safety"), Some("4.1.3 Safety"));
-        // Not a page label: a heading that merely starts with "p." keeps showing.
-        assert_eq!(display_location("p.s. notes"), Some("p.s. notes"));
-        assert_eq!(display_location("(no-text)"), Some("(no-text)"));
+        // `p.N` was the pre-ordinal page label. No extractor has emitted it since `f1784c7`
+        // (pdf.rs writes an empty location), and an index below schema 4 is out of support —
+        // kept as a regression guard against reintroducing the strip.
+        assert_eq!(display_location("p.7"), Some("p.7"));
     }
 
     #[test]

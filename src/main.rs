@@ -1689,8 +1689,7 @@ fn main() -> anyhow::Result<()> {
                 )?;
                 for h in hits {
                     // Lead with the copy-ready `path#ord` token (same ref the MCP tools + `kb read`
-                    // consume), then the human location label + snippet. A `p.N` page label is
-                    // dropped — it only duplicates the `#ord` already in the token.
+                    // consume), then the human location label + snippet; an empty label is omitted.
                     let loc = glossa::cli_fmt::display_location(&h.location);
                     rg_lines.push(format!(
                         "{}#{}  {}{}  [{:.3}]",
@@ -1727,8 +1726,8 @@ fn main() -> anyhow::Result<()> {
                 let chunks = collect_chunks(&rr.root, glob.as_deref(), !no_ignore)?;
                 for h in search_chunks(&chunks, &re, limit) {
                     let p = h.doc_path.display().to_string();
-                    // Drop a `p.N` page label from the shown location (deprecated form) — display
-                    // only; the record below carries the chunk ordinal, not this label.
+                    // Omit the location when empty; the record below carries the chunk ordinal,
+                    // not this label.
                     let shown_loc = glossa::cli_fmt::display_location(&h.location).unwrap_or("");
                     rg_lines.push(format!("{}:{}:{}: {}", p, shown_loc, h.line, h.snippet));
                     display.push(glossa::cli_fmt::DisplayHit {
