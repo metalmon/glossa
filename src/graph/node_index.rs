@@ -119,11 +119,8 @@ impl NodeIndex {
             }
             writer.add_document(d)?;
         }
-        // The commit is deliberately NOT retried: re-committing re-writes `<segment>.<opstamp>.del`
-        // at the same opstamp, so a retry after a partial commit dies on `FileAlreadyExists` that
-        // no further attempt can clear. Acquisition above is the step that flakes and the only one
-        // that leaves nothing behind. See `index::store::write_chunks`.
-        writer.commit()?;
+        // Commit writes and renames segment files, so it is exposed to the same transient hold.
+        crate::index::store::with_writer_retry(|| writer.commit())?;
         self.reader.reload()?;
         Ok(())
     }

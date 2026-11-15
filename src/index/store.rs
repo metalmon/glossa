@@ -334,46 +334,40 @@ impl DocIndex {
             .collect();
         distinct_paths.sort();
         distinct_paths.dedup();
-        // ONLY the writer acquisition retries. That is the step the retry was introduced for — on
-        // Windows a just-created index file is briefly locked (Defender scan, lingering reader) and
-        // opening the writer fails with "Access is denied (os error 5)" — and it is the only step
-        // that leaves nothing behind when it fails.
-        //
-        // The retry used to wrap the whole transaction (open → delete → add → commit) on the
-        // argument that delete-by-path then re-add is idempotent. It is idempotent in DATA and not
-        // in FILES: a commit that fails after writing `<segment>.<opstamp>.del` leaves that file,
-        // and the retry re-runs the deletes and commits at the same opstamp, so every later attempt
-        // dies on `FileAlreadyExists(".del")` — which `is_transient_fs` also reads as transient.
-        // The wrapper then converted one recoverable blip into a guaranteed failure AND hid the
-        // original cause behind the collision. A `FileAlreadyExists` on a `.del` can only come from
-        // a retry: a first attempt never meets its own leftovers.
-        let mut writer = with_writer_retry(|| self.index.writer(50_000_000))?;
-        for path_str in &distinct_paths {
-            writer.delete_term(tantivy::Term::from_field_text(self.fields.path, path_str));
-        }
-        // ord is the 1-based sequence position of the chunk WITHIN ITS OWN DOCUMENT, not
-        // its position in this batch — callers may pass chunks for several documents in
-        // one call (see `distinct_paths` above), so the counter is tracked per doc_path.
-        let mut seq_by_path: std::collections::HashMap<String, u64> =
-            std::collections::HashMap::new();
-        for c in chunks.iter() {
-            let path_str = c.doc_path.to_string_lossy().to_string();
-            let seq = seq_by_path.entry(path_str.clone()).or_insert(0);
-            *seq += 1;
-            let ord = *seq;
-            // The section id is always the ordinal ("<path>#<ord>") regardless of whether
-            // the chunk has a heading; the stored `location` is display-only and a
-            // heading-less chunk simply has none (see RankedHit::display_line).
-            writer.add_document(doc!(
-                self.fields.body => c.text.clone(),
-                self.fields.body_trigrams => c.text.clone(),
-                self.fields.path => path_str,
-                self.fields.location => c.location.clone(),
-                self.fields.file_type => c.file_type.clone(),
-                self.fields.ord => ord,
-            ))?;
-        }
-        writer.commit()?;
+        // The whole write (open writer → delete → add → commit) runs under a transient-IO retry:
+        // on Windows a just-created index file is briefly locked (Defender scan, lingering reader)
+        // and opening the writer can fail with "Access is denied (os error 5)". The transaction is
+        // idempotent (delete-by-path then re-add), so retrying the whole thing is safe.
+        with_writer_retry(|| {
+            let mut writer = self.index.writer(50_000_000)?;
+            for path_str in &distinct_paths {
+                writer.delete_term(tantivy::Term::from_field_text(self.fields.path, path_str));
+            }
+            // ord is the 1-based sequence position of the chunk WITHIN ITS OWN DOCUMENT, not
+            // its position in this batch — callers may pass chunks for several documents in
+            // one call (see `distinct_paths` above), so the counter is tracked per doc_path.
+            let mut seq_by_path: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::new();
+            for c in chunks.iter() {
+                let path_str = c.doc_path.to_string_lossy().to_string();
+                let seq = seq_by_path.entry(path_str.clone()).or_insert(0);
+                *seq += 1;
+                let ord = *seq;
+                // The section id is always the ordinal ("<path>#<ord>") regardless of whether
+                // the chunk has a heading; the stored `location` is display-only and a
+                // heading-less chunk simply has none (see RankedHit::display_line).
+                writer.add_document(doc!(
+                    self.fields.body => c.text.clone(),
+                    self.fields.body_trigrams => c.text.clone(),
+                    self.fields.path => path_str,
+                    self.fields.location => c.location.clone(),
+                    self.fields.file_type => c.file_type.clone(),
+                    self.fields.ord => ord,
+                ))?;
+            }
+            writer.commit()?;
+            Ok(())
+        })?;
         self.reader.reload()?;
         Ok(())
     }
@@ -1209,11 +1203,12 @@ impl DocIndex {
     }
 
     pub fn delete_path(&self, path: &str) -> anyhow::Result<()> {
-        // Acquisition only — see `write_chunks` for why retrying the delete+commit instead turns a
-        // transient blip into a `FileAlreadyExists(".del")` that no further attempt can clear.
-        let mut writer = with_writer_retry(|| self.index.writer::<TantivyDocument>(50_000_000))?;
-        writer.delete_term(tantivy::Term::from_field_text(self.fields.path, path));
-        writer.commit()?;
+        with_writer_retry(|| {
+            let mut writer = self.index.writer::<TantivyDocument>(50_000_000)?;
+            writer.delete_term(tantivy::Term::from_field_text(self.fields.path, path));
+            writer.commit()?;
+            Ok(())
+        })?;
         self.reader.reload()?;
         Ok(())
     }
@@ -2320,13 +2315,11 @@ pub fn index_dir_at_locked(
         }
         next.notes = std::mem::take(&mut delta.next.notes);
     }
-    // The commit is NOT retried. Its writer was acquired through the retry above, which is the
-    // step that actually flakes and the only one that fails cleanly. Re-committing was documented
-    // here as safe because the writer's pending ops stay staged — true of the ops, false of the
-    // files: a commit that failed after writing `<segment>.<opstamp>.del` leaves it behind, and the
-    // retry collides with it at the same opstamp. See `write_chunks`.
+    // Commit under the bounded transient-FS retry — the commit writes+renames `meta.json`, the same
+    // frame that flakes on Windows (Defender / a racing reader briefly holds it). Idempotent: the
+    // writer's pending ops stay staged, so re-committing after a transient failure is safe.
     eprintln!("committing index...");
-    writer.commit()?;
+    with_writer_retry(|| writer.commit())?;
     eprintln!("index committed");
     next.index_schema_version = INDEX_SCHEMA_VERSION;
     next.save(state_base)?;
@@ -2410,10 +2403,8 @@ pub fn index_one_file_locked_at(
     let mut manifest = Manifest::load(state_base);
     manifest.files.insert(rel.to_string(), sig);
     let _ = resolve_reference_links(&idx.roots, &graph, &manifest.files, &links);
-    // NOT retried: the writer was acquired through the retry, which is the step that flakes and
-    // the only one that fails cleanly. A re-commit collides with its own `<segment>.<opstamp>.del`
-    // (see `write_chunks`).
-    writer.commit()?;
+    // Bounded transient-FS retry around the `meta.json`-writing commit (see index_dir_locked).
+    with_writer_retry(|| writer.commit())?;
     let mut m = Manifest::load(state_base);
     m.files.insert(rel.to_string(), sig);
     m.save(state_base)?;
@@ -3054,11 +3045,11 @@ pub fn reindex_dirs_at_locked(
     }
     next.unresolved_links = resolve_reference_links(&idx.roots, &graph, &next.files, &all);
 
-    // NOT retried, for the reason in `write_chunks`: a re-commit collides with the `.del` file the
-    // failed attempt already wrote. Deliberately NOT bracketed with the phase markers the full pass prints: `freshen_blocking_at`
+    // Bounded transient-FS retry around the `meta.json`-writing commit (see index_dir_at_locked).
+    // Deliberately NOT bracketed with the phase markers the full pass prints: `freshen_blocking_at`
     // routes here, so a running server would log two lines per freshen cycle — for a pass that is
     // scoped and short by construction. The markers exist for the pass that goes quiet for minutes.
-    writer.commit()?;
+    with_writer_retry(|| writer.commit())?;
     // Carry the schema version forward as-is: this is not a schema-migrating path (that's
     // `index_dir_at_locked`'s job), so resetting it to `Manifest::default()`'s value would make
     // the NEXT `kb index` think a migration is still pending and force a full rebuild.
@@ -4541,7 +4532,7 @@ mod incremental_tests {
 
         // tantivy side too: commit (a no-op here since nothing was ever staged) and confirm via a
         // fresh reader that the prior doc is still searchable.
-        writer.commit().unwrap();
+        with_writer_retry(|| writer.commit()).unwrap();
         drop(writer);
         let idx2 = DocIndex::open_or_create(dir.path()).unwrap();
         assert!(
@@ -4582,7 +4573,7 @@ mod incremental_tests {
         let mut links: Vec<(String, String)> = Vec::new();
         let abs = idx.doc_file("docs/x.md");
         index_file_into(&idx, &graph, &writer, "docs/x.md", &abs, &mut links, None).unwrap();
-        writer.commit().unwrap();
+        with_writer_retry(|| writer.commit()).unwrap();
 
         let idx2 = DocIndex::open_or_create_at(&roots, state.path()).unwrap();
         assert!(
