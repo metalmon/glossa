@@ -234,7 +234,10 @@ mod tests {
             tags: vec![],
             hop_type: "multihop".into(),
             needs_graph: String::new(),
-            source: vec!["man.pdf#p.5".into()],
+            // `man.pdf#5` — the Section's own id suffix, which is what a gold ref is. This fixture
+            // used to say `man.pdf#p.5`, and refusing that form is what surfaced it: the first
+            // place the old spelling still sat was our own test.
+            source: vec!["man.pdf#5".into()],
             answerable: true,
             extra: toml::Table::new(),
         }];

@@ -118,7 +118,7 @@ answer="short"
 id="q1"
 question="Q one?"
 answer="short"
-source=["a.pdf#p.1", "b.pdf#p.2"]
+source=["a.pdf#1", "b.pdf#2"]
 
 [[case]]
 id="q2"
@@ -130,7 +130,7 @@ answer="short"
         // A case with `source` parses to its list of refs, in order.
         assert_eq!(
             cs[0].source,
-            vec!["a.pdf#p.1".to_string(), "b.pdf#p.2".to_string()]
+            vec!["a.pdf#1".to_string(), "b.pdf#2".to_string()]
         );
         // Absent `source` defaults to an empty vec (gold-only judging).
         assert!(cs[1].source.is_empty());

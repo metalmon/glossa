@@ -551,7 +551,7 @@ confidence = 3
             tags: vec!["net".into()],
             hop_type: "multihop".into(),
             needs_graph: "yes".into(),
-            source: vec!["a.pdf#p.1".into(), "b.pdf#p.2".into()],
+            source: vec!["a.pdf#1".into(), "b.pdf#2".into()],
             answerable: false,
             extra: toml::Table::new(),
         }];
@@ -567,10 +567,7 @@ confidence = 3
         assert_eq!(c.tags, vec!["net".to_string()]);
         assert_eq!(c.hop_type, "multihop");
         assert_eq!(c.needs_graph, "yes");
-        assert_eq!(
-            c.source,
-            vec!["a.pdf#p.1".to_string(), "b.pdf#p.2".to_string()]
-        );
+        assert_eq!(c.source, vec!["a.pdf#1".to_string(), "b.pdf#2".to_string()]);
         assert!(!c.answerable, "answerable=false survives the round-trip");
     }
 
