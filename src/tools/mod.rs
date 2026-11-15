@@ -67,6 +67,25 @@ fn token_overlap_hints(idx: &DocIndex, base: &str) -> Vec<String> {
     scored.into_iter().take(3).map(|(_, p)| p).collect()
 }
 
+/// Is `key` shaped like a document key — a plain relative path that cannot escape a corpus root?
+///
+/// `doc_file_in` resolves a key with `root.join(key)`, and `Path::join` REPLACES the base when the
+/// argument is absolute. A key reaching us from a tool argument is attacker-controlled, so without
+/// this guard `C:\Windows\win.ini` or `/etc/shadow` would be joined to nothing and statted as-is —
+/// an existence oracle for the whole filesystem. On Windows a UNC key (`\\host\share\x`) is worse
+/// than an oracle: merely statting it opens an SMB connection to `host`, which hands that host an
+/// NTLM handshake.
+///
+/// Keeping only `Component::Normal` rejects all of it at once — absolute paths (`RootDir`), drive
+/// and UNC prefixes (`Prefix`), and `..` (`ParentDir`) — and that is exactly the shape a real doc
+/// key has. Callers that fail this check fall back to the path-agnostic message.
+fn is_corpus_relative_key(key: &str) -> bool {
+    let p = std::path::Path::new(key);
+    !p.is_absolute()
+        && p.components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
 /// The not-found message for `read`/`get_source_file`.
 ///
 /// Two different situations reach here and they need different advice. When the path is simply
@@ -77,7 +96,8 @@ fn token_overlap_hints(idx: &DocIndex, base: &str) -> Vec<String> {
 /// (raw off-disk files are `kb cat`'s job), so naming that case is the whole fix; retyping the
 /// path never resolves it.
 fn path_not_found(idx: &DocIndex, path: &str) -> String {
-    if crate::index::store::doc_file_in(&idx.roots, path).is_file() {
+    if is_corpus_relative_key(path) && crate::index::store::doc_file_in(&idx.roots, path).is_file()
+    {
         return format!(
             "{path} exists on disk but is not indexed — `read` serves indexed documents only (check your ignore rules)"
         );
@@ -261,19 +281,26 @@ fn gather_mentions(
     attr: &str,
     seen: &mut std::collections::HashSet<(String, u64)>,
     out: &mut Vec<(String, String, u64)>,
-) {
+) -> anyhow::Result<()> {
     for e in g.outgoing(nid).unwrap_or_default() {
         if e.edge_type != crate::graph::MENTIONS {
             continue;
         }
         if let Some((p, frag)) = e.to.split_once('#') {
             if let Ok(ord) = frag.parse::<u64>() {
-                if idx.chunk_exists(p, ord).unwrap_or(false) && seen.insert((p.to_string(), ord)) {
+                // A failing probe is NOT "that chunk is absent". `chunk_exists` fails when the
+                // index itself cannot be searched, and the same searcher serves every probe in
+                // this loop — so one failure means the whole evidence set is unknowable, not that
+                // one mention went missing. Swallowing it returned a thin glossary that looks
+                // complete, which is the worst of the three outcomes: a loud error is recoverable,
+                // a thin-but-honest set would be too, a thin set claiming to be whole is not.
+                if idx.chunk_exists(p, ord)? && seen.insert((p.to_string(), ord)) {
                     out.push((attr.to_string(), p.to_string(), ord));
                 }
             }
         }
     }
+    Ok(())
 }
 
 /// Resolve a graph node handle the model appended to a `read` path. Accepts the exact id
@@ -309,6 +336,15 @@ fn resolve_node_handle(
 /// Omnivorous read of a graph NODE: the node's own line, plus every chunk it AND its 1-hop reasoning
 /// neighbours MENTION — each labelled with where it came from. Reading a Resolution gives its fix
 /// chunk; reading a Symptom also pulls the Cause/Resolution evidence one hop along the chain.
+/// An index failure while collecting a node's evidence is reported, not absorbed — see the comment
+/// in [`gather_mentions`] for why a thin-but-confident evidence set is the worst outcome.
+fn evidence_error(e: anyhow::Error) -> ReadOut {
+    ReadOut {
+        text: format!("read error: {e}"),
+        images: Vec::new(),
+    }
+}
+
 fn read_node(
     idx: &DocIndex,
     g: &crate::graph::store::GraphStore,
@@ -316,7 +352,10 @@ fn read_node(
 ) -> ReadOut {
     let mut seen = std::collections::HashSet::new();
     let mut chunks: Vec<(String, String, u64)> = Vec::new();
-    gather_mentions(idx, g, &node.id, "MENTIONS", &mut seen, &mut chunks); // the node's own evidence
+    // the node's own evidence
+    if let Err(e) = gather_mentions(idx, g, &node.id, "MENTIONS", &mut seen, &mut chunks) {
+        return evidence_error(e);
+    }
     let label_of = |nid: &str| {
         g.get_node(nid)
             .ok()
@@ -327,26 +366,30 @@ fn read_node(
     // 1-hop reasoning neighbours (outgoing →, incoming ←), skipping the MENTIONS-to-section links.
     for e in g.outgoing(&node.id).unwrap_or_default() {
         if e.edge_type != crate::graph::MENTIONS && !e.to.contains('#') {
-            gather_mentions(
+            if let Err(err) = gather_mentions(
                 idx,
                 g,
                 &e.to,
                 &format!("via → {} {}", e.edge_type, label_of(&e.to)),
                 &mut seen,
                 &mut chunks,
-            );
+            ) {
+                return evidence_error(err);
+            }
         }
     }
     for e in g.incoming(&node.id).unwrap_or_default() {
         if e.edge_type != crate::graph::MENTIONS && !e.from.contains('#') {
-            gather_mentions(
+            if let Err(err) = gather_mentions(
                 idx,
                 g,
                 &e.from,
                 &format!("via ← {} {}", e.edge_type, label_of(&e.from)),
                 &mut seen,
                 &mut chunks,
-            );
+            ) {
+                return evidence_error(err);
+            }
         }
     }
     let mut text = format!("{}  [{}]  {}", node.id, node.node_type, node.label);
@@ -3774,6 +3817,48 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         );
     }
 
+    /// The not-found message must never become a filesystem oracle. `doc_file_in` resolves a key
+    /// with `root.join(key)`, and `Path::join` REPLACES the base for an absolute argument — so an
+    /// absolute key, a drive/UNC prefix or a `..` escape would be statted outside the corpus and
+    /// the reply would report whether it exists. On Windows a UNC key is worse still: the stat
+    /// itself opens an SMB connection and hands that host an NTLM handshake. These keys must take
+    /// the path-agnostic branch, whatever is or isn't on disk there.
+    #[test]
+    fn an_escaping_key_is_never_statted_outside_the_corpus() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.md"), b"x").unwrap();
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        i.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("indexed.md"),
+            location: "S".into(),
+            file_type: "md".into(),
+            text: "body".into(),
+        }])
+        .unwrap();
+        let t = TraceLog::disabled();
+
+        // An absolute path to a file that really does exist, outside every root.
+        let abs = outside.path().join("secret.md");
+        let out = read(d.path(), &i, None, &abs.display().to_string(), 1, false, &t).text;
+        assert!(
+            !out.contains("exists on disk"),
+            "an absolute key must not reveal whether its target exists: {out}"
+        );
+
+        // `..` escapes are refused by shape, not by where they happen to land.
+        assert!(!is_corpus_relative_key("../secret.md"));
+        assert!(!is_corpus_relative_key("a/../../secret.md"));
+        assert!(is_corpus_relative_key("a/b/doc.md"));
+        // UNC and drive prefixes exist only on Windows; on unix the same bytes are an ordinary
+        // (odd) filename with no network meaning, and `Prefix` never appears.
+        #[cfg(windows)]
+        {
+            assert!(!is_corpus_relative_key(r"\\host\share\x"));
+            assert!(!is_corpus_relative_key(r"C:\Windows\win.ini"));
+        }
+    }
+
     #[test]
     fn read_returns_full_body_and_unified_footer() {
         let d = tempfile::tempdir().unwrap();
@@ -4806,7 +4891,7 @@ strict = true
 
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
-        gather_mentions(&i, &g, "fact:x", "MENTIONS", &mut seen, &mut out);
+        gather_mentions(&i, &g, "fact:x", "MENTIONS", &mut seen, &mut out).unwrap();
 
         assert_eq!(
             out,
