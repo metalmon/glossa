@@ -134,10 +134,16 @@ fn gold_pairs(gold: &[String]) -> Vec<(String, String)> {
 /// Those two labels used to be coerced to the number after the prefix, from the era when a chunk
 /// was addressed by its display label as well as by its ordinal. The ordinal is the address now,
 /// and the live dataset agrees: all 494 `source` refs across its 175 cases are `path#<digits>`,
-/// with no `p.N` or `part.N` among them. The only `#p.N` strings left in the tree sit in recorded
-/// run outputs under `.glossa/kbx/runs/*/cases/`, which are history, not gold. The form is no
-/// longer accepted — a gold ref written that way is a dataset error and should fail to match
-/// rather than be guessed into an ordinal that may address a different chunk.
+/// with no `p.N` or `part.N` among them. The form is no longer accepted — a gold ref written that
+/// way is a dataset error and should fail to match rather than be guessed into an ordinal that may
+/// address a different chunk.
+///
+/// Two places in this crate have NOT followed that ruling and are not reached from here:
+/// `connectivity::answer_nodes` parses a gold ref with its own digit filter, so `#p.14` and `#14`
+/// both yield page 14 (and `#4.1.3 Safety` yields 413, which is the same guess in a looser form),
+/// with a test pinning the `p.N` spelling; and `dataset_toml`'s schema doc still advertises
+/// `source = ["a.pdf#p.1"]`. Both are owner calls, not drive-by edits — they decide what the
+/// dataset schema accepts, not just how one function parses.
 pub(crate) fn gold_ord(gl: &str) -> Option<u64> {
     if !gl.is_empty() && gl.bytes().all(|b| b.is_ascii_digit()) {
         gl.parse().ok()
