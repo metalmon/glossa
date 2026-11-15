@@ -4830,9 +4830,13 @@ mod search_tests {
     }
 
     /// The note write path has no `Chunk` in scope and so is the one place a hand-written JSON
-    /// literal could have been spelled out: an unquoted `note` compiles and then fails to parse.
-    /// `index_dir` drives the write in `index_dir_at_locked`; the freshen pass in
-    /// `reindex_dirs_at_locked` is the same call to the same serializer.
+    /// literal could have been spelled out: an unquoted `note` compiles and then fails to parse,
+    /// and `stored_location` then reads it as an EMPTY label rather than the raw `note` — which is
+    /// why the structural assertion, not the rendered one, is what catches it.
+    ///
+    /// Both note writes are driven, because there are two and a test on one of them is not a test
+    /// on the other: `index_dir` reaches `index_dir_at_locked`'s, and the scoped-reindex phase
+    /// below reaches the freshen pass's in `reindex_dirs_at_locked`.
     #[cfg(feature = "notebook")]
     #[test]
     fn a_notes_stored_location_round_trips_as_the_label_note() {
@@ -4854,13 +4858,58 @@ mod search_tests {
             idx.location_for_ord("doc.md/limits.csp", 1).unwrap(),
             Some("note".to_string())
         );
+
+        // A SECOND note, indexed through the scoped freshen path rather than `index_dir` — the
+        // same classification `freshen_blocking` computes, handed to `reindex_dirs_locked`. A new
+        // note bumps only an `n:` dir key, so the corpus classification can come back empty and
+        // `scan_scoped_delta_at` then falls back to the full scan; either way its notes half
+        // (`scan_notes_delta`, unconditional) reports the note and the freshen notes pass writes
+        // it. The two writes are textually identical, so this pins the second serializer call
+        // rather than trusting that they stay that way.
+        let before = dir_mtime_map(dir.path()).unwrap();
+        fs::write(note_dir.join("second.csp"), b"second sentinel note").unwrap();
+        let after = dir_mtime_map(dir.path()).unwrap();
+        let (changed, added, removed) = diff_corpus_dirs(&before, &after);
+        let notes_touched = notes_submap_changed(&before, &after);
+        {
+            let _l = crate::index::lock::try_index_lock(dir.path()).unwrap();
+            reindex_dirs_locked(
+                dir.path(),
+                &after,
+                &changed,
+                &added,
+                &removed,
+                notes_touched,
+            )
+            .unwrap();
+        }
+
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert_eq!(
+            idx.location_of("doc.md/second.csp", 1).unwrap(),
+            Some(Location::Label("note".into())),
+            "the freshen pass's note write must serialize the label too"
+        );
+        assert_eq!(
+            idx.location_for_ord("doc.md/second.csp", 1).unwrap(),
+            Some("note".to_string())
+        );
     }
 
-    /// Storing the structure must not change what a location RENDERS to: for every chunk the
-    /// extractors emit from the office fixtures, the string an indexed hit hands back is the one
-    /// `display()` produced before this commit, and the shape survives too — which the stored
-    /// rendering could never carry. `sample_chart.docx` earns its place: it is the fixture that
-    /// holds a chart chunk next to body chunks, so a chart built with `Chunk::nested` fails here.
+    /// The store round-trips every location the office fixtures produce: for each chunk the
+    /// extractors emit, what comes back out of the index is the same `Location` that went in
+    /// (shape included — which the stored rendering could never carry), and it renders to that
+    /// chunk's own `display()`.
+    ///
+    /// That is the half this test can prove on its own. Invariant 7 — "and that rendering is what
+    /// the same corpus rendered before this plan" — rests on the OTHER half, which is Task 2's:
+    /// the extractors' `display()` output was held byte-identical there, with the one empty-docx-
+    /// heading exception pinned beside the code that can reach it (`extract::office_chunk`).
+    /// Together they cover the invariant; this test alone pins storage, not history.
+    ///
+    /// `sample_chart.docx` earns its place: `ooxml_chart` builds its chart chunk with
+    /// `Chunk::labelled`, so the `Chart:`-plus-flat-label predicate below becomes unsatisfiable
+    /// the moment someone switches it to `Chunk::nested`.
     #[test]
     fn fixture_locations_render_unchanged_and_keep_their_shape() {
         let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
