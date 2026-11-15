@@ -400,9 +400,24 @@ impl DocIndex {
         // The whole write (open writer → delete → add → commit) runs under a transient-IO retry:
         // on Windows a just-created index file is briefly locked (Defender scan, lingering reader)
         // and opening the writer can fail with "Access is denied (os error 5)". The transaction is
-        // idempotent (delete-by-path then re-add), so retrying the whole thing is safe.
+        // idempotent in DATA (delete-by-path then re-add) — but NOT in the files it writes, which
+        // is why every attempt after the first collects garbage before doing anything else.
+        //
+        // A commit that fails partway can already have written `<segment>.<opstamp>.del`. The next
+        // attempt builds a fresh writer, reads the unchanged `meta.json`, and therefore lands on the
+        // SAME opstamp — so it tries to create that file again and dies on `FileAlreadyExists`,
+        // which `is_transient_fs` also reads as transient. Without the collect, one recoverable blip
+        // burns all four attempts and reports the collision instead of the original cause; a
+        // `FileAlreadyExists` on a `.del` is proof a retry happened, since a first attempt never
+        // meets its own leftovers. `garbage_collect_files` deletes what the current `meta.json` does
+        // not reference, which is exactly that orphan, so the re-commit can land.
+        let mut attempt = 0u32;
         with_writer_retry(|| {
             let mut writer = self.index.writer(50_000_000)?;
+            attempt += 1;
+            if attempt > 1 {
+                writer.garbage_collect_files().wait()?;
+            }
             for path_str in &distinct_paths {
                 writer.delete_term(tantivy::Term::from_field_text(self.fields.path, path_str));
             }
@@ -1279,8 +1294,15 @@ impl DocIndex {
     }
 
     pub fn delete_path(&self, path: &str) -> anyhow::Result<()> {
+        // Collects garbage on every attempt after the first, for the reason spelled out in
+        // `write_chunks`: a half-written commit leaves a `.del` the next attempt collides with.
+        let mut attempt = 0u32;
         with_writer_retry(|| {
             let mut writer = self.index.writer::<TantivyDocument>(50_000_000)?;
+            attempt += 1;
+            if attempt > 1 {
+                writer.garbage_collect_files().wait()?;
+            }
             writer.delete_term(tantivy::Term::from_field_text(self.fields.path, path));
             writer.commit()?;
             Ok(())
@@ -2403,7 +2425,19 @@ pub fn index_dir_at_locked(
     // frame that flakes on Windows (Defender / a racing reader briefly holds it). Idempotent: the
     // writer's pending ops stay staged, so re-committing after a transient failure is safe.
     eprintln!("committing index...");
-    with_writer_retry(|| writer.commit())?;
+    // Collect garbage on every attempt after the first: a commit that failed partway already wrote
+    // `<segment>.<opstamp>.del`, and a plain retry re-commits at the same opstamp and dies on
+    // `FileAlreadyExists`. See `DocIndex::write_chunks` for the full argument.
+    {
+        let mut attempt = 0u32;
+        with_writer_retry(|| {
+            attempt += 1;
+            if attempt > 1 {
+                writer.garbage_collect_files().wait()?;
+            }
+            writer.commit()
+        })?;
+    }
     eprintln!("index committed");
     next.index_schema_version = INDEX_SCHEMA_VERSION;
     next.save(state_base)?;
@@ -2488,7 +2522,19 @@ pub fn index_one_file_locked_at(
     manifest.files.insert(rel.to_string(), sig);
     let _ = resolve_reference_links(&idx.roots, &graph, &manifest.files, &links);
     // Bounded transient-FS retry around the `meta.json`-writing commit (see index_dir_locked).
-    with_writer_retry(|| writer.commit())?;
+    // Collect garbage on every attempt after the first: a commit that failed partway already wrote
+    // `<segment>.<opstamp>.del`, and a plain retry re-commits at the same opstamp and dies on
+    // `FileAlreadyExists`. See `DocIndex::write_chunks` for the full argument.
+    {
+        let mut attempt = 0u32;
+        with_writer_retry(|| {
+            attempt += 1;
+            if attempt > 1 {
+                writer.garbage_collect_files().wait()?;
+            }
+            writer.commit()
+        })?;
+    }
     let mut m = Manifest::load(state_base);
     m.files.insert(rel.to_string(), sig);
     m.save(state_base)?;
@@ -3136,7 +3182,19 @@ pub fn reindex_dirs_at_locked(
     // Deliberately NOT bracketed with the phase markers the full pass prints: `freshen_blocking_at`
     // routes here, so a running server would log two lines per freshen cycle — for a pass that is
     // scoped and short by construction. The markers exist for the pass that goes quiet for minutes.
-    with_writer_retry(|| writer.commit())?;
+    // Collect garbage on every attempt after the first: a commit that failed partway already wrote
+    // `<segment>.<opstamp>.del`, and a plain retry re-commits at the same opstamp and dies on
+    // `FileAlreadyExists`. See `DocIndex::write_chunks` for the full argument.
+    {
+        let mut attempt = 0u32;
+        with_writer_retry(|| {
+            attempt += 1;
+            if attempt > 1 {
+                writer.garbage_collect_files().wait()?;
+            }
+            writer.commit()
+        })?;
+    }
     // Carry the schema version forward as-is: this is not a schema-migrating path (that's
     // `index_dir_at_locked`'s job), so resetting it to `Manifest::default()`'s value would make
     // the NEXT `kb index` think a migration is still pending and force a full rebuild.
@@ -4648,7 +4706,7 @@ mod incremental_tests {
 
         // tantivy side too: commit (a no-op here since nothing was ever staged) and confirm via a
         // fresh reader that the prior doc is still searchable.
-        with_writer_retry(|| writer.commit()).unwrap();
+        writer.commit().unwrap();
         drop(writer);
         let idx2 = DocIndex::open_or_create(dir.path()).unwrap();
         assert!(
@@ -4689,7 +4747,7 @@ mod incremental_tests {
         let mut links: Vec<(String, String)> = Vec::new();
         let abs = idx.doc_file("docs/x.md");
         index_file_into(&idx, &graph, &writer, "docs/x.md", &abs, &mut links, None).unwrap();
-        with_writer_retry(|| writer.commit()).unwrap();
+        writer.commit().unwrap();
 
         let idx2 = DocIndex::open_or_create_at(&roots, state.path()).unwrap();
         assert!(
