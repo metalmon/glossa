@@ -80,15 +80,18 @@ fn a_changed_file_and_an_out_of_range_n_both_say_so() {
             "the file changed since the search",
         ));
 
-    // n beyond the recorded hits is a message, not a panic or an empty print — and, unlike the
-    // changed-file case above, it succeeds: there is no chunk to have changed underneath.
+    // n beyond the recorded hits is a message, not a panic or an empty print — and it is a
+    // FAILED read, so it exits non-zero on stderr like the changed-file case above. Nothing was
+    // read, so stdout must stay clean: `kb read 9 | …` must not feed the apology into a pipeline
+    // as though it were document text.
     Command::cargo_bin("kb")
         .unwrap()
         .current_dir(dir.path())
         .args(["read", "9"])
         .assert()
-        .success()
-        .stdout(predicates::str::contains("no result #9"));
+        .failure()
+        .stderr(predicates::str::contains("no result #9"))
+        .stdout(predicates::str::is_empty());
 }
 
 /// `root.rs` never absolutizes a relative root, so a `--scan` record built against one must still

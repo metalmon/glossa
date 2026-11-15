@@ -1884,7 +1884,13 @@ fn main() -> anyhow::Result<()> {
                             "no chunk #{ord} in {path} — the file changed since the search; run the search again"
                         ),
                     },
-                    None => println!("no result #{k} (run a search first)"),
+                    // No such hit: `k` is past the recorded results, or the record was refused
+                    // (a two-column file from an older build). Both are failures to read, so
+                    // they exit non-zero and speak on stderr — the sibling arm above already
+                    // does. Printing to stdout with status 0 made `kb read 3 | …` feed the
+                    // apology into the pipeline as if it were document text, and told a script
+                    // the read had succeeded.
+                    None => anyhow::bail!("no result #{k} (run a search first)"),
                 }
             } else {
                 // TARGET is a `path#N` token / document path / graph node id — resolve it EXACTLY
