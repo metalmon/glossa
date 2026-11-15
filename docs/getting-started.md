@@ -107,7 +107,7 @@ Open a hit from search (by result number) or by path:
 kb search "timeout"
 kb read 1          # first hit from last search
 kb read manual.md
-kb read manual.md "p.3"   # PDF page
+kb read manual.md 3       # chunk 3 (page 3 for a PDF)
 ```
 
 ## Graph (optional)
