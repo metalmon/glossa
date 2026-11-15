@@ -67,7 +67,21 @@ fn token_overlap_hints(idx: &DocIndex, base: &str) -> Vec<String> {
     scored.into_iter().take(3).map(|(_, p)| p).collect()
 }
 
+/// The not-found message for `read`/`get_source_file`.
+///
+/// Two different situations reach here and they need different advice. When the path is simply
+/// wrong, "check the path" plus a did-you-mean list is the help. When the file is actually THERE
+/// on disk, that same advice sends the reader hunting a typo that does not exist: the path is
+/// right and the document was never indexed — an ignore rule, an extraction that skipped it, or a
+/// `--scan -u` hit reaching past the index. `read` deliberately serves indexed documents only
+/// (raw off-disk files are `kb cat`'s job), so naming that case is the whole fix; retyping the
+/// path never resolves it.
 fn path_not_found(idx: &DocIndex, path: &str) -> String {
+    if crate::index::store::doc_file_in(&idx.roots, path).is_file() {
+        return format!(
+            "{path} exists on disk but is not indexed — `read` serves indexed documents only (check your ignore rules)"
+        );
+    }
     format!(
         "no document indexed at {path} — check the path from a search/glob result{}",
         document_path_hints(idx, path)
@@ -3723,6 +3737,41 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         );
         assert_eq!(scoped_hits.len(), 1, "{scoped_body}");
         assert!(scoped_body.starts_with("docA.md"), "{scoped_body}");
+    }
+
+    /// A file that is on disk but absent from the index must say so. The old message sent the
+    /// reader to "check the path from a search/glob result" — advice that cannot work, because the
+    /// path is already right. `--scan -u` reaches files the index excludes, so a user can hold a
+    /// perfectly valid `path#N` for a document `read` will never serve.
+    #[test]
+    fn read_says_an_unindexed_file_is_unindexed_not_mistyped() {
+        let d = tempfile::tempdir().unwrap();
+        let i = DocIndex::open_or_create(d.path()).unwrap();
+        i.write_chunks(&[Chunk {
+            doc_path: PathBuf::from("indexed.md"),
+            location: "S".into(),
+            file_type: "md".into(),
+            text: "body".into(),
+        }])
+        .unwrap();
+        std::fs::write(d.path().join("excluded.md"), b"# T\nbody\n").unwrap();
+
+        let t = TraceLog::disabled();
+        let out = read(d.path(), &i, None, "excluded.md", 1, false, &t).text;
+        assert!(
+            out.contains("exists on disk but is not indexed"),
+            "a present-but-unindexed file must be named as such: {out}"
+        );
+        assert!(
+            !out.contains("check the path"),
+            "the path is correct, so do not send the reader looking for a typo: {out}"
+        );
+        // A genuinely wrong path keeps the did-you-mean advice, which is the right help there.
+        let missing = read(d.path(), &i, None, "nope.md", 1, false, &t).text;
+        assert!(
+            missing.contains("no document indexed at nope.md"),
+            "absent file keeps the original message: {missing}"
+        );
     }
 
     #[test]
