@@ -1866,7 +1866,12 @@ fn main() -> anyhow::Result<()> {
                     }) => match glossa::read::nth_chunk(std::path::Path::new(&path), ord)? {
                         Some(text) => {
                             if glossa::cli_fmt::stdout_is_tty() {
-                                println!("{}", glossa::cli_fmt::dim(&format!("── {path} ──")));
+                                // `path` is the absolute path Finding 3 now stores (so the read
+                                // survives a different CWD than the search); render it through the
+                                // same `rel_file` the search output already uses so the header
+                                // looks like the Index branch's, not a CWD-portability leak.
+                                let shown = glossa::cli_fmt::rel_file(&rr.root, &path);
+                                println!("{}", glossa::cli_fmt::dim(&format!("── {shown} ──")));
                             }
                             print!("{text}");
                             if !text.ends_with('\n') {
