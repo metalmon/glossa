@@ -33,6 +33,20 @@ use tantivy::{doc, Index, IndexReader, TantivyDocument, TantivyError};
 //    now read back as an empty label (see `stored_location`), so a stale index must rebuild.
 pub const INDEX_SCHEMA_VERSION: u32 = 7;
 
+/// True when `manifest` records a previously-populated index written at an older schema than
+/// `INDEX_SCHEMA_VERSION`. Every read path (search, `location_for_ord`, grep) opens whatever
+/// schema `meta.json` names without error — the migration that rebuilds a stale index only runs
+/// inside `index_dir_at_locked` (`kb index` / the MCP `index` tool) — so a schema-6-and-older
+/// index silently keeps serving old bytes under the new schema's decoding rules.
+///
+/// `!files.is_empty()` mirrors the guard `index_dir_at_locked` uses before refusing a migration:
+/// a brand-new corpus has no manifest, so `Manifest::load` returns a default whose
+/// `index_schema_version` is below `INDEX_SCHEMA_VERSION` — without this guard every never-indexed
+/// corpus would warn, and noise in a warning is how real warnings get ignored.
+pub fn index_is_stale(manifest: &Manifest) -> bool {
+    manifest.index_schema_version < INDEX_SCHEMA_VERSION && !manifest.files.is_empty()
+}
+
 #[derive(Clone, Copy)]
 pub struct Fields {
     pub body: Field,
@@ -245,6 +259,20 @@ impl DocIndex {
         register_tokenizers(&index);
         let fields = fields_from_schema(&index.schema())?;
         let reader = index.reader()?;
+        // Every reader (search, `location_for_ord`, grep) comes through this one door, so this is
+        // the single place a stale schema can be caught without instrumenting five-plus call
+        // sites by hand. One manifest read, lost next to the directory create and tantivy open
+        // this function already does.
+        let manifest = Manifest::load(state_base);
+        if index_is_stale(&manifest) {
+            tracing::warn!(
+                state_base = %state_base.display(),
+                recorded_schema = manifest.index_schema_version,
+                current_schema = INDEX_SCHEMA_VERSION,
+                "index was written at an older schema version; stored chunk locations will not \
+                 parse and decode to empty labels — run `kb index` to rebuild"
+            );
+        }
         let roots = roots
             .iter()
             .map(|r| crate::root::Root {
@@ -4091,6 +4119,35 @@ mod incremental_tests {
         assert_eq!(s.added, 0);
         assert_eq!(s.removed, 0);
         assert_eq!(Manifest::load(dir.path()).index_schema_version, 1);
+    }
+
+    #[test]
+    fn index_is_stale_fires_only_on_a_populated_old_manifest() {
+        // Previously-populated manifest at an old schema: this is the degrading-silently case —
+        // `open_or_create_at` must warn.
+        let mut populated_old = Manifest::default();
+        populated_old.files.insert(
+            "a.md".into(),
+            FileSig {
+                mtime_secs: 0,
+                size: 1,
+            },
+        );
+        populated_old.index_schema_version = INDEX_SCHEMA_VERSION - 1;
+        assert!(
+            index_is_stale(&populated_old),
+            "a populated manifest recorded at an older schema must be flagged stale"
+        );
+
+        // Fresh/never-indexed corpus: `Manifest::default()` also reads as an old schema version
+        // (default < INDEX_SCHEMA_VERSION), but there is no index to be stale yet. This is the
+        // trap the `!files.is_empty()` guard exists for — drop that guard and this assertion
+        // fails because an empty manifest reads as stale too.
+        let fresh = Manifest::default();
+        assert!(
+            !index_is_stale(&fresh),
+            "a never-indexed corpus (empty manifest) must never be flagged stale"
+        );
     }
 
     #[test]
