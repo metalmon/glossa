@@ -86,7 +86,15 @@ fn full_cycle_never_writes_into_corpus_roots() {
     glossa::index::store::index_dir_at(&roots, state.path(), true).unwrap();
     let h = glossa::graph::handle::GraphHandle::open_at(&roots, state.path()).unwrap();
     let _ = h.idx(); // search/read exercised via DocIndex
-    glossa::cli_fmt::write_last_search(state.path(), &[("a.md".into(), "p.1".into())]).unwrap();
+    glossa::cli_fmt::write_last_search(
+        state.path(),
+        &[glossa::cli_fmt::LastHit {
+            path: "a.md".into(),
+            ord: 1,
+            source: glossa::cli_fmt::HitSource::Index,
+        }],
+    )
+    .unwrap();
     // Traces and notebook notes must ALSO land under state_base, not the corpus.
     glossa::trace::TraceLog::to_dir(state.path()).log(
         "read",

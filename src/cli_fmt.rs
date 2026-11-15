@@ -178,9 +178,10 @@ pub struct DisplayHit {
     pub location: String, // display label: heading | "(no-text)" | "" (p.N pages are dropped upstream)
     pub snippet: String,
     pub score: Option<f32>, // Some for --rank
-    /// Chunk ordinal, when known (index search). `Some` → the pretty view leads the hit with the
-    /// copy-ready `path#ord` token that `kb read` consumes (same contract as the MCP tools).
-    /// `None` for the `--scan` raw-file mode, which has no chunk ordinal (its refs are line-based).
+    /// Chunk ordinal, when known. `Some` → the pretty view leads the hit with the copy-ready
+    /// `path#ord` token that `kb read` consumes (same contract as the MCP tools). Both the index
+    /// search and `--scan` carry one (per-document, 1-based); `None` only when a caller has no
+    /// chunk to address at all.
     pub ord: Option<u64>,
 }
 
@@ -210,7 +211,7 @@ pub fn render_search_pretty(hits: &[DisplayHit], reverse: bool, query: &str) -> 
         }
         l1.push_str(&magenta(&h.file));
         // Append the chunk ordinal so line 1 is the copy-ready `path#ord` token to paste into
-        // `kb read` (mirrors the MCP tools). `--scan` hits have no ordinal → path only.
+        // `kb read` (mirrors the MCP tools).
         if let Some(o) = h.ord {
             l1.push_str(&magenta(&format!("#{o}")));
         }
@@ -280,19 +281,63 @@ pub fn display_location(location: &str) -> Option<&str> {
     (!location.is_empty()).then_some(location)
 }
 
-/// Persist the ordered hits (path<TAB>location) so `kb read <#>` can resolve them later.
+/// How a persisted hit was found — the resolver `kb read <n>` must use to read it back. Written
+/// into the TSV's third column as exactly `"index"` / `"scan"` (lowercase): a serialization format,
+/// not a UI string, so an unrecognized value is a parse error, never a default — a record we can't
+/// read is safer than one we misread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitSource {
+    Index,
+    Scan,
+}
+
+impl std::fmt::Display for HitSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            HitSource::Index => "index",
+            HitSource::Scan => "scan",
+        })
+    }
+}
+
+impl std::str::FromStr for HitSource {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "index" => Ok(HitSource::Index),
+            "scan" => Ok(HitSource::Scan),
+            _ => Err(()),
+        }
+    }
+}
+
+/// One persisted `last_search` hit: which document, which chunk ordinal within it, and how it was
+/// found — the fact `kb read <n>` needs to resolve it, instead of guessing from the shape of a
+/// second column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastHit {
+    pub path: String,
+    pub ord: u64,
+    pub source: HitSource,
+}
+
+/// Persist the ordered hits so `kb read <#>` can resolve them later — each one carries not just
+/// its chunk ordinal but HOW it was found, so the read side branches on a recorded fact instead of
+/// guessing from the shape of the ordinal column.
 ///
 /// `root` is the **state base** (where `.glossa` lives), not necessarily the corpus root — the two
 /// coincide today (co-located CLI), but callers must pass the resolved state base once `--state-dir`
 /// lands so this keeps writing beside the index/graph rather than into the corpus.
-pub fn write_last_search(root: &Path, records: &[(String, String)]) -> std::io::Result<()> {
+pub fn write_last_search(root: &Path, records: &[LastHit]) -> std::io::Result<()> {
     let dir = root.join(".glossa");
     std::fs::create_dir_all(&dir)?;
     let mut s = String::new();
-    for (p, loc) in records {
-        s.push_str(p);
+    for r in records {
+        s.push_str(&r.path);
         s.push('\t');
-        s.push_str(loc);
+        s.push_str(&r.ord.to_string());
+        s.push('\t');
+        s.push_str(&r.source.to_string());
         s.push('\n');
     }
     std::fs::write(dir.join("last_search.tsv"), s)
@@ -304,16 +349,23 @@ pub fn read_last_search(root: &Path) -> Option<String> {
     std::fs::read_to_string(root.join(".glossa").join("last_search.tsv")).ok()
 }
 
-/// 1-based lookup of a `path<TAB>location` record in last-search TSV content.
-pub fn nth_record(tsv: &str, n: usize) -> Option<(String, String)> {
+/// 1-based lookup of a `path<TAB>ord<TAB>source` record in last-search TSV content. Exactly three
+/// fields are required; a missing field, an unparseable ordinal, an unrecognized source, or extra
+/// fields all yield `None`. A file written by an older (two-column) build is refused this way —
+/// not guessed at — because the next search rewrites it anyway.
+pub fn nth_record(tsv: &str, n: usize) -> Option<LastHit> {
     if n == 0 {
         return None;
     }
     let line = tsv.lines().nth(n - 1)?;
-    let mut it = line.splitn(2, '\t');
-    let path = it.next()?.to_string();
-    let loc = it.next().unwrap_or("").to_string();
-    Some((path, loc))
+    let mut fields = line.split('\t');
+    let path = fields.next()?.to_string();
+    let ord: u64 = fields.next()?.parse().ok()?;
+    let source: HitSource = fields.next()?.parse().ok()?;
+    if fields.next().is_some() {
+        return None;
+    }
+    Some(LastHit { path, ord, source })
 }
 
 /// The canonical CLI summary block as a String (pure, so it is unit-testable): a dim separator
@@ -411,14 +463,22 @@ mod tests {
     #[test]
     fn last_search_is_written_under_the_given_base_only() {
         let state = tempfile::tempdir().unwrap();
-        write_last_search(state.path(), &[("A/x.md".into(), "p.1".into())]).unwrap();
+        write_last_search(
+            state.path(),
+            &[LastHit {
+                path: "A/x.md".into(),
+                ord: 1,
+                source: HitSource::Index,
+            }],
+        )
+        .unwrap();
         assert!(state
             .path()
             .join(".glossa")
             .join("last_search.tsv")
             .exists());
         let raw = read_last_search(state.path()).unwrap();
-        assert!(raw.contains("A/x.md\tp.1"));
+        assert!(raw.contains("A/x.md\t1\tindex"));
     }
 
     /// Regression: the canonical index key (corpus-root-relative, forward slashes) is the ref
@@ -656,13 +716,58 @@ mod tests {
 
     #[test]
     fn nth_record_is_1based_and_bounded() {
-        let tsv = "a.md\tp.1\nb.pdf\t(no-text)\n";
-        assert_eq!(nth_record(tsv, 1), Some(("a.md".into(), "p.1".into())));
+        let tsv = "a.md\t1\tindex\nb.pdf\t3\tscan\n";
+        assert_eq!(
+            nth_record(tsv, 1),
+            Some(LastHit {
+                path: "a.md".into(),
+                ord: 1,
+                source: HitSource::Index
+            })
+        );
         assert_eq!(
             nth_record(tsv, 2),
-            Some(("b.pdf".into(), "(no-text)".into()))
+            Some(LastHit {
+                path: "b.pdf".into(),
+                ord: 3,
+                source: HitSource::Scan
+            })
         );
         assert_eq!(nth_record(tsv, 3), None);
         assert_eq!(nth_record(tsv, 0), None);
+    }
+
+    #[test]
+    fn a_record_round_trips_with_its_resolver() {
+        let dir = tempfile::tempdir().unwrap();
+        write_last_search(
+            dir.path(),
+            &[
+                LastHit {
+                    path: "a.md".into(),
+                    ord: 7,
+                    source: HitSource::Index,
+                },
+                LastHit {
+                    path: "b.md".into(),
+                    ord: 2,
+                    source: HitSource::Scan,
+                },
+            ],
+        )
+        .unwrap();
+        let tsv = read_last_search(dir.path()).unwrap();
+        assert_eq!(nth_record(&tsv, 2).unwrap().source, HitSource::Scan);
+        assert_eq!(nth_record(&tsv, 2).unwrap().ord, 2);
+        assert_eq!(nth_record(&tsv, 3), None);
+    }
+
+    /// A file written by an older build is two columns. It must be refused, not guessed at: the
+    /// guessing is the bug this phase removes. The file is a cache of the last search and the next
+    /// search rewrites it.
+    #[test]
+    fn a_two_column_record_from_an_older_build_is_refused() {
+        assert_eq!(nth_record("a.md\tp.1\n", 1), None);
+        assert_eq!(nth_record("a.md\t7\n", 1), None);
     }
 }
