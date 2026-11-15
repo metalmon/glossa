@@ -1,6 +1,6 @@
 use crate::index::manifest::{FileSig, Manifest};
 use crate::index::multilang::{default_detector, multilang_analyzer};
-use crate::model::Chunk;
+use crate::model::{Chunk, Location};
 use anyhow::Context;
 use ignore::WalkBuilder;
 use std::collections::BTreeMap;
@@ -27,7 +27,11 @@ use tantivy::{doc, Index, IndexReader, TantivyDocument, TantivyError};
 //    heading stop sharing one `location` — and `" > "` is the only thing the graph splits to
 //    build PARENT/CHILD. Stored locations and the structural edges derived from them both change
 //    for xlsx/xls/ods/pptx/ppt/odp; nothing makes those files stale on their own.
-pub const INDEX_SCHEMA_VERSION: u32 = 6;
+// 7: `location` stores the STRUCTURE (`serde_json::to_string(&Location)`) instead of its
+//    rendering: `["Chapter 2","Limits"]` for a path, `"rows 12-40"` for a label. Every stored
+//    location changes shape, and an index written at 6 holds a bare joined string that would
+//    now read back as an empty label (see `stored_location`), so a stale index must rebuild.
+pub const INDEX_SCHEMA_VERSION: u32 = 7;
 
 #[derive(Clone, Copy)]
 pub struct Fields {
@@ -70,7 +74,11 @@ fn build_schema() -> Schema {
     );
     sb.add_text_field("body_trigrams", trigram_opts);
     sb.add_text_field("path", STRING | STORED);
-    sb.add_text_field("location", STRING | STORED);
+    // STORED and NOT indexed, unlike `path` above. Nothing queries a location: search runs over
+    // `body`/`body_trigrams`, and every lookup that mentions a location (`location_for_ord`,
+    // `search`) finds its document by `path`+`ord` and then READS this field out of the store.
+    // Indexing it would only add postings for a JSON blob no query can usefully match.
+    sb.add_text_field("location", STORED);
     sb.add_text_field("file_type", STRING | STORED);
     sb.add_u64_field("ord", INDEXED | STORED);
     sb.build()
@@ -85,6 +93,33 @@ fn fields_from_schema(schema: &Schema) -> anyhow::Result<Fields> {
         file_type: schema.get_field("file_type")?,
         ord: schema.get_field("ord")?,
     })
+}
+
+/// The one place a location becomes stored bytes: JSON, via serde. A path stores as an array
+/// (`["Chapter 2","Limits"]`) and a label as a string (`"rows 12-40"`), which is what makes the
+/// segments recoverable — `Location::display` is deliberately irreversible, so a heading that
+/// itself contains `LOCATION_SEP` cannot be told from two segments once joined.
+///
+/// Every write goes through here rather than spelling the JSON out, including the two note writes
+/// that have no `Chunk` in scope: a hand-written literal would be a bare `note` where the reader
+/// expects a quoted `"note"`, which compiles and then fails to parse.
+///
+/// Infallible in practice: a `Location` is a string or a list of strings, neither of which serde
+/// can refuse (no map keys, no non-finite floats).
+fn store_location(loc: &Location) -> String {
+    serde_json::to_string(loc).expect("a Location is a string or a list of strings")
+}
+
+/// The one place stored bytes become a location again. Reading is per-document rather than per-hit
+/// because both the search loops and `location_for_ord` already hold the fetched `TantivyDocument`.
+///
+/// A value that does not parse becomes an EMPTY label, never the raw stored string. Handing back
+/// the raw bytes would make an unquoted `note` render as exactly the right-looking `note`, hiding
+/// the one mistake this encoding can make; an index written before schema 7 holds joined strings
+/// and is meant to be rebuilt by the manifest migration, not silently half-read.
+fn stored_location(d: &TantivyDocument, f: Field) -> Location {
+    let raw = d.get_first(f).and_then(|v| v.as_str()).unwrap_or("");
+    serde_json::from_str(raw).unwrap_or_else(|_| Location::Label(String::new()))
 }
 
 fn register_tokenizers(index: &Index) {
@@ -354,13 +389,13 @@ impl DocIndex {
                 *seq += 1;
                 let ord = *seq;
                 // The section id is always the ordinal ("<path>#<ord>") regardless of whether
-                // the chunk has a heading; the stored `location` is display-only and a
-                // heading-less chunk simply has none (see RankedHit::display_line).
+                // the chunk has a heading; the stored `location` is read back for display only
+                // and a heading-less chunk simply has none (see RankedHit::display_line).
                 writer.add_document(doc!(
                     self.fields.body => c.text.clone(),
                     self.fields.body_trigrams => c.text.clone(),
                     self.fields.path => path_str,
-                    self.fields.location => c.location.display(),
+                    self.fields.location => store_location(&c.location),
                     self.fields.file_type => c.file_type.clone(),
                     self.fields.ord => ord,
                 ))?;
@@ -422,7 +457,10 @@ impl DocIndex {
                 .unwrap_or(0);
             hits.push(RankedHit {
                 path: get(self.fields.path),
-                location: get(self.fields.location),
+                // A hit carries the RENDERED location: the stored field is structured now, and
+                // `display()` here is what keeps every display, rerank and eval consumer on the
+                // same string they have always been handed.
+                location: stored_location(&d, self.fields.location).display(),
                 file_type: get(self.fields.file_type),
                 ord,
                 snippet,
@@ -510,7 +548,10 @@ impl DocIndex {
                 .unwrap_or(0);
             hits.push(RankedHit {
                 path: get(self.fields.path),
-                location: get(self.fields.location),
+                // A hit carries the RENDERED location: the stored field is structured now, and
+                // `display()` here is what keeps every display, rerank and eval consumer on the
+                // same string they have always been handed.
+                location: stored_location(&d, self.fields.location).display(),
                 file_type: get(self.fields.file_type),
                 ord,
                 snippet,
@@ -697,10 +738,22 @@ impl DocIndex {
         }
     }
 
-    /// Resolve chunk number `n` to the `location` string stored in the index for `path`.
-    /// Mirrors `ord_body` but returns the location field instead of the body.
-    /// Returns `None` when no chunk with that (path, ord) pair is indexed.
+    /// Resolve chunk number `n` to the RENDERED location for `path` — `Chapter 2 > Limits`, not
+    /// the `["Chapter 2","Limits"]` now held in the store. Mirrors `ord_body` but returns the
+    /// location field instead of the body. `None` when no chunk with that (path, ord) is indexed.
+    ///
+    /// Rendering here rather than at the callers is load-bearing: every consumer compares this
+    /// string against a location a human or a dataset wrote (`eval::gepa` matches it against a
+    /// gold location and records it as a resolved reference), so handing back the stored JSON
+    /// would make every nested location stop matching with nothing failing.
     pub fn location_for_ord(&self, path: &str, n: u64) -> anyhow::Result<Option<String>> {
+        Ok(self.location_of(path, n)?.map(|l| l.display()))
+    }
+
+    /// The structured location for `path`'s chunk `n`, as it was written. The one caller that
+    /// wants the structure rather than the rendering is the round-trip test — the reason the
+    /// stored form is structured at all is that `display()` cannot be undone.
+    fn location_of(&self, path: &str, n: u64) -> anyhow::Result<Option<Location>> {
         use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
         let searcher = self.reader.searcher();
         let clauses: Vec<(Occur, Box<dyn Query>)> = vec![
@@ -726,12 +779,7 @@ impl DocIndex {
         match top.first() {
             Some((_score, addr)) => {
                 let d: TantivyDocument = searcher.doc(*addr)?;
-                Ok(Some(
-                    d.get_first(self.fields.location)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                ))
+                Ok(Some(stored_location(&d, self.fields.location)))
             }
             None => Ok(None),
         }
@@ -1844,14 +1892,16 @@ pub fn index_file_into(
         if let Some(df) = df.as_deref_mut() {
             df.add_chunk(&crate::gate::token::tokenize(&c.text));
         }
-        // The stored form and the graph's per-file `seen` key are still the joined string, so the
-        // index bytes are exactly what they were; hoisted because the loop needs it three times.
+        // The graph's per-file `seen` key is still the RENDERED location: `nearest_ancestor`
+        // derives a parent by splitting it on `LOCATION_SEP`, which phase 2 replaces with the
+        // segments themselves. The index stores the structure instead; the two are separate now,
+        // so `loc` exists only for the graph's two uses below.
         let loc = c.location.display();
         let _ = writer.add_document(doc!(
             idx.fields.body => c.text.clone(),
             idx.fields.body_trigrams => c.text.clone(),
             idx.fields.path => doc_key.to_string(),
-            idx.fields.location => loc.clone(),
+            idx.fields.location => store_location(&c.location),
             idx.fields.file_type => c.file_type.clone(),
             idx.fields.ord => ord,
         ));
@@ -2306,7 +2356,10 @@ pub fn index_dir_at_locked(
                 idx.fields.body => body.clone(),
                 idx.fields.body_trigrams => body.clone(),
                 idx.fields.path => rel.clone(),
-                idx.fields.location => "note",
+                // A note has no `Chunk`, but its location is still a label and still goes
+                // through the one serializer: written by hand, `note` would be stored unquoted
+                // and read back as an empty label.
+                idx.fields.location => store_location(&Location::Label("note".into())),
                 idx.fields.file_type => "note",
                 idx.fields.ord => 1u64,
             ));
@@ -3022,7 +3075,10 @@ pub fn reindex_dirs_at_locked(
                 idx.fields.body => body.clone(),
                 idx.fields.body_trigrams => body.clone(),
                 idx.fields.path => rel.clone(),
-                idx.fields.location => "note",
+                // A note has no `Chunk`, but its location is still a label and still goes
+                // through the one serializer: written by hand, `note` would be stored unquoted
+                // and read back as an empty label.
+                idx.fields.location => store_location(&Location::Label("note".into())),
                 idx.fields.file_type => "note",
                 idx.fields.ord => 1u64,
             ));
@@ -4695,6 +4751,170 @@ mod search_tests {
             idx.location_for_ord("d.md", 1).unwrap(),
             Some(String::new())
         );
+    }
+
+    /// The stored form must go through serde, not be written raw. A label that looks like a JSON
+    /// array is the case that tells the two apart: written raw it reads back as a `Path`.
+    #[test]
+    fn a_label_that_looks_like_an_array_round_trips_as_a_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[Chunk::labelled(
+            PathBuf::from("d.md"),
+            "md".into(),
+            "[\"a\"]".into(),
+            "body".into(),
+        )])
+        .unwrap();
+        assert_eq!(
+            idx.location_of("d.md", 1).unwrap(),
+            Some(Location::Label("[\"a\"]".into())),
+            "a label whose text IS a JSON array must come back a label, not a one-segment path"
+        );
+        assert_eq!(
+            idx.location_for_ord("d.md", 1).unwrap(),
+            Some("[\"a\"]".to_string()),
+            "and it renders verbatim"
+        );
+    }
+
+    /// JSON-special characters in a label survive byte-identically — the other half of "not raw".
+    #[test]
+    fn a_label_with_quotes_and_backslashes_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let label = "say \"hi\" \\ bye";
+        idx.write_chunks(&[Chunk::labelled(
+            PathBuf::from("d.md"),
+            "md".into(),
+            label.into(),
+            "body".into(),
+        )])
+        .unwrap();
+        assert_eq!(
+            idx.location_of("d.md", 1).unwrap(),
+            Some(Location::Label(label.into()))
+        );
+        assert_eq!(
+            idx.location_for_ord("d.md", 1).unwrap(),
+            Some(label.to_string()),
+            "the quoting is the storage layer's, never the author's text"
+        );
+    }
+
+    /// The segments come back as they were emitted, separator and all — the case that was
+    /// unrepresentable before and is the whole reason the stored form is structured.
+    #[test]
+    fn segments_containing_the_separator_survive_an_index_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[Chunk::nested(
+            PathBuf::from("d.md"),
+            "md".into(),
+            vec!["A > B".into(), "C".into()],
+            "needle body".into(),
+        )])
+        .unwrap();
+        assert_eq!(
+            idx.location_of("d.md", 1).unwrap(),
+            Some(Location::Path(vec!["A > B".into(), "C".into()])),
+            "two segments, the first of which contains the separator"
+        );
+        // And every consumer still sees the one rendering it always saw.
+        assert_eq!(
+            idx.location_for_ord("d.md", 1).unwrap(),
+            Some("A > B > C".to_string())
+        );
+        let hits = idx.search("needle", 10).unwrap();
+        assert_eq!(hits[0].location, "A > B > C", "a hit carries the rendering");
+    }
+
+    /// The note write path has no `Chunk` in scope and so is the one place a hand-written JSON
+    /// literal could have been spelled out: an unquoted `note` compiles and then fails to parse.
+    /// `index_dir` drives the write in `index_dir_at_locked`; the freshen pass in
+    /// `reindex_dirs_at_locked` is the same call to the same serializer.
+    #[cfg(feature = "notebook")]
+    #[test]
+    fn a_notes_stored_location_round_trips_as_the_label_note() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("doc.md"), b"# Doc\nbody\n").unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let note_dir = dir.path().join(".glossa").join("notes").join("doc.md");
+        fs::create_dir_all(&note_dir).unwrap();
+        fs::write(note_dir.join("limits.csp"), b"sentinel note text").unwrap();
+        index_dir(dir.path(), false).unwrap();
+
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        assert_eq!(
+            idx.location_of("doc.md/limits.csp", 1).unwrap(),
+            Some(Location::Label("note".into())),
+            "the note's location parses back as a label; an unquoted `note` would read empty"
+        );
+        assert_eq!(
+            idx.location_for_ord("doc.md/limits.csp", 1).unwrap(),
+            Some("note".to_string())
+        );
+    }
+
+    /// Storing the structure must not change what a location RENDERS to: for every chunk the
+    /// extractors emit from the office fixtures, the string an indexed hit hands back is the one
+    /// `display()` produced before this commit, and the shape survives too — which the stored
+    /// rendering could never carry. `sample_chart.docx` earns its place: it is the fixture that
+    /// holds a chart chunk next to body chunks, so a chart built with `Chunk::nested` fails here.
+    #[test]
+    fn fixture_locations_render_unchanged_and_keep_their_shape() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let mut shapes = (0usize, 0usize); // (paths, labels) seen across the whole set
+        for name in [
+            "sample.docx",
+            "sample_table.docx",
+            "sample_chart.docx",
+            "sample.odt",
+            "sample.ods",
+            "sample.odp",
+            "sample_legacy.doc",
+            "sample_legacy.xls",
+        ] {
+            let file = fixtures.join(name);
+            let mut chunks = Vec::new();
+            crate::extract::extract_file(&file, &mut |c| chunks.push(c)).unwrap();
+            assert!(!chunks.is_empty(), "{name}: nothing extracted");
+            idx.write_chunks(&chunks).unwrap();
+            let key = file.to_string_lossy().to_string();
+            for (i, c) in chunks.iter().enumerate() {
+                let ord = (i + 1) as u64;
+                assert_eq!(
+                    idx.location_of(&key, ord).unwrap().as_ref(),
+                    Some(&c.location),
+                    "{name}#{ord}: the stored location lost its structure"
+                );
+                assert_eq!(
+                    idx.location_for_ord(&key, ord).unwrap(),
+                    Some(c.location.display()),
+                    "{name}#{ord}: the rendering changed"
+                );
+                if c.location.is_nested() {
+                    shapes.0 += 1;
+                } else {
+                    shapes.1 += 1;
+                }
+            }
+            if name == "sample_chart.docx" {
+                // A chart is an attachment, not a container the author wrote headings into.
+                assert!(
+                    chunks
+                        .iter()
+                        .any(|c| c.text.starts_with("Chart:") && !c.location.is_nested()),
+                    "the chart chunk's location must be a flat label"
+                );
+            }
+        }
+        // Both arms of the stored encoding — a JSON array and a JSON string — are exercised above
+        // rather than only one of them (the office fixtures carry sheet and slide names).
+        assert!(shapes.0 > 0, "no Path location in the fixture set");
+        assert!(shapes.1 > 0, "no Label location in the fixture set");
     }
 
     #[test]
