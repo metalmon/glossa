@@ -2876,8 +2876,17 @@ fn main() -> anyhow::Result<()> {
                 let ont = glossa::graph::ontology::Ontology::load_or_default(&path);
                 let now = glossa::trace::now_ms();
                 let g = glossa::graph::store::GraphStore::open(&path)?;
+                // This arm takes its corpus straight from the positional `path` and never resolves
+                // multi-root inputs (its siblings call `resolve_inputs`; it does not). One
+                // unlabelled root is exactly what `doc_file_in` treats as `root.join(key)`, so this
+                // reproduces what the importer did when it took a single `&Path`. Giving `graph
+                // import` real root resolution is a separate change, not part of this fix.
+                let roots = [glossa::root::Root {
+                    label: String::new(),
+                    path: path.clone(),
+                }];
                 let (pruned, n, ed) =
-                    glossa::graph::io::import_layer(&g, &ont, export, now, &rr.roots, mode.into())?;
+                    glossa::graph::io::import_layer(&g, &ont, export, now, &roots, mode.into())?;
                 println!(
                     "graph import ({}): pruned {pruned}, +{n} nodes, +{ed} edges",
                     match mode {
