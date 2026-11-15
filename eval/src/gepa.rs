@@ -128,15 +128,19 @@ fn gold_pairs(gold: &[String]) -> Vec<(String, String)> {
     gold.iter().filter_map(|g| parse_gold_loc(g)).collect()
 }
 
-/// A gold suffix is an ord only when purely numeric or `p.<digits>`/`part.<digits>`.
-/// An arbitrary heading (even one containing digits) is NOT coerced.
+/// A gold suffix is an ord only when purely numeric. An arbitrary heading (even one containing
+/// digits) is NOT coerced, and neither is a `p.<digits>`/`part.<digits>` page label.
+///
+/// Those two labels used to be coerced to the number after the prefix, from the era when a chunk
+/// was addressed by its display label as well as by its ordinal. The ordinal is the address now,
+/// and the live dataset agrees: all 494 `source` refs across its 175 cases are `path#<digits>`,
+/// with no `p.N` or `part.N` among them. The only `#p.N` strings left in the tree sit in recorded
+/// run outputs under `.glossa/kbx/runs/*/cases/`, which are history, not gold. The form is no
+/// longer accepted — a gold ref written that way is a dataset error and should fail to match
+/// rather than be guessed into an ordinal that may address a different chunk.
 pub(crate) fn gold_ord(gl: &str) -> Option<u64> {
-    let s = gl
-        .strip_prefix("p.")
-        .or_else(|| gl.strip_prefix("part."))
-        .unwrap_or(gl);
-    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
-        s.parse().ok()
+    if !gl.is_empty() && gl.bytes().all(|b| b.is_ascii_digit()) {
+        gl.parse().ok()
     } else {
         None
     }
@@ -2273,10 +2277,14 @@ mod tests {
         };
         assert!(search_hit_hits(&[pdf], &gold));
         assert!(search_hit_hits(&[office], &gold));
-        assert_eq!(gold_ord("p.14"), Some(14));
         assert_eq!(gold_ord("14"), Some(14));
         assert_eq!(gold_ord("A > B"), None);
         assert_eq!(gold_ord("4.1.3 Safety"), None); // heading with digits is NOT an ord
+                                                    // A page label is no longer coerced to the number inside it. The ordinal is the address;
+                                                    // a gold ref still written `p.14` is a dataset error, and failing to match says so, where
+                                                    // guessing an ordinal out of it could silently score against a different chunk.
+        assert_eq!(gold_ord("p.14"), None);
+        assert_eq!(gold_ord("part.14"), None);
     }
 
     #[test]
