@@ -502,12 +502,12 @@ fn agent_style_upsert_builds_enum_constraint() {
     let dir = tempfile::tempdir().unwrap();
     let g = setup_corpus(dir.path());
     let idx = glossa::index::store::DocIndex::open_or_create(dir.path()).unwrap();
-    idx.write_chunks(&[glossa::model::Chunk {
-        doc_path: "spec.docx".into(),
-        location: "S1".into(),
-        file_type: "docx".into(),
-        text: "Outer diameter: 125, 150".into(),
-    }])
+    idx.write_chunks(&[glossa::model::Chunk::nested(
+        "spec.docx".into(),
+        "docx".into(),
+        vec!["S1".into()],
+        "Outer diameter: 125, 150".into(),
+    )])
     .unwrap();
     let ont = glossa::graph::ontology::Ontology::parse(ONTOLOGY_TOML).unwrap();
 

@@ -50,7 +50,7 @@ pub fn build_section(g: &GraphStore, chunk: &Chunk, ord: u64, sig: FileSig) -> a
     let created_at = now_secs();
     let prov = Provenance {
         source_path: path.clone(),
-        range: Some(chunk.location.clone()),
+        range: Some(chunk.location.display()),
         file_sig: Some(sig),
         origin: "auto-structural".into(),
         confidence: 1.0,
@@ -63,7 +63,7 @@ pub fn build_section(g: &GraphStore, chunk: &Chunk, ord: u64, sig: FileSig) -> a
     g.put_node(&Node {
         id: sec_id.clone(),
         node_type: "Section".into(),
-        label: chunk.location.clone(),
+        label: chunk.location.display(),
         aliases: vec![],
         prov: prov.clone(),
     })?;
@@ -137,14 +137,15 @@ pub fn link_reference(
 }
 
 /// Nearest existing ancestor of `location` among the per-file `seen` (location → sec_id) map:
-/// the longest breadcrumb prefix (split on " > ") that has a Section node. None for top-level / PDF.
+/// the longest breadcrumb prefix (split on `LOCATION_SEP`) that has a Section node. None for
+/// top-level / PDF.
 pub fn nearest_ancestor(
     seen: &std::collections::HashMap<String, String>,
     location: &str,
 ) -> Option<String> {
-    let segs: Vec<&str> = location.split(" > ").collect();
+    let segs: Vec<&str> = location.split(crate::model::LOCATION_SEP).collect();
     for k in (1..segs.len()).rev() {
-        let prefix = segs[..k].join(" > ");
+        let prefix = segs[..k].join(crate::model::LOCATION_SEP);
         if let Some(id) = seen.get(&prefix) {
             return Some(id.clone());
         }

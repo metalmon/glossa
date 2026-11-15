@@ -81,12 +81,12 @@ impl Windower {
     fn flush_pending(&mut self, sink: &mut dyn FnMut(Chunk)) {
         if let Some(text) = self.pending.take() {
             self.emitted += 1;
-            sink(Chunk {
-                doc_path: self.path.clone(),
-                location: String::new(),
-                file_type: self.file_type.clone(),
+            sink(Chunk::labelled(
+                self.path.clone(),
+                self.file_type.clone(),
+                String::new(),
                 text,
-            });
+            ));
         }
     }
 
@@ -120,20 +120,20 @@ impl Windower {
         // Now emit the last pending window; location is always empty, ord order carries position.
         if let Some(text) = self.pending.take() {
             if self.emitted == 0 {
-                sink(Chunk {
-                    doc_path: self.path.clone(),
-                    location: String::new(),
-                    file_type: self.file_type.clone(),
+                sink(Chunk::labelled(
+                    self.path.clone(),
+                    self.file_type.clone(),
+                    String::new(),
                     text,
-                });
+                ));
             } else {
                 self.emitted += 1;
-                sink(Chunk {
-                    doc_path: self.path,
-                    location: String::new(),
-                    file_type: self.file_type,
+                sink(Chunk::labelled(
+                    self.path,
+                    self.file_type,
+                    String::new(),
                     text,
-                });
+                ));
             }
         }
     }
@@ -273,7 +273,7 @@ mod window_tests {
     fn single_window_has_empty_location() {
         let out = run(&["alpha", "beta"]);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].location, "");
+        assert_eq!(out[0].location.display(), "");
         assert!(out[0].text.contains("alpha") && out[0].text.contains("beta"));
         assert_eq!(out[0].file_type, "txt");
     }
@@ -283,7 +283,10 @@ mod window_tests {
         let many: Vec<&str> = (0..250).map(|_| "x").collect();
         let out = run(&many);
         assert_eq!(out.len(), 3); // 100 + 100 + 50 lines
-        assert!(out.iter().all(|c| c.location.is_empty()), "no part.N label");
+        assert!(
+            out.iter().all(|c| c.location.display().is_empty()),
+            "no part.N label"
+        );
         let total_lines: usize = out.iter().map(|c| c.text.lines().count()).sum();
         assert_eq!(total_lines, 250); // every line preserved, order = ord order
     }
@@ -302,7 +305,7 @@ mod stream_tests {
         stream_text(&p, "txt", &mut |c| out.push(c)).unwrap();
         assert_eq!(out.len(), 1);
         assert!(out[0].text.contains("line one") && out[0].text.contains("line two"));
-        assert_eq!(out[0].location, "");
+        assert_eq!(out[0].location.display(), "");
     }
 
     #[test]
@@ -337,7 +340,7 @@ mod stream_tests {
         assert!(out.len() >= 3);
         let total: usize = out.iter().map(|c| c.text.lines().count()).sum();
         assert_eq!(total, 250);
-        assert!(out[0].location.is_empty(), "no part.N label");
+        assert!(out[0].location.display().is_empty(), "no part.N label");
     }
 
     #[test]

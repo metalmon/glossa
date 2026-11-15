@@ -360,12 +360,12 @@ mod tests {
         std::fs::create_dir_all(&tables).unwrap();
         std::fs::write(tables.join("t.csp"), csv).unwrap();
         let idx = DocIndex::open_or_create(dir).unwrap();
-        idx.write_chunks(&[Chunk {
-            doc_path: doc.into(),
-            location: String::new(),
-            file_type: "pdf".into(),
-            text: "stub".into(),
-        }])
+        idx.write_chunks(&[Chunk::labelled(
+            doc.into(),
+            "pdf".into(),
+            String::new(),
+            "stub".into(),
+        )])
         .unwrap();
     }
 
@@ -436,12 +436,12 @@ mod tests {
         std::fs::create_dir_all(&tables).unwrap();
         std::fs::write(tables.join("bond.csp"), "Binder\nA1\nA2\n").unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        idx.write_chunks(&[Chunk {
-            doc_path: doc.into(),
-            location: String::new(),
-            file_type: "pdf".into(),
-            text: "stub".into(),
-        }])
+        idx.write_chunks(&[Chunk::labelled(
+            doc.into(),
+            "pdf".into(),
+            String::new(),
+            "stub".into(),
+        )])
         .unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = eval_ontology();
@@ -511,12 +511,12 @@ mod tests {
         };
         write_csp("Type\tOuter diameter\n1\t10\n1\t20\n2\t30\n");
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        idx.write_chunks(&[Chunk {
-            doc_path: doc.into(),
-            location: String::new(),
-            file_type: "pdf".into(),
-            text: "stub".into(),
-        }])
+        idx.write_chunks(&[Chunk::labelled(
+            doc.into(),
+            "pdf".into(),
+            String::new(),
+            "stub".into(),
+        )])
         .unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = eval_ontology();

@@ -242,12 +242,14 @@ pub fn extract_charts(path: &Path, bytes: &[u8], ext: &str) -> Vec<Chunk> {
             format!("Chart: {} ({})", title, cd.kind)
         };
         let text = format!("{}\n\n{}", header, body);
-        out.push(Chunk {
-            doc_path: path.to_path_buf(),
-            location: title,
-            file_type: ext.to_string(),
+        // A chart is an attachment hanging off the sheet, not a container with children: nothing
+        // is ever addressed as living *inside* "Chart 1", so its title is a label, not a path.
+        out.push(Chunk::labelled(
+            path.to_path_buf(),
+            ext.to_string(),
+            title,
             text,
-        });
+        ));
     }
     out
 }

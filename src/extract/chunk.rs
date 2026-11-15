@@ -36,12 +36,12 @@ fn push_chunk(
         buf.clear();
         return;
     }
-    out.push(Chunk {
-        doc_path: path.to_path_buf(),
-        location: heading_path.join(" > "),
-        file_type: file_type.to_string(),
-        text: std::mem::take(buf),
-    });
+    out.push(Chunk::nested(
+        path.to_path_buf(),
+        file_type.to_string(),
+        heading_path.to_vec(),
+        std::mem::take(buf),
+    ));
 }
 
 /// Split Markdown (or Markdown rendered from another format) into heading-scoped chunks.
@@ -94,7 +94,7 @@ mod tests {
         let chunks = chunk_markdown(Path::new("x.docx"), "# H\nbody\n", "docx");
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].file_type, "docx");
-        assert_eq!(chunks[0].location, "H");
+        assert_eq!(chunks[0].location.display(), "H");
     }
 
     #[test]
@@ -104,7 +104,7 @@ mod tests {
             "# **SECTION** > `code`\nbody\n",
             "docx",
         );
-        assert_eq!(chunks[0].location, "SECTION > code");
+        assert_eq!(chunks[0].location.display(), "SECTION > code");
     }
 
     #[test]
@@ -133,7 +133,11 @@ mod tests {
         let chunks = chunk_markdown(Path::new("x.md"), "# H\nbody\n", "md");
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, "# H\nbody\n");
-        assert_eq!(chunks[0].location, "H", "the breadcrumb is unchanged");
+        assert_eq!(
+            chunks[0].location.display(),
+            "H",
+            "the breadcrumb is unchanged"
+        );
     }
 
     /// Headings with nothing between them (a title directly over its first subsection) do not
@@ -144,9 +148,9 @@ mod tests {
         let chunks = chunk_markdown(Path::new("x.md"), "# A\n## B\nbody b\n## C\nbody c\n", "md");
         assert_eq!(chunks.len(), 2, "same count as when headings were dropped");
         assert_eq!(chunks[0].text, "# A\n## B\nbody b\n");
-        assert_eq!(chunks[0].location, "A > B");
+        assert_eq!(chunks[0].location.display(), "A > B");
         assert_eq!(chunks[1].text, "## C\nbody c\n");
-        assert_eq!(chunks[1].location, "A > C");
+        assert_eq!(chunks[1].location.display(), "A > C");
     }
 
     /// A heading at the very end with no body under it produced no chunk before, and still does not:

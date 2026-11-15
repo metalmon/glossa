@@ -2161,12 +2161,12 @@ mod tests {
     fn idx() -> (tempfile::TempDir, DocIndex) {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
-        i.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("MODULE.pdf"),
-            location: "p.7".into(),
-            file_type: "pdf".into(),
-            text: "response timeout param equals 3000".into(),
-        }])
+        i.write_chunks(&[Chunk::labelled(
+            PathBuf::from("MODULE.pdf"),
+            "pdf".into(),
+            "p.7".into(),
+            "response timeout param equals 3000".into(),
+        )])
         .unwrap();
         (d, i)
     }
@@ -2536,24 +2536,24 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
         i.write_chunks(&[
-            Chunk {
-                doc_path: PathBuf::from("d.pdf"),
-                location: "p.1".into(),
-                file_type: "pdf".into(),
-                text: "alpha".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("d.pdf"),
-                location: "p.2".into(),
-                file_type: "pdf".into(),
-                text: String::new(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("d.pdf"),
-                location: "p.3".into(),
-                file_type: "pdf".into(),
-                text: "charlie".into(),
-            },
+            Chunk::labelled(
+                PathBuf::from("d.pdf"),
+                "pdf".into(),
+                "p.1".into(),
+                "alpha".into(),
+            ),
+            Chunk::labelled(
+                PathBuf::from("d.pdf"),
+                "pdf".into(),
+                "p.2".into(),
+                String::new(),
+            ),
+            Chunk::labelled(
+                PathBuf::from("d.pdf"),
+                "pdf".into(),
+                "p.3".into(),
+                "charlie".into(),
+            ),
         ])
         .unwrap();
         let t = TraceLog::disabled();
@@ -2575,12 +2575,12 @@ mod tests {
         // The notebook resolves a note's doc-scoped path against an INDEXED document (same
         // validation `note`/`ls` use), so register the doc before writing a note under it.
         let doc = "some_std.docx";
-        idx.write_chunks(&[Chunk {
-            doc_path: PathBuf::from(doc),
-            location: "p.1".into(),
-            file_type: "docx".into(),
-            text: "placeholder".into(),
-        }])
+        idx.write_chunks(&[Chunk::labelled(
+            PathBuf::from(doc),
+            "docx".into(),
+            "p.1".into(),
+            "placeholder".into(),
+        )])
         .unwrap();
         // create a notebook file under the doc's mirror
         crate::notebook::note(dir.path(), &idx, doc, "sizes.csp", "D\n50\n63\n", false);
@@ -3770,18 +3770,18 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let dir = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(dir.path()).unwrap();
         i.write_chunks(&[
-            Chunk {
-                doc_path: PathBuf::from("docA.md"),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "response timeout param".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("docB.md"),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "response timeout param".into(),
-            },
+            Chunk::nested(
+                PathBuf::from("docA.md"),
+                "md".into(),
+                vec!["S1".into()],
+                "response timeout param".into(),
+            ),
+            Chunk::nested(
+                PathBuf::from("docB.md"),
+                "md".into(),
+                vec!["S1".into()],
+                "response timeout param".into(),
+            ),
         ])
         .unwrap();
         let t = TraceLog::disabled();
@@ -3814,12 +3814,12 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
     fn read_says_an_unindexed_file_is_unindexed_not_mistyped() {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
-        i.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("indexed.md"),
-            location: "S".into(),
-            file_type: "md".into(),
-            text: "body".into(),
-        }])
+        i.write_chunks(&[Chunk::nested(
+            PathBuf::from("indexed.md"),
+            "md".into(),
+            vec!["S".into()],
+            "body".into(),
+        )])
         .unwrap();
         std::fs::write(d.path().join("excluded.md"), b"# T\nbody\n").unwrap();
 
@@ -3853,12 +3853,12 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         std::fs::write(outside.path().join("secret.md"), b"x").unwrap();
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
-        i.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("indexed.md"),
-            location: "S".into(),
-            file_type: "md".into(),
-            text: "body".into(),
-        }])
+        i.write_chunks(&[Chunk::nested(
+            PathBuf::from("indexed.md"),
+            "md".into(),
+            vec!["S".into()],
+            "body".into(),
+        )])
         .unwrap();
         let t = TraceLog::disabled();
 
@@ -3934,18 +3934,18 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let i = DocIndex::open_or_create(d.path()).unwrap();
         let big = "X".repeat(5000); // > old 4000-char cap
         i.write_chunks(&[
-            Chunk {
-                doc_path: PathBuf::from("d.md"),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: big.clone(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("d.md"),
-                location: "S2".into(),
-                file_type: "md".into(),
-                text: "second".into(),
-            },
+            Chunk::nested(
+                PathBuf::from("d.md"),
+                "md".into(),
+                vec!["S1".into()],
+                big.clone(),
+            ),
+            Chunk::nested(
+                PathBuf::from("d.md"),
+                "md".into(),
+                vec!["S2".into()],
+                "second".into(),
+            ),
         ])
         .unwrap();
         let t = TraceLog::disabled();
@@ -3971,18 +3971,18 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
         i.write_chunks(&[
-            Chunk {
-                doc_path: PathBuf::from("d.md"),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "first chunk".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("d.md"),
-                location: "S2".into(),
-                file_type: "md".into(),
-                text: "second chunk".into(),
-            },
+            Chunk::nested(
+                PathBuf::from("d.md"),
+                "md".into(),
+                vec!["S1".into()],
+                "first chunk".into(),
+            ),
+            Chunk::nested(
+                PathBuf::from("d.md"),
+                "md".into(),
+                vec!["S2".into()],
+                "second chunk".into(),
+            ),
         ])
         .unwrap();
         let t = TraceLog::disabled();
@@ -4011,12 +4011,12 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
         // Real file name has a double space; the model copies it back with a single space.
-        i.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("dir/Safety Manual -  1_0_3.pdf"),
-            location: "p.1".into(),
-            file_type: "pdf".into(),
-            text: "safety body".into(),
-        }])
+        i.write_chunks(&[Chunk::labelled(
+            PathBuf::from("dir/Safety Manual -  1_0_3.pdf"),
+            "pdf".into(),
+            "p.1".into(),
+            "safety body".into(),
+        )])
         .unwrap();
         let t = TraceLog::disabled();
         let out = read(
@@ -4062,12 +4062,12 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "v_3.0/1_1_overview.htm",
             "v_3.0/2_2_appearance.htm",
         ] {
-            i.write_chunks(&[Chunk {
-                doc_path: PathBuf::from(p),
-                location: "p.1".into(),
-                file_type: "pdf".into(),
-                text: "x".into(),
-            }])
+            i.write_chunks(&[Chunk::labelled(
+                PathBuf::from(p),
+                "pdf".into(),
+                "p.1".into(),
+                "x".into(),
+            )])
             .unwrap();
         }
         // Model swapped spaces for underscores AND mistyped programming → programing;
@@ -4089,12 +4089,12 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
     fn read_tolerates_spurious_leading_prefix() {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
-        i.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("Archive DB\\doc.pdf"),
-            location: "p.1".into(),
-            file_type: "pdf".into(),
-            text: "body text".into(),
-        }])
+        i.write_chunks(&[Chunk::labelled(
+            PathBuf::from("Archive DB\\doc.pdf"),
+            "pdf".into(),
+            "p.1".into(),
+            "body text".into(),
+        )])
         .unwrap();
         let t = TraceLog::disabled();
         let out = read(
@@ -4117,12 +4117,12 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
     fn read_suggests_path_on_total_miss() {
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
-        i.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("Archive DB\\Calibration Guide PLCModule 2025.pdf"),
-            location: "p.1".into(),
-            file_type: "pdf".into(),
-            text: "x".into(),
-        }])
+        i.write_chunks(&[Chunk::labelled(
+            PathBuf::from("Archive DB\\Calibration Guide PLCModule 2025.pdf"),
+            "pdf".into(),
+            "p.1".into(),
+            "x".into(),
+        )])
         .unwrap();
         let t = TraceLog::disabled();
         let out = read(
@@ -4152,12 +4152,12 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             prov: prov(),
         })
         .unwrap();
-        i.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("evidence.md"),
-            location: "S1".into(),
-            file_type: "md".into(),
-            text: "evidence body".into(),
-        }])
+        i.write_chunks(&[Chunk::nested(
+            PathBuf::from("evidence.md"),
+            "md".into(),
+            vec!["S1".into()],
+            "evidence body".into(),
+        )])
         .unwrap();
         // ord is the chunk's sequence position (1), not its (display-only) location label.
         g.put_edge(&Edge {
@@ -4201,18 +4201,18 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let d = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(d.path()).unwrap();
         i.write_chunks(&[
-            Chunk {
-                doc_path: PathBuf::from("notes/doc_a.md"),
-                location: "p.1".into(),
-                file_type: "md".into(),
-                text: "alpha".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("notes/doc_b.md"),
-                location: "p.1".into(),
-                file_type: "md".into(),
-                text: "beta".into(),
-            },
+            Chunk::labelled(
+                PathBuf::from("notes/doc_a.md"),
+                "md".into(),
+                "p.1".into(),
+                "alpha".into(),
+            ),
+            Chunk::labelled(
+                PathBuf::from("notes/doc_b.md"),
+                "md".into(),
+                "p.1".into(),
+                "beta".into(),
+            ),
         ])
         .unwrap();
         let tlog = TraceLog::to_dir(d.path());
@@ -4272,12 +4272,12 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         // The notebook resolves a note's doc-scoped path against an INDEXED document (same
         // validation `note`/`ls` use), so register the doc before writing a note under it.
         let doc = "some_std.docx";
-        idx.write_chunks(&[Chunk {
-            doc_path: PathBuf::from(doc),
-            location: "p.1".into(),
-            file_type: "docx".into(),
-            text: "placeholder".into(),
-        }])
+        idx.write_chunks(&[Chunk::labelled(
+            PathBuf::from(doc),
+            "docx".into(),
+            "p.1".into(),
+            "placeholder".into(),
+        )])
         .unwrap();
         crate::notebook::note(dir.path(), &idx, doc, "sizes.csp", "D\n50\n63\n80\n", false);
         let opts = crate::grep::GrepOpts {
@@ -4946,12 +4946,12 @@ strict = true
     fn gather_mentions_surfaces_existing_chunk_and_filters_missing() {
         let dir = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(dir.path()).unwrap();
-        i.write_chunks(&[crate::model::Chunk {
-            doc_path: "d.pdf".into(),
-            location: "".into(),
-            file_type: "pdf".into(),
-            text: "x".into(),
-        }])
+        i.write_chunks(&[crate::model::Chunk::labelled(
+            "d.pdf".into(),
+            "pdf".into(),
+            String::new(),
+            "x".into(),
+        )])
         .unwrap();
         let g = GraphStore::open(dir.path()).unwrap();
         g.put_node(&node("fact:x", "Fact", "x")).unwrap();

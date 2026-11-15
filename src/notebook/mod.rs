@@ -418,12 +418,12 @@ fn write_note(
     std::fs::write(&abs_path, &full)?;
     // Write-through: index the note now so it is searchable in this session without waiting for a
     // read to freshen. Best-effort — a busy index (LockFailure) is fine; the delta pass catches up.
-    let _ = idx.write_chunks(&[crate::model::Chunk {
-        doc_path: std::path::PathBuf::from(&rel_path),
-        location: "note".into(),
-        file_type: "note".into(),
-        text: full.clone(),
-    }]);
+    let _ = idx.write_chunks(&[crate::model::Chunk::labelled(
+        std::path::PathBuf::from(&rel_path),
+        "note".into(),
+        "note".into(),
+        full.clone(),
+    )]);
     // Keep the delta baseline in sync so a read right after writing a note is a no-op (not a
     // redundant reindex): `lazy_reindex_if_changed` compares the note's on-disk `file_sig` to
     // `manifest.notes[rel_path]`, which the write-through above never touched. Best-effort under
@@ -519,12 +519,12 @@ mod tests {
 
     fn idx_with_doc(dir: &std::path::Path, doc: &str) -> DocIndex {
         let idx = DocIndex::open_or_create(dir).unwrap();
-        idx.write_chunks(&[Chunk {
-            doc_path: doc.into(),
-            location: String::new(),
-            file_type: "pdf".into(),
-            text: "stub".into(),
-        }])
+        idx.write_chunks(&[Chunk::labelled(
+            doc.into(),
+            "pdf".into(),
+            String::new(),
+            "stub".into(),
+        )])
         .unwrap();
         idx
     }
@@ -800,18 +800,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
-            Chunk {
-                doc_path: "doc.pdf".into(),
-                location: String::new(),
-                file_type: "pdf".into(),
-                text: "a".into(),
-            },
-            Chunk {
-                doc_path: "doc.docx".into(),
-                location: String::new(),
-                file_type: "docx".into(),
-                text: "b".into(),
-            },
+            Chunk::labelled("doc.pdf".into(), "pdf".into(), String::new(), "a".into()),
+            Chunk::labelled("doc.docx".into(), "docx".into(), String::new(), "b".into()),
         ])
         .unwrap();
         note(dir.path(), &idx, "doc.pdf", "parameters.md", "pdf\n", false);

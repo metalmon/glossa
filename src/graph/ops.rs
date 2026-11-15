@@ -1907,12 +1907,12 @@ strict = false
 
     /// Index a stub document so `has_document` accepts `path` as a valid source_path.
     fn write_doc(idx: &DocIndex, path: &str) {
-        idx.write_chunks(&[crate::model::Chunk {
-            doc_path: path.into(),
-            location: "S1".into(),
-            file_type: "md".into(),
-            text: "stub content".into(),
-        }])
+        idx.write_chunks(&[crate::model::Chunk::nested(
+            path.into(),
+            "md".into(),
+            vec!["S1".into()],
+            "stub content".into(),
+        )])
         .unwrap();
     }
 
@@ -2353,12 +2353,12 @@ strict = false
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
-        idx.write_chunks(&[crate::model::Chunk {
-            doc_path: "docs\\case1.docx".into(),
-            location: "1".into(),
-            file_type: "docx".into(),
-            text: "hello".into(),
-        }])
+        idx.write_chunks(&[crate::model::Chunk::labelled(
+            "docs\\case1.docx".into(),
+            "docx".into(),
+            "1".into(),
+            "hello".into(),
+        )])
         .unwrap();
         crate::graph::build::build_document(
             &g,
@@ -2737,12 +2737,12 @@ strict = false
     fn resolve_section_ref_prefixed_path() {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        idx.write_chunks(&[crate::model::Chunk {
-            doc_path: "docs\\real.md".into(),
-            location: "Introduction".into(),
-            file_type: "md".into(),
-            text: "section content".into(),
-        }])
+        idx.write_chunks(&[crate::model::Chunk::nested(
+            "docs\\real.md".into(),
+            "md".into(),
+            vec!["Introduction".into()],
+            "section content".into(),
+        )])
         .unwrap();
         // A numeric ref keeps its ordinal (`#1`), not the chunk's heading location.
         let resolved = resolve_section_ref(&idx, "kb-manual\\docs\\real.md#1").unwrap();
@@ -2754,18 +2754,18 @@ strict = false
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
-            crate::model::Chunk {
-                doc_path: "spec.pdf".into(),
-                location: "p.3".into(),
-                file_type: "pdf".into(),
-                text: "body".into(),
-            },
-            crate::model::Chunk {
-                doc_path: "spec.pdf".into(),
-                location: "p.4".into(),
-                file_type: "pdf".into(),
-                text: String::new(),
-            },
+            crate::model::Chunk::labelled(
+                "spec.pdf".into(),
+                "pdf".into(),
+                "p.3".into(),
+                "body".into(),
+            ),
+            crate::model::Chunk::labelled(
+                "spec.pdf".into(),
+                "pdf".into(),
+                "p.4".into(),
+                String::new(),
+            ),
         ])
         .unwrap();
         // ord is the chunk's sequence position (1-based), not the page number encoded in
@@ -2813,12 +2813,12 @@ to = ["Enum"]
 "#,
         )
         .unwrap();
-        idx.write_chunks(&[crate::model::Chunk {
-            doc_path: "spec.pdf".into(),
-            location: String::new(),
-            file_type: "pdf".into(),
-            text: "values table".into(),
-        }])
+        idx.write_chunks(&[crate::model::Chunk::labelled(
+            "spec.pdf".into(),
+            "pdf".into(),
+            String::new(),
+            "values table".into(),
+        )])
         .unwrap();
         assert!(
             !graph_upsert(
@@ -2876,12 +2876,12 @@ to = ["Enum"]
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
-        idx.write_chunks(&[crate::model::Chunk {
-            doc_path: "spec.docx".into(),
-            location: String::new(),
-            file_type: "docx".into(),
-            text: "table of allowed values".into(),
-        }])
+        idx.write_chunks(&[crate::model::Chunk::labelled(
+            "spec.docx".into(),
+            "docx".into(),
+            String::new(),
+            "table of allowed values".into(),
+        )])
         .unwrap();
         // Bare "#1" target (no path) — the model's short form.
         let out = graph_upsert(
@@ -2917,12 +2917,12 @@ to = ["Enum"]
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
-        idx.write_chunks(&[crate::model::Chunk {
-            doc_path: "spec.docx".into(),
-            location: String::new(),
-            file_type: "docx".into(),
-            text: "table".into(),
-        }])
+        idx.write_chunks(&[crate::model::Chunk::labelled(
+            "spec.docx".into(),
+            "docx".into(),
+            String::new(),
+            "table".into(),
+        )])
         .unwrap();
         let out = graph_upsert(
             &idx,
@@ -2968,12 +2968,12 @@ to = ["Enum"]
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
-        idx.write_chunks(&[crate::model::Chunk {
-            doc_path: "spec.docx".into(),
-            location: String::new(),
-            file_type: "docx".into(),
-            text: "table".into(),
-        }])
+        idx.write_chunks(&[crate::model::Chunk::labelled(
+            "spec.docx".into(),
+            "docx".into(),
+            String::new(),
+            "table".into(),
+        )])
         .unwrap();
         assert!(
             !graph_upsert(
@@ -3013,12 +3013,12 @@ to = ["Enum"]
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
-        idx.write_chunks(&[crate::model::Chunk {
-            doc_path: "d.md".into(),
-            location: "Intro".into(),
-            file_type: "md".into(),
-            text: "content".into(),
-        }])
+        idx.write_chunks(&[crate::model::Chunk::nested(
+            "d.md".into(),
+            "md".into(),
+            vec!["Intro".into()],
+            "content".into(),
+        )])
         .unwrap();
         let mut n = unode("Symptom", "Type", "d.md");
         n.aliases = vec!["41".into(), "42".into()];
@@ -3056,12 +3056,12 @@ to = ["Enum"]
         let ont = Ontology::parse(DEDUP_ONT).unwrap();
 
         // Index a real document with a known location so we can resolve chunk refs.
-        idx.write_chunks(&[crate::model::Chunk {
-            doc_path: "real.md".into(),
-            location: "Introduction".into(),
-            file_type: "md".into(),
-            text: "section content".into(),
-        }])
+        idx.write_chunks(&[crate::model::Chunk::nested(
+            "real.md".into(),
+            "md".into(),
+            vec!["Introduction".into()],
+            "section content".into(),
+        )])
         .unwrap();
 
         // Upsert two reasoning nodes + RESOLVED_BY edge.

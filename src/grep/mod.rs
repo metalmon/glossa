@@ -519,11 +519,10 @@ mod tests {
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let cs: Vec<Chunk> = chunks
             .iter()
-            .map(|(p, loc, ft, t)| Chunk {
-                doc_path: PathBuf::from(p),
-                location: (*loc).into(),
-                file_type: (*ft).into(),
-                text: (*t).into(),
+            // The helper takes an opaque location string — "S1" here, "p.1" there — so it keeps it
+            // verbatim as a label rather than claiming a container path it cannot know about.
+            .map(|(p, loc, ft, t)| {
+                Chunk::labelled(PathBuf::from(p), (*ft).into(), (*loc).into(), (*t).into())
             })
             .collect();
         idx.write_chunks(&cs).unwrap();

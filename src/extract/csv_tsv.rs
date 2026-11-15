@@ -58,12 +58,12 @@ pub fn stream(path: &Path, file_type: &str, sink: &mut dyn FnMut(Chunk)) -> anyh
         if buf.trim().is_empty() {
             return;
         }
-        sink(Chunk {
-            doc_path: path.to_path_buf(),
-            location: format!("rows {start}-{end}"),
-            file_type: file_type.to_string(),
-            text: std::mem::take(buf),
-        });
+        sink(Chunk::labelled(
+            path.to_path_buf(),
+            file_type.to_string(),
+            format!("rows {start}-{end}"),
+            std::mem::take(buf),
+        ));
     };
 
     while let Some(line) = lines.next_line()? {
@@ -110,8 +110,8 @@ mod tests {
         assert_eq!(out.len(), 2); // 100 + 50
         assert!(out[0].text.starts_with("name,age"));
         assert!(out[1].text.starts_with("name,age"));
-        assert_eq!(out[0].location, "rows 1-100");
-        assert_eq!(out[1].location, "rows 101-150");
+        assert_eq!(out[0].location.display(), "rows 1-100");
+        assert_eq!(out[1].location.display(), "rows 101-150");
         assert_eq!(rows(&out), 150);
     }
 

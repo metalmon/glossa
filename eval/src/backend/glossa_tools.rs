@@ -757,12 +757,12 @@ mod tests {
     fn read_accepts_integer_or_digit_string_and_returns_chunk() {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        idx.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("d.pdf"),
-            location: "p.7".into(),
-            file_type: "pdf".into(),
-            text: "seventh page".into(),
-        }])
+        idx.write_chunks(&[Chunk::labelled(
+            PathBuf::from("d.pdf"),
+            "pdf".into(),
+            "p.7".into(),
+            "seventh page".into(),
+        )])
         .unwrap();
         let trace = TraceLog::disabled();
 
@@ -806,11 +806,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let chunks: Vec<Chunk> = (1..=12)
-            .map(|i| Chunk {
-                doc_path: PathBuf::from(format!("d{i}.md")),
-                location: String::new(),
-                file_type: "md".into(),
-                text: format!("needle chunk number {i}"),
+            .map(|i| {
+                Chunk::labelled(
+                    PathBuf::from(format!("d{i}.md")),
+                    "md".into(),
+                    String::new(),
+                    format!("needle chunk number {i}"),
+                )
             })
             .collect();
         idx.write_chunks(&chunks).unwrap();
@@ -891,13 +893,13 @@ mod tests {
     fn grep_tool_finds_exact_token_via_exec() {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        idx.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("d.pdf"),
-            // ord = seq now (no "p.N" parsing); a real PDF chunk carries no page label.
-            location: String::new(),
-            file_type: "pdf".into(),
-            text: "parameter maxTsdr equals 3000".into(),
-        }])
+        // ord = seq now (no "p.N" parsing); a real PDF chunk carries no page label.
+        idx.write_chunks(&[Chunk::labelled(
+            PathBuf::from("d.pdf"),
+            "pdf".into(),
+            String::new(),
+            "parameter maxTsdr equals 3000".into(),
+        )])
         .unwrap();
         let trace = TraceLog::disabled();
         let out = exec(
@@ -920,18 +922,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
-            Chunk {
-                doc_path: PathBuf::from("a.pdf"),
-                location: "p.1".into(),
-                file_type: "pdf".into(),
-                text: "Density F24".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("b.pdf"),
-                location: "p.1".into(),
-                file_type: "pdf".into(),
-                text: "Density F60".into(),
-            },
+            Chunk::labelled(
+                PathBuf::from("a.pdf"),
+                "pdf".into(),
+                "p.1".into(),
+                "Density F24".into(),
+            ),
+            Chunk::labelled(
+                PathBuf::from("b.pdf"),
+                "pdf".into(),
+                "p.1".into(),
+                "Density F60".into(),
+            ),
         ])
         .unwrap();
         let trace = TraceLog::disabled();
@@ -954,18 +956,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
-            Chunk {
-                doc_path: PathBuf::from("TEMPLATE.pdf"),
-                location: "p.1".into(),
-                file_type: "pdf".into(),
-                text: "hot swap".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("Other.pdf"),
-                location: "p.1".into(),
-                file_type: "pdf".into(),
-                text: "hot swap".into(),
-            },
+            Chunk::labelled(
+                PathBuf::from("TEMPLATE.pdf"),
+                "pdf".into(),
+                "p.1".into(),
+                "hot swap".into(),
+            ),
+            Chunk::labelled(
+                PathBuf::from("Other.pdf"),
+                "pdf".into(),
+                "p.1".into(),
+                "hot swap".into(),
+            ),
         ])
         .unwrap();
         let trace = TraceLog::disabled();
@@ -1088,12 +1090,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("note.txt"), b"hello source file").unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        idx.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("note.txt"),
-            location: "1".into(),
-            file_type: "txt".into(),
-            text: "hello source file".into(),
-        }])
+        idx.write_chunks(&[Chunk::labelled(
+            PathBuf::from("note.txt"),
+            "txt".into(),
+            "1".into(),
+            "hello source file".into(),
+        )])
         .unwrap();
         let trace = TraceLog::disabled();
 

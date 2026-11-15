@@ -1004,9 +1004,14 @@ mod tests {
         let chunks = RtfExtractor.extract(Path::new("doc.rtf"), rtf).unwrap();
         assert!(!chunks.is_empty());
         assert!(
-            chunks.iter().any(|c| c.location.contains("Chapter One")),
+            chunks
+                .iter()
+                .any(|c| c.location.display().contains("Chapter One")),
             "no heading path in {:?}",
-            chunks.iter().map(|c| &c.location).collect::<Vec<_>>()
+            chunks
+                .iter()
+                .map(|c| c.location.display())
+                .collect::<Vec<_>>()
         );
         assert_eq!(chunks[0].file_type, "rtf");
     }

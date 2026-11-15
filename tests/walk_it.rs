@@ -12,8 +12,8 @@ fn collects_chunks_from_markdown_files_in_tree() {
     let chunks = collect_chunks(dir.path(), None, true).unwrap();
     // 2 markdown chunks + 1 text chunk (catch-all now indexes .txt files too)
     assert_eq!(chunks.len(), 3);
-    assert!(chunks.iter().any(|c| c.location == "Title"));
-    assert!(chunks.iter().any(|c| c.location == "Other"));
+    assert!(chunks.iter().any(|c| c.location.display() == "Title"));
+    assert!(chunks.iter().any(|c| c.location.display() == "Other"));
 }
 
 #[test]
@@ -24,7 +24,7 @@ fn glob_filters_paths() {
 
     let chunks = collect_chunks(dir.path(), Some("**/keep.md"), true).unwrap();
     assert_eq!(chunks.len(), 1);
-    assert_eq!(chunks[0].location, "K");
+    assert_eq!(chunks[0].location.display(), "K");
 }
 
 #[test]
@@ -35,15 +35,15 @@ fn respects_gitignore_by_default() {
     fs::write(dir.path().join("secret.md"), b"# S\nsecret\n").unwrap();
 
     let respected = collect_chunks(dir.path(), None, true).unwrap();
-    assert!(respected.iter().any(|c| c.location == "K"));
+    assert!(respected.iter().any(|c| c.location.display() == "K"));
     assert!(
-        !respected.iter().any(|c| c.location == "S"),
+        !respected.iter().any(|c| c.location.display() == "S"),
         "gitignored file must be skipped"
     );
 
     let all = collect_chunks(dir.path(), None, false).unwrap();
     assert!(
-        all.iter().any(|c| c.location == "S"),
+        all.iter().any(|c| c.location.display() == "S"),
         "--no-ignore indexes everything"
     );
 }

@@ -71,12 +71,12 @@ fn heal_round_trip_through_real_grounding_path() {
     std::fs::write(&doc_path, b"original content").unwrap();
 
     let idx = DocIndex::open_or_create(root).unwrap();
-    idx.write_chunks(&[Chunk {
-        doc_path: "case1.docx".into(),
-        location: "S1".into(),
-        file_type: "docx".into(),
-        text: "stub content".into(),
-    }])
+    idx.write_chunks(&[Chunk::nested(
+        "case1.docx".into(),
+        "docx".into(),
+        vec!["S1".into()],
+        "stub content".into(),
+    )])
     .unwrap();
 
     let g = GraphStore::open(root).unwrap();

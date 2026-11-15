@@ -360,7 +360,7 @@ impl DocIndex {
                     self.fields.body => c.text.clone(),
                     self.fields.body_trigrams => c.text.clone(),
                     self.fields.path => path_str,
-                    self.fields.location => c.location.clone(),
+                    self.fields.location => c.location.display(),
                     self.fields.file_type => c.file_type.clone(),
                     self.fields.ord => ord,
                 ))?;
@@ -1122,12 +1122,12 @@ pub fn reindex_note_locked(dir: &Path, rel: &str) -> anyhow::Result<Option<FileS
         Err(_) => return Ok(None),
     };
     let idx = DocIndex::open_or_create(dir)?;
-    idx.write_chunks(&[crate::model::Chunk {
-        doc_path: std::path::PathBuf::from(rel),
-        location: "note".into(),
-        file_type: "note".into(),
-        text: body,
-    }])?;
+    idx.write_chunks(&[crate::model::Chunk::labelled(
+        std::path::PathBuf::from(rel),
+        "note".into(),
+        "note".into(),
+        body,
+    )])?;
     let sig = file_sig(&abs)?;
     let mut m = Manifest::load(dir);
     m.notes.insert(rel.to_string(), sig);
@@ -1844,11 +1844,14 @@ pub fn index_file_into(
         if let Some(df) = df.as_deref_mut() {
             df.add_chunk(&crate::gate::token::tokenize(&c.text));
         }
+        // The stored form and the graph's per-file `seen` key are still the joined string, so the
+        // index bytes are exactly what they were; hoisted because the loop needs it three times.
+        let loc = c.location.display();
         let _ = writer.add_document(doc!(
             idx.fields.body => c.text.clone(),
             idx.fields.body_trigrams => c.text.clone(),
             idx.fields.path => doc_key.to_string(),
-            idx.fields.location => c.location.clone(),
+            idx.fields.location => loc.clone(),
             idx.fields.file_type => c.file_type.clone(),
             idx.fields.ord => ord,
         ));
@@ -1857,11 +1860,11 @@ pub fn index_file_into(
         if let Some(prev) = prev_sec.as_deref() {
             let _ = crate::graph::build::link_sequential(graph, prev, &cur_id, sig, doc_key);
         }
-        if let Some(parent) = crate::graph::build::nearest_ancestor(&seen, &c.location) {
+        if let Some(parent) = crate::graph::build::nearest_ancestor(&seen, &loc) {
             let _ = crate::graph::build::link_parent(graph, &cur_id, &parent, sig, doc_key);
         }
         file_links.extend(crate::extract::links::extract_links(&c.text));
-        seen.insert(c.location.clone(), cur_id.clone());
+        seen.insert(loc, cur_id.clone());
         prev_sec = Some(cur_id);
     }
     for t in file_links {
@@ -4594,12 +4597,12 @@ mod search_tests {
     use std::path::PathBuf;
 
     fn chunk(path: &str, text: &str) -> Chunk {
-        Chunk {
-            doc_path: PathBuf::from(path),
-            location: "S".into(),
-            file_type: "md".into(),
-            text: text.into(),
-        }
+        Chunk::nested(
+            PathBuf::from(path),
+            "md".into(),
+            vec!["S".into()],
+            text.into(),
+        )
     }
 
     #[test]
@@ -4680,12 +4683,12 @@ mod search_tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         // A chunk with an empty location (what PDFs/heading-less office chunks will emit).
-        idx.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("d.md"),
-            location: String::new(),
-            file_type: "md".into(),
-            text: "body".into(),
-        }])
+        idx.write_chunks(&[Chunk::labelled(
+            PathBuf::from("d.md"),
+            "md".into(),
+            String::new(),
+            "body".into(),
+        )])
         .unwrap();
         // location field for ord 1 must be empty, NOT "1".
         assert_eq!(
@@ -4701,18 +4704,18 @@ mod search_tests {
         // A PDF extractor emits one chunk per page in order, so seq == page; ord is that
         // sequence position directly now, with no p.N parse involved.
         idx.write_chunks(&[
-            Chunk {
-                doc_path: PathBuf::from("d.pdf"),
-                location: "p.7".into(),
-                file_type: "pdf".into(),
-                text: "irrelevant first page".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("d.pdf"),
-                location: "p.7".into(),
-                file_type: "pdf".into(),
-                text: "hot cpu swap".into(),
-            },
+            Chunk::labelled(
+                PathBuf::from("d.pdf"),
+                "pdf".into(),
+                "p.7".into(),
+                "irrelevant first page".into(),
+            ),
+            Chunk::labelled(
+                PathBuf::from("d.pdf"),
+                "pdf".into(),
+                "p.7".into(),
+                "hot cpu swap".into(),
+            ),
         ])
         .unwrap();
         let hits = idx.search("swap", 10).unwrap();
@@ -4838,11 +4841,8 @@ mod search_tests {
     fn search_fills_rel_bm25_and_filtering_keeps_the_pool_basis() {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        let sec = |path: &str, ft: &str, text: &str| Chunk {
-            doc_path: PathBuf::from(path),
-            location: String::new(),
-            file_type: ft.into(),
-            text: text.into(),
+        let sec = |path: &str, ft: &str, text: &str| {
+            Chunk::labelled(PathBuf::from(path), ft.into(), String::new(), text.into())
         };
         // "alpha" appears 3x in the .md doc and once in the .txt doc, so the .md hit is BM25's best.
         idx.write_chunks(&[
@@ -4876,11 +4876,13 @@ mod search_tests {
     fn read_chunk_by_ord_returns_body_and_neighbors() {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        let sec = |loc: &str, t: &str| Chunk {
-            doc_path: PathBuf::from("d.md"),
-            location: loc.into(),
-            file_type: "md".into(),
-            text: t.into(),
+        let sec = |loc: &str, t: &str| {
+            Chunk::nested(
+                PathBuf::from("d.md"),
+                "md".into(),
+                vec![loc.into()],
+                t.into(),
+            )
         };
         idx.write_chunks(&[sec("A", "alpha"), sec("B", "bravo"), sec("C", "charlie")])
             .unwrap();
@@ -4901,12 +4903,12 @@ mod search_tests {
     fn resolve_path_strips_spurious_leading_prefix() {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        idx.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("Archive DB\\doc.pdf"),
-            location: "p.1".into(),
-            file_type: "pdf".into(),
-            text: "x".into(),
-        }])
+        idx.write_chunks(&[Chunk::labelled(
+            PathBuf::from("Archive DB\\doc.pdf"),
+            "pdf".into(),
+            "p.1".into(),
+            "x".into(),
+        )])
         .unwrap();
         assert_eq!(
             idx.resolve_path("kb-manual\\Archive DB\\doc.pdf")
@@ -4920,12 +4922,12 @@ mod search_tests {
     fn canonical_document_path_exact_and_tolerant() {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        idx.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("real.pdf"),
-            location: "p.1".into(),
-            file_type: "pdf".into(),
-            text: "x".into(),
-        }])
+        idx.write_chunks(&[Chunk::labelled(
+            PathBuf::from("real.pdf"),
+            "pdf".into(),
+            "p.1".into(),
+            "x".into(),
+        )])
         .unwrap();
         assert_eq!(
             idx.canonical_document_path("real.pdf").as_deref(),
@@ -4967,19 +4969,19 @@ mod search_tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
-            Chunk {
-                doc_path: PathBuf::from("dir/manual.pdf"),
-                location: "p.1".into(),
-                file_type: "pdf".into(),
-                text: "x".into(),
-            },
+            Chunk::labelled(
+                PathBuf::from("dir/manual.pdf"),
+                "pdf".into(),
+                "p.1".into(),
+                "x".into(),
+            ),
             // A document whose real path legitimately begins with `@` must still win exactly.
-            Chunk {
-                doc_path: PathBuf::from("@types/react.md"),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "y".into(),
-            },
+            Chunk::nested(
+                PathBuf::from("@types/react.md"),
+                "md".into(),
+                vec!["S1".into()],
+                "y".into(),
+            ),
         ])
         .unwrap();
         // glossary prints an ungrounded node's owner as `@<path>`; read must strip the sigil.
@@ -5008,12 +5010,12 @@ mod search_tests {
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         // Real filename is spaced (a PDF), but the corpus is full of underscore-named siblings,
         // so the model copies the path back with every space turned into an underscore.
-        idx.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("Setup guide ACME PLC_v_1.pdf"),
-            location: "p.1".into(),
-            file_type: "pdf".into(),
-            text: "x".into(),
-        }])
+        idx.write_chunks(&[Chunk::labelled(
+            PathBuf::from("Setup guide ACME PLC_v_1.pdf"),
+            "pdf".into(),
+            "p.1".into(),
+            "x".into(),
+        )])
         .unwrap();
         assert_eq!(
             idx.canonical_document_path("Setup_guide_ACME_PLC_v_1.pdf")
@@ -5031,18 +5033,18 @@ mod search_tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
-            Chunk {
-                doc_path: PathBuf::from("a.md"),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "alpha".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("a.md"),
-                location: "S2".into(),
-                file_type: "md".into(),
-                text: "beta".into(),
-            },
+            Chunk::nested(
+                PathBuf::from("a.md"),
+                "md".into(),
+                vec!["S1".into()],
+                "alpha".into(),
+            ),
+            Chunk::nested(
+                PathBuf::from("a.md"),
+                "md".into(),
+                vec!["S2".into()],
+                "beta".into(),
+            ),
         ])
         .unwrap();
         let mut seen: Vec<(u64, String)> = Vec::new();
@@ -5059,12 +5061,12 @@ mod search_tests {
     fn file_type_for_ord_returns_the_stored_file_type() {
         let dir = tempfile::tempdir().unwrap();
         let i = DocIndex::open_or_create(dir.path()).unwrap();
-        i.write_chunks(&[crate::model::Chunk {
-            doc_path: "d.pdf".into(),
-            location: String::new(),
-            file_type: "pdf".into(),
-            text: "x".into(),
-        }])
+        i.write_chunks(&[crate::model::Chunk::labelled(
+            "d.pdf".into(),
+            "pdf".into(),
+            String::new(),
+            "x".into(),
+        )])
         .unwrap();
         assert_eq!(
             i.file_type_for_ord("d.pdf", 1).unwrap().as_deref(),
@@ -5077,60 +5079,60 @@ mod search_tests {
     fn kw_index(dir: &std::path::Path) -> DocIndex {
         let idx = DocIndex::open_or_create(dir).unwrap();
         idx.write_chunks(&[
-            Chunk {
-                doc_path: PathBuf::from("a.md"),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "alpha bravo charlie alpha".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("b.md"),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "bravo delta".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("c.md"),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "manager only, no acronym here".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("d.md"),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "ACL Manager configuration".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("e.md"),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "see section 2.2.7.1 of the manual".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("f.md"),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "the number 7 stands alone".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("g.md"),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "настройка Modbus на линии".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("h.md"),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "write to support@example.com or read https://example.com/guide".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("i.md"),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "стоп и пуск насоса".into(),
-            },
+            Chunk::nested(
+                PathBuf::from("a.md"),
+                "md".into(),
+                vec!["S1".into()],
+                "alpha bravo charlie alpha".into(),
+            ),
+            Chunk::nested(
+                PathBuf::from("b.md"),
+                "md".into(),
+                vec!["S1".into()],
+                "bravo delta".into(),
+            ),
+            Chunk::nested(
+                PathBuf::from("c.md"),
+                "md".into(),
+                vec!["S1".into()],
+                "manager only, no acronym here".into(),
+            ),
+            Chunk::nested(
+                PathBuf::from("d.md"),
+                "md".into(),
+                vec!["S1".into()],
+                "ACL Manager configuration".into(),
+            ),
+            Chunk::nested(
+                PathBuf::from("e.md"),
+                "md".into(),
+                vec!["S1".into()],
+                "see section 2.2.7.1 of the manual".into(),
+            ),
+            Chunk::nested(
+                PathBuf::from("f.md"),
+                "md".into(),
+                vec!["S1".into()],
+                "the number 7 stands alone".into(),
+            ),
+            Chunk::nested(
+                PathBuf::from("g.md"),
+                "md".into(),
+                vec!["S1".into()],
+                "настройка Modbus на линии".into(),
+            ),
+            Chunk::nested(
+                PathBuf::from("h.md"),
+                "md".into(),
+                vec!["S1".into()],
+                "write to support@example.com or read https://example.com/guide".into(),
+            ),
+            Chunk::nested(
+                PathBuf::from("i.md"),
+                "md".into(),
+                vec!["S1".into()],
+                "стоп и пуск насоса".into(),
+            ),
         ])
         .unwrap();
         idx
@@ -5258,24 +5260,24 @@ mod search_tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
-            Chunk {
-                doc_path: PathBuf::from("a/MODULE.pdf"),
-                location: "p.1".into(),
-                file_type: "pdf".into(),
-                text: "hot cpu swap".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("b/Other.pdf"),
-                location: "p.1".into(),
-                file_type: "pdf".into(),
-                text: "hot cpu swap".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("c/Notes.md"),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "hot cpu swap".into(),
-            },
+            Chunk::labelled(
+                PathBuf::from("a/MODULE.pdf"),
+                "pdf".into(),
+                "p.1".into(),
+                "hot cpu swap".into(),
+            ),
+            Chunk::labelled(
+                PathBuf::from("b/Other.pdf"),
+                "pdf".into(),
+                "p.1".into(),
+                "hot cpu swap".into(),
+            ),
+            Chunk::nested(
+                PathBuf::from("c/Notes.md"),
+                "md".into(),
+                vec!["S1".into()],
+                "hot cpu swap".into(),
+            ),
         ])
         .unwrap();
 
@@ -5294,12 +5296,12 @@ mod search_tests {
         assert_eq!(md.len(), 1);
         assert_eq!(md[0].file_type, "md");
         // recursive glob on nested paths
-        idx.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("nested\\inner.pdf"),
-            location: "p.1".into(),
-            file_type: "pdf".into(),
-            text: "hot cpu swap".into(),
-        }])
+        idx.write_chunks(&[Chunk::labelled(
+            PathBuf::from("nested\\inner.pdf"),
+            "pdf".into(),
+            "p.1".into(),
+            "hot cpu swap".into(),
+        )])
         .unwrap();
         let rec = idx
             .search_filtered("swap", 10, Some("**/*.pdf"), None, None)
@@ -5313,18 +5315,18 @@ mod search_tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
-            Chunk {
-                doc_path: PathBuf::from("docA.md"),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "hot cpu swap".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("docB.md"),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "hot cpu swap".into(),
-            },
+            Chunk::nested(
+                PathBuf::from("docA.md"),
+                "md".into(),
+                vec!["S1".into()],
+                "hot cpu swap".into(),
+            ),
+            Chunk::nested(
+                PathBuf::from("docB.md"),
+                "md".into(),
+                vec!["S1".into()],
+                "hot cpu swap".into(),
+            ),
         ])
         .unwrap();
 
@@ -5388,18 +5390,13 @@ mod search_tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
-            Chunk {
-                doc_path: "doc.pdf".into(),
-                location: "p.1".into(),
-                file_type: "pdf".into(),
-                text: "stub".into(),
-            },
-            Chunk {
-                doc_path: "doc.pdf/limits.csp".into(),
-                location: "note".into(),
-                file_type: "note".into(),
-                text: "D\n50".into(),
-            },
+            Chunk::labelled("doc.pdf".into(), "pdf".into(), "p.1".into(), "stub".into()),
+            Chunk::labelled(
+                "doc.pdf/limits.csp".into(),
+                "note".into(),
+                "note".into(),
+                "D\n50".into(),
+            ),
         ])
         .unwrap();
         assert_eq!(idx.file_type_of("doc.pdf").unwrap().as_deref(), Some("pdf"));
@@ -5415,12 +5412,12 @@ mod search_tests {
         // A corpus path (no `/` to split, or the path itself) has no note owner.
         assert_eq!(idx.note_owner("doc.pdf").unwrap(), None);
         // A nested note file: the longest indexed prefix wins.
-        idx.write_chunks(&[Chunk {
-            doc_path: "doc.pdf/sub/values.csp".into(),
-            location: "note".into(),
-            file_type: "note".into(),
-            text: "x".into(),
-        }])
+        idx.write_chunks(&[Chunk::labelled(
+            "doc.pdf/sub/values.csp".into(),
+            "note".into(),
+            "note".into(),
+            "x".into(),
+        )])
         .unwrap();
         assert_eq!(
             idx.note_owner("doc.pdf/sub/values.csp").unwrap().as_deref(),
@@ -6013,11 +6010,8 @@ mod tests {
     fn iter_chunks_trigram_candidates_and_semantics() {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        let mk = |p: &str, ord: u64, t: &str| crate::model::Chunk {
-            doc_path: p.into(),
-            location: format!("S{ord}"),
-            file_type: "md".into(),
-            text: t.into(),
+        let mk = |p: &str, ord: u64, t: &str| {
+            crate::model::Chunk::nested(p.into(), "md".into(), vec![format!("S{ord}")], t.into())
         };
         idx.write_chunks(&[
             mk("a.md", 1, "device registration completed"),

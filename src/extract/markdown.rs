@@ -19,6 +19,7 @@ impl Extractor for MarkdownExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Location;
 
     #[test]
     fn splits_by_headings_with_location_path() {
@@ -27,7 +28,7 @@ mod tests {
             .extract(Path::new("d.md"), md.as_bytes())
             .unwrap();
         assert_eq!(chunks.len(), 3);
-        assert_eq!(chunks[0].location, "A");
+        assert_eq!(chunks[0].location.display(), "A");
         // The section's own heading line is part of its body (verbatim source text); the
         // breadcrumb of ancestors is what `location` carries.
         assert_eq!(
@@ -35,13 +36,13 @@ mod tests {
             "# A
 intro"
         );
-        assert_eq!(chunks[1].location, "A > B");
+        assert_eq!(chunks[1].location.display(), "A > B");
         assert_eq!(
             chunks[1].text.trim(),
             "## B
 body b"
         );
-        assert_eq!(chunks[2].location, "C");
+        assert_eq!(chunks[2].location.display(), "C");
         assert_eq!(
             chunks[2].text.trim(),
             "# C
@@ -56,7 +57,7 @@ body c"
             .extract(Path::new("d.md"), md.as_bytes())
             .unwrap();
         assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].location, "");
+        assert_eq!(chunks[0].location.display(), "");
         assert!(chunks[0].text.contains("#nothashtag"));
     }
 
@@ -67,8 +68,9 @@ body c"
             .extract(Path::new("d.md"), md.as_bytes())
             .unwrap();
         assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].location, "A");
-        assert!(!chunks[0].location.contains(" > "));
+        // `parse_atx_heading` rejects an empty title, so the chain never gains a hole: the empty
+        // heading is body text, not a segment.
+        assert_eq!(chunks[0].location, Location::Path(vec!["A".into()]));
     }
 
     #[test]
@@ -78,7 +80,7 @@ body c"
             .extract(Path::new("d.md"), md.as_bytes())
             .unwrap();
         assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].location, "A > C");
+        assert_eq!(chunks[0].location.display(), "A > C");
     }
 
     #[test]
@@ -100,6 +102,6 @@ body c"
             .extract(Path::new("latin.md"), &b2)
             .unwrap();
         assert_eq!(c2.len(), 1);
-        assert_eq!(c2[0].location, "café");
+        assert_eq!(c2[0].location.display(), "café");
     }
 }

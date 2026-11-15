@@ -792,12 +792,14 @@ pub fn extract_odf_charts(path: &Path, bytes: &[u8], ext: &str) -> Vec<Chunk> {
             format!("Chart: {} ({})", title, cd.kind)
         };
         let text = format!("{}\n\n{}", header, body);
-        out.push(Chunk {
-            doc_path: path.to_path_buf(),
-            location: title,
-            file_type: ext.to_string(),
+        // A chart is an attachment hanging off the sheet, not a container with children: nothing
+        // is ever addressed as living *inside* "Chart 1", so its title is a label, not a path.
+        out.push(Chunk::labelled(
+            path.to_path_buf(),
+            ext.to_string(),
+            title,
             text,
-        });
+        ));
     }
     out
 }
@@ -1025,7 +1027,8 @@ mod tests {
         let cs = extract_odf_charts(Path::new("mixed.ods"), &buf, "ods");
         assert_eq!(cs.len(), 1, "expected exactly one chart chunk, got: {cs:?}");
         assert_eq!(
-            cs[0].location, "Chart 1",
+            cs[0].location.display(),
+            "Chart 1",
             "untitled chart after a skipped object must be Chart 1: {cs:?}"
         );
     }

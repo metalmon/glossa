@@ -603,15 +603,25 @@ mod tests {
         assert!(chunks.iter().all(|c| c.file_type == "odt"));
         // structural <text:h>
         assert!(
-            chunks.iter().any(|c| c.location.contains("Alpha Section")),
+            chunks
+                .iter()
+                .any(|c| c.location.display().contains("Alpha Section")),
             "structural heading not a location: {:?}",
-            chunks.iter().map(|c| &c.location).collect::<Vec<_>>()
+            chunks
+                .iter()
+                .map(|c| c.location.display())
+                .collect::<Vec<_>>()
         );
         // styled paragraph Heading_20_1 — the real-world quirk
         assert!(
-            chunks.iter().any(|c| c.location.contains("Beta Section")),
+            chunks
+                .iter()
+                .any(|c| c.location.display().contains("Beta Section")),
             "styled-paragraph heading not recognised: {:?}",
-            chunks.iter().map(|c| &c.location).collect::<Vec<_>>()
+            chunks
+                .iter()
+                .map(|c| c.location.display())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -691,7 +701,7 @@ mod tests {
     fn ods_one_chunk_per_sheet_with_names() {
         let chunks = extract(ODS, "sample.ods");
         assert!(chunks.iter().all(|c| c.file_type == "ods"));
-        let locs: Vec<&str> = chunks.iter().map(|c| c.location.as_str()).collect();
+        let locs: Vec<String> = chunks.iter().map(|c| c.location.display()).collect();
         assert!(locs.iter().any(|l| l.contains("Sheet1")), "locs: {locs:?}");
         assert!(locs.iter().any(|l| l.contains("Data")), "locs: {locs:?}");
     }
@@ -699,7 +709,10 @@ mod tests {
     #[test]
     fn ods_repeats_expand_and_clamp() {
         let chunks = extract(ODS, "sample.ods");
-        let data = chunks.iter().find(|c| c.location.contains("Data")).unwrap();
+        let data = chunks
+            .iter()
+            .find(|c| c.location.display().contains("Data"))
+            .unwrap();
         // number-columns-repeated=3 on "dup" → three dup columns between x and y
         assert!(
             data.text.contains("| x | dup | dup | dup | y |"),
@@ -708,7 +721,7 @@ mod tests {
         );
         let sheet1 = chunks
             .iter()
-            .find(|c| c.location.contains("Sheet1"))
+            .find(|c| c.location.display().contains("Sheet1"))
             .unwrap();
         // trailing repeated empty cells (repeated=6) must be clamped, not 6+ empty columns
         let widest = sheet1
@@ -1357,10 +1370,10 @@ mod tests {
         // is keyed on this string and used to find a chunk's ancestor. Dropping the name whenever a
         // slide had a heading was the bug this pins.
         for c in &chunks {
+            let loc = c.location.display();
             assert!(
-                c.location.starts_with("Slide1") || c.location.starts_with("Slide2"),
-                "a chunk lost its slide name: {:?}",
-                c.location
+                loc.starts_with("Slide1") || loc.starts_with("Slide2"),
+                "a chunk lost its slide name: {loc:?}"
             );
         }
         // Section-per-slide boundary actually applies at chunk granularity too:

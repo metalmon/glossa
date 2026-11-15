@@ -154,28 +154,27 @@ fn flush_buf(
     if text.trim().is_empty() {
         return;
     }
-    // `location` is a path, and the sheet or slide a heading sits in is part of it. Dropping the
-    // container the moment a heading appeared was the bug: two slides that both open with "Intro"
-    // produced the same `location`, and the graph keys its per-file `seen` map on that string
-    // (`index/store.rs`) while `nearest_ancestor` splits it on `" > "` — so the second container
-    // overwrote the first, and any deeper chunk in either one parented to whichever wrote last.
-    // Not every `Section::title` is a container, though — see `section_is_container`.
-    let mut segs: Vec<&str> = Vec::new();
+    // `location` is a path, and the sheet or slide a heading sits in is one of its segments.
+    // Dropping the container the moment a heading appeared was the bug: two slides that both open
+    // with "Intro" produced the same `location`, and the graph keys its per-file `seen` map on that
+    // string (`index/store.rs`) while `nearest_ancestor` splits it on `LOCATION_SEP` — so the second
+    // container overwrote the first, and any deeper chunk in either one parented to whichever wrote
+    // last. Not every `Section::title` is a container, though — see `section_is_container`.
+    let mut segs: Vec<String> = Vec::new();
     if let Some(t) = section_title.filter(|t| !t.is_empty()) {
         let container_of_these_headings =
             section_is_container(file_type) && heading_path.first().map(String::as_str) != Some(t);
         if heading_path.is_empty() || container_of_these_headings {
-            segs.push(t);
+            segs.push(t.to_string());
         }
     }
-    segs.extend(heading_path.iter().map(String::as_str));
-    let location = segs.join(" > ");
-    out.push(Chunk {
-        doc_path: path.to_path_buf(),
-        location,
-        file_type: file_type.to_string(),
+    segs.extend(heading_path.iter().cloned());
+    out.push(Chunk::nested(
+        path.to_path_buf(),
+        file_type.to_string(),
+        segs,
         text,
-    });
+    ));
 }
 
 pub(crate) fn render_elements(elements: &[Element]) -> String {
@@ -293,7 +292,7 @@ mod tests {
         let chunks = chunk_ir(Path::new("a.docx"), &ir, "docx");
         assert!(chunks.len() >= 2, "{:?}", chunks.len());
         assert!(chunks[0].text.contains("intro"));
-        assert_eq!(chunks.last().unwrap().location, "H1");
+        assert_eq!(chunks.last().unwrap().location.display(), "H1");
         assert!(chunks.last().unwrap().text.contains("under"));
     }
 
@@ -316,8 +315,11 @@ mod tests {
         };
         let chunks = chunk_ir(Path::new("a.xlsx"), &ir, "xlsx");
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].location, "Sheet1");
-        assert_eq!(chunks[1].location, "Sheet2");
+        assert_eq!(chunks[0].location.display(), "Sheet1");
+        assert_eq!(chunks[1].location.display(), "Sheet2");
+        // A sheet is a container the document names, so a chunk whose whole location is its name
+        // is nested in it rather than flat.
+        assert!(chunks[0].location.is_nested());
     }
 
     /// Two slides opening with the same heading used to produce the SAME `location`, because a
@@ -347,7 +349,7 @@ mod tests {
         };
         let locs: Vec<String> = chunk_ir(Path::new("a.odp"), &ir, "odp")
             .iter()
-            .map(|c| c.location.clone())
+            .map(|c| c.location.display())
             .collect();
         assert_eq!(locs, ["Slide1 > Intro", "Slide2 > Intro"], "{locs:?}");
     }
@@ -386,9 +388,51 @@ mod tests {
         };
         let locs: Vec<String> = chunk_ir(Path::new("a.docx"), &ir, "docx")
             .iter()
-            .map(|c| c.location.clone())
+            .map(|c| c.location.display())
             .collect();
         assert_eq!(locs, ["First", "Second"], "{locs:?}");
+    }
+
+    /// A heading with empty content used to render a dangling separator. It now renders the
+    /// surviving segment alone — the only display change in this plan, asserted as the new string
+    /// so it is a decision rather than a diff nobody looked at.
+    ///
+    /// The plan placed this test in `src/extract/markdown.rs`, but markdown cannot reach the
+    /// behaviour: `parse_atx_heading` rejects an empty title, so a markdown heading chain never has
+    /// a hole in it. `convert_docx.rs` is the one feeder that pushes a `Heading` without guarding
+    /// its text, and `heading_path` does not filter it, so a docx IR is where the case lives.
+    #[test]
+    fn an_empty_heading_segment_no_longer_renders_a_dangling_separator() {
+        let ir = DocumentIR {
+            sections: vec![Section {
+                elements: vec![
+                    // An empty heading-styled paragraph: `convert_docx.rs` pushes it unguarded.
+                    Element::Heading(Heading {
+                        level: 1,
+                        content: vec![InlineContent::Text(TextSpan {
+                            text: String::new(),
+                            ..Default::default()
+                        })],
+                        ..Default::default()
+                    }),
+                    text_para("a"),
+                    Element::Heading(Heading {
+                        level: 2,
+                        content: vec![InlineContent::Text(TextSpan {
+                            text: "B".into(),
+                            ..Default::default()
+                        })],
+                        ..Default::default()
+                    }),
+                    text_para("b"),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let chunks = chunk_ir(Path::new("a.docx"), &ir, "docx");
+        assert_eq!(chunks.len(), 2, "{chunks:?}");
+        assert_eq!(chunks[1].location.display(), "B");
     }
 
     #[test]

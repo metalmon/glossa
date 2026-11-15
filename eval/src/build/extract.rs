@@ -542,12 +542,12 @@ strict = true
     /// Index a stub document so `source_path`/section refs against `path` resolve — mirrors
     /// `glossa::graph::ops`'s own test helper of the same purpose.
     fn write_doc(idx: &DocIndex, path: &str) {
-        idx.write_chunks(&[glossa::model::Chunk {
-            doc_path: path.into(),
-            location: "S1".into(),
-            file_type: "md".into(),
-            text: "stub content".into(),
-        }])
+        idx.write_chunks(&[glossa::model::Chunk::nested(
+            path.into(),
+            "md".into(),
+            vec!["S1".into()],
+            "stub content".into(),
+        )])
         .unwrap();
     }
 
@@ -816,24 +816,24 @@ strict = true
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
-            Chunk {
-                doc_path: PathBuf::from("d.md"),
-                location: "A".into(),
-                file_type: "md".into(),
-                text: "alpha".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("d.md"),
-                location: "B".into(),
-                file_type: "md".into(),
-                text: "bravo".into(),
-            },
-            Chunk {
-                doc_path: PathBuf::from("d.md"),
-                location: "C".into(),
-                file_type: "md".into(),
-                text: "charlie".into(),
-            },
+            Chunk::nested(
+                PathBuf::from("d.md"),
+                "md".into(),
+                vec!["A".into()],
+                "alpha".into(),
+            ),
+            Chunk::nested(
+                PathBuf::from("d.md"),
+                "md".into(),
+                vec!["B".into()],
+                "bravo".into(),
+            ),
+            Chunk::nested(
+                PathBuf::from("d.md"),
+                "md".into(),
+                vec!["C".into()],
+                "charlie".into(),
+            ),
         ])
         .unwrap();
 

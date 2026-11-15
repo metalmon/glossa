@@ -654,18 +654,18 @@ relations = ["LEADS_TO"]
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
-            glossa::model::Chunk {
-                doc_path: "d.md".into(),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "PRED ONE body".into(),
-            },
-            glossa::model::Chunk {
-                doc_path: "d.md".into(),
-                location: "S2".into(),
-                file_type: "md".into(),
-                text: "PRED TWO body".into(),
-            },
+            glossa::model::Chunk::nested(
+                "d.md".into(),
+                "md".into(),
+                vec!["S1".into()],
+                "PRED ONE body".into(),
+            ),
+            glossa::model::Chunk::nested(
+                "d.md".into(),
+                "md".into(),
+                vec!["S2".into()],
+                "PRED TWO body".into(),
+            ),
         ])
         .unwrap();
 

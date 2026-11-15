@@ -306,18 +306,18 @@ mod tests {
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
-            glossa::model::Chunk {
-                doc_path: "d.md".into(),
-                location: "S1".into(),
-                file_type: "md".into(),
-                text: "FIRST chunk body".into(),
-            },
-            glossa::model::Chunk {
-                doc_path: "d.md".into(),
-                location: "S2".into(),
-                file_type: "md".into(),
-                text: "SECOND chunk body".into(),
-            },
+            glossa::model::Chunk::nested(
+                "d.md".into(),
+                "md".into(),
+                vec!["S1".into()],
+                "FIRST chunk body".into(),
+            ),
+            glossa::model::Chunk::nested(
+                "d.md".into(),
+                "md".into(),
+                vec!["S2".into()],
+                "SECOND chunk body".into(),
+            ),
         ])
         .unwrap();
 
@@ -358,17 +358,19 @@ mod tests {
         let g = GraphStore::open(dir.path()).unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let chunks: Vec<glossa::model::Chunk> = (1..=10)
-            .map(|i| glossa::model::Chunk {
-                doc_path: "d.md".into(),
-                location: format!("S{i}"),
-                file_type: "md".into(),
-                text: if i == 2 {
-                    "CHUNK TWO body".to_string()
-                } else if i == 10 {
-                    "CHUNK TEN body".to_string()
-                } else {
-                    format!("filler chunk {i}")
-                },
+            .map(|i| {
+                glossa::model::Chunk::nested(
+                    "d.md".into(),
+                    "md".into(),
+                    vec![format!("S{i}")],
+                    if i == 2 {
+                        "CHUNK TWO body".to_string()
+                    } else if i == 10 {
+                        "CHUNK TEN body".to_string()
+                    } else {
+                        format!("filler chunk {i}")
+                    },
+                )
             })
             .collect();
         idx.write_chunks(&chunks).unwrap();

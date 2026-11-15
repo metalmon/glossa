@@ -29,12 +29,12 @@ impl Extractor for PdfExtractor {
                 let mut out = Vec::with_capacity(page_count as usize);
                 for i in 0..page_count as usize {
                     let text = doc.extract_text(i).unwrap_or_default();
-                    out.push(Chunk {
-                        doc_path: path_buf.clone(),
-                        location: String::new(),
-                        file_type: "pdf".into(),
+                    out.push(Chunk::labelled(
+                        path_buf.clone(),
+                        "pdf".into(),
+                        String::new(),
                         text,
-                    });
+                    ));
                 }
 
                 out
@@ -54,12 +54,12 @@ impl Extractor for PdfExtractor {
             .unwrap_or("document")
             .to_string();
         eprintln!("  · no text layer, indexed by filename: {}", path.display());
-        Ok(vec![Chunk {
-            doc_path: path.to_path_buf(),
-            location: "(no-text)".into(),
-            file_type: "pdf".into(),
-            text: name,
-        }])
+        Ok(vec![Chunk::labelled(
+            path.to_path_buf(),
+            "pdf".into(),
+            "(no-text)".into(),
+            name,
+        )])
     }
 }
 
@@ -114,7 +114,10 @@ mod tests {
 
         assert_eq!(chunks.len(), 3, "expected physical page stubs: {chunks:?}");
         for chunk in chunks.iter() {
-            assert!(chunk.location.is_empty(), "no p.N label: {chunk:?}");
+            assert!(
+                chunk.location.display().is_empty(),
+                "no p.N label: {chunk:?}"
+            );
             assert!(
                 chunk.text.is_empty(),
                 "blank page must stay empty: {chunk:?}"
@@ -127,7 +130,10 @@ mod tests {
         let bytes = blank_pdf(3);
         let chunks = PdfExtractor.extract(Path::new("d.pdf"), &bytes).unwrap();
         assert_eq!(chunks.len(), 3);
-        assert!(chunks.iter().all(|c| c.location.is_empty()), "no p.N label");
+        assert!(
+            chunks.iter().all(|c| c.location.display().is_empty()),
+            "no p.N label"
+        );
         // Order is page order: index i is page i+1 (ord == page downstream).
     }
 
@@ -142,7 +148,10 @@ mod tests {
             3,
             "expected one chunk per physical page, got: {chunks:?}"
         );
-        assert!(chunks.iter().all(|c| c.location.is_empty()), "no p.N label");
+        assert!(
+            chunks.iter().all(|c| c.location.display().is_empty()),
+            "no p.N label"
+        );
         assert!(
             chunks[1].text.trim().is_empty(),
             "blank middle page must be indexed with empty body"
@@ -196,7 +205,7 @@ mod tests {
         let bytes = b"%PDF-1.4\ngarbage not a real pdf";
         let chunks = PdfExtractor.extract(Path::new("bad.pdf"), bytes).unwrap();
         assert_eq!(chunks.len(), 1, "one filename fallback chunk");
-        assert_eq!(chunks[0].location, "(no-text)");
+        assert_eq!(chunks[0].location.display(), "(no-text)");
         assert_eq!(chunks[0].file_type, "pdf");
         assert!(
             chunks[0].text.contains("bad"),
@@ -213,7 +222,7 @@ mod tests {
             .unwrap();
         assert_eq!(chunks.len(), 1, "single-page fixture → one page chunk");
         assert_eq!(chunks[0].file_type, "pdf");
-        assert!(chunks[0].location.is_empty(), "no p.N label");
+        assert!(chunks[0].location.display().is_empty(), "no p.N label");
         assert!(
             chunks[0].text.contains("glossa sample"),
             "expected fixture marker text, got: {}",
@@ -229,7 +238,7 @@ mod tests {
         // VALUES are preserved). We deliberately do NOT run pdf_oxide's structured table detector
         // — it mis-detected multi-column prose as tables and mangled the words. Page identity is
         // ord (index order) downstream; location carries no page label.
-        assert!(chunks[0].location.is_empty(), "no p.N label");
+        assert!(chunks[0].location.display().is_empty(), "no p.N label");
         let joined = chunks
             .iter()
             .map(|c| c.text.as_str())

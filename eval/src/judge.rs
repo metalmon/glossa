@@ -507,18 +507,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[
-            glossa::model::Chunk {
-                doc_path: std::path::PathBuf::from("d.pdf"),
-                location: String::new(),
-                file_type: "pdf".into(),
-                text: "page one body".into(),
-            },
-            glossa::model::Chunk {
-                doc_path: std::path::PathBuf::from("d.pdf"),
-                location: String::new(),
-                file_type: "pdf".into(),
-                text: "page two body".into(),
-            },
+            glossa::model::Chunk::labelled(
+                std::path::PathBuf::from("d.pdf"),
+                "pdf".into(),
+                String::new(),
+                "page one body".into(),
+            ),
+            glossa::model::Chunk::labelled(
+                std::path::PathBuf::from("d.pdf"),
+                "pdf".into(),
+                String::new(),
+                "page two body".into(),
+            ),
         ])
         .unwrap();
 

@@ -114,11 +114,13 @@ mod tests {
         use std::path::PathBuf;
         let dir = tempfile::tempdir().unwrap();
         let h = GraphHandle::open(dir.path()).unwrap();
-        let mk = |path: &str, text: &str| Chunk {
-            doc_path: PathBuf::from(path),
-            location: "S".into(),
-            file_type: "md".into(),
-            text: text.into(),
+        let mk = |path: &str, text: &str| {
+            Chunk::nested(
+                PathBuf::from(path),
+                "md".into(),
+                vec!["S".into()],
+                text.into(),
+            )
         };
         // Seed the corpus through the handle's own index and confirm it serves it.
         h.idx()

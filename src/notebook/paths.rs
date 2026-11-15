@@ -264,12 +264,12 @@ mod tests {
         use crate::model::Chunk;
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        idx.write_chunks(&[Chunk {
-            doc_path: PathBuf::from("work/sub doc.docx"),
-            location: "p.1".into(),
-            file_type: "docx".into(),
-            text: "x".into(),
-        }])
+        idx.write_chunks(&[Chunk::labelled(
+            PathBuf::from("work/sub doc.docx"),
+            "docx".into(),
+            "p.1".into(),
+            "x".into(),
+        )])
         .unwrap();
         let root = dir.path();
 

@@ -355,12 +355,12 @@ strict = true
     }
 
     fn write_doc_chunk(idx: &DocIndex, path: &str, location: &str) {
-        idx.write_chunks(&[Chunk {
-            doc_path: path.into(),
-            location: location.into(),
-            file_type: "md".into(),
-            text: "stub content".into(),
-        }])
+        idx.write_chunks(&[Chunk::nested(
+            path.into(),
+            "md".into(),
+            vec![location.into()],
+            "stub content".into(),
+        )])
         .unwrap();
     }
 

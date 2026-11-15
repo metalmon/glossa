@@ -44,12 +44,12 @@ impl Extractor for ImageExtractor {
             .and_then(|e| e.to_str())
             .unwrap_or("img")
             .to_lowercase();
-        Ok(vec![Chunk {
-            doc_path: path.to_path_buf(),
-            location: "(image)".into(),
-            file_type: ext,
-            text: label_for(path),
-        }])
+        Ok(vec![Chunk::labelled(
+            path.to_path_buf(),
+            ext,
+            "(image)".into(),
+            label_for(path),
+        )])
     }
 }
 
@@ -64,7 +64,7 @@ mod tests {
             .unwrap();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].file_type, "png");
-        assert_eq!(chunks[0].location, "(image)");
+        assert_eq!(chunks[0].location.display(), "(image)");
         assert!(
             chunks[0].text.contains("Diagrams")
                 && chunks[0].text.contains("bus")

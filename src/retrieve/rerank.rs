@@ -432,11 +432,13 @@ mod tests {
     fn idx_with_pages() -> (tempfile::TempDir, DocIndex) {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        let sec = |loc: &str, t: &str| Chunk {
-            doc_path: PathBuf::from("d.md"),
-            location: loc.into(),
-            file_type: "md".into(),
-            text: t.into(),
+        let sec = |loc: &str, t: &str| {
+            Chunk::nested(
+                PathBuf::from("d.md"),
+                "md".into(),
+                vec![loc.into()],
+                t.into(),
+            )
         };
         idx.write_chunks(&[
             sec("A", "alpha swap"),

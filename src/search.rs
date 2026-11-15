@@ -30,7 +30,7 @@ pub fn search_chunks(chunks: &[Chunk], re: &Regex, limit: usize) -> Vec<Hit> {
             if re.is_match(line) {
                 hits.push(Hit {
                     doc_path: c.doc_path.clone(),
-                    location: c.location.clone(),
+                    location: c.location.display(),
                     ord,
                     line: i + 1,
                     snippet: line.trim().to_string(),
@@ -49,12 +49,12 @@ mod tests {
     use super::*;
 
     fn chunk_in(doc_path: &str, text: &str) -> Chunk {
-        Chunk {
-            doc_path: PathBuf::from(doc_path),
-            location: "S".into(),
-            file_type: "md".into(),
-            text: text.into(),
-        }
+        Chunk::nested(
+            PathBuf::from(doc_path),
+            "md".into(),
+            vec!["S".into()],
+            text.into(),
+        )
     }
 
     fn chunk(text: &str) -> Chunk {
