@@ -45,7 +45,11 @@ impl Chunk {
 }
 
 /// The separator the extractor used to join heading segments before `Location` existed.
-/// `join_path` is the only place it is used to build a string back up.
+/// `join_path` is where it lives for *rendering* a location, and `Location::display` is its only
+/// caller. One other place still uses the constant directly: `graph::build::nearest_ancestor`
+/// splits a rendered location on it and rejoins a prefix, to look a Section up in the per-file
+/// `seen` map. That is a string-hierarchy derivation phase 2 removes; until then the constant is
+/// what keeps the two sides spelling the separator the same way.
 pub const LOCATION_SEP: &str = " > ";
 
 pub fn join_path(path: &[String]) -> String {

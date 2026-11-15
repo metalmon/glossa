@@ -160,8 +160,14 @@ fn flush_buf(
     // string (`index/store.rs`) while `nearest_ancestor` splits it on `LOCATION_SEP` — so the second
     // container overwrote the first, and any deeper chunk in either one parented to whichever wrote
     // last. Not every `Section::title` is a container, though — see `section_is_container`.
+    // The emptiness test trims, so this filter and `Chunk::nested`'s own cannot drift apart: a
+    // whitespace-only sheet or slide title addresses nothing either way and is not a segment. It
+    // used to survive the `is_empty()` test here and store a lone `" "`; such a chunk now stores
+    // `""`. That is the same declared change as the empty docx heading, reached from the container
+    // side. The title that DOES survive is pushed verbatim — trimming decides whether a segment
+    // exists, never what an author's text says.
     let mut segs: Vec<String> = Vec::new();
-    if let Some(t) = section_title.filter(|t| !t.is_empty()) {
+    if let Some(t) = section_title.filter(|t| !t.trim().is_empty()) {
         let container_of_these_headings =
             section_is_container(file_type) && heading_path.first().map(String::as_str) != Some(t);
         if heading_path.is_empty() || container_of_these_headings {

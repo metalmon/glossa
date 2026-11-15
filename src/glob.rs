@@ -97,8 +97,10 @@ mod tests {
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let cs: Vec<Chunk> = chunks
             .iter()
-            // The helper takes an opaque location string (these cases pass "p.1"), so it keeps it
-            // verbatim as a label rather than claiming a container path it cannot know about.
+            // Location is incidental to every test here — they assert on paths and ords — and the
+            // helper's callers pass both page labels ("p.1") and section names ("S1"). An opaque
+            // string it cannot classify is kept verbatim as a label rather than asserted to be a
+            // container path.
             .map(|(p, loc, t)| {
                 Chunk::labelled(PathBuf::from(p), "pdf".into(), (*loc).into(), (*t).into())
             })
