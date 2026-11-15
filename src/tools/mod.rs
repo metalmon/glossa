@@ -86,6 +86,31 @@ fn is_corpus_relative_key(key: &str) -> bool {
             .all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
+/// Resolve `key` to the corpus file it names, or `None` when it names anything outside the corpus.
+///
+/// The shape check above is necessary but NOT sufficient, because it validates a different string
+/// from the one that gets joined. `doc_file_in` splits a labelled key at its first `/` and joins
+/// only the remainder, so `lab/C:/Windows/win.ini` passes as a whole — a drive letter is a `Prefix`
+/// only at the START of a path, and mid-path it is an ordinary component — while its remainder
+/// `C:/Windows/win.ini` is drive-absolute and replaces the root. `lab//etc/passwd` is the same
+/// trick without a drive: `components()` collapses the doubled separator, so the whole key looks
+/// plain, and the remainder `/etc/passwd` is rooted.
+///
+/// Checking the RESOLVED path against the roots closes that gap, because it tests what was
+/// actually consumed rather than what was inspected. `starts_with` is lexical, which is exactly
+/// right here: the shape check has already removed `..`, so no surviving key can climb back out,
+/// and nothing has to exist on disk for the test to be sound.
+fn resolved_corpus_file(idx: &DocIndex, key: &str) -> Option<std::path::PathBuf> {
+    if !is_corpus_relative_key(key) {
+        return None;
+    }
+    let f = crate::index::store::doc_file_in(&idx.roots, key);
+    idx.roots
+        .iter()
+        .any(|r| f.starts_with(&r.path))
+        .then_some(f)
+}
+
 /// The not-found message for `read`/`get_source_file`.
 ///
 /// Two different situations reach here and they need different advice. When the path is simply
@@ -96,8 +121,7 @@ fn is_corpus_relative_key(key: &str) -> bool {
 /// (raw off-disk files are `kb cat`'s job), so naming that case is the whole fix; retyping the
 /// path never resolves it.
 fn path_not_found(idx: &DocIndex, path: &str) -> String {
-    if is_corpus_relative_key(path) && crate::index::store::doc_file_in(&idx.roots, path).is_file()
-    {
+    if resolved_corpus_file(idx, path).is_some_and(|f| f.is_file()) {
         return format!(
             "{path} exists on disk but is not indexed — `read` serves indexed documents only (check your ignore rules)"
         );
@@ -3857,6 +3881,51 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             assert!(!is_corpus_relative_key(r"\\host\share\x"));
             assert!(!is_corpus_relative_key(r"C:\Windows\win.ini"));
         }
+    }
+
+    /// The shape check alone is not enough, and this is the case that proves it. `doc_file_in`
+    /// splits a labelled key at its first `/` and joins only the REMAINDER, so the string it
+    /// consumes is not the string the shape check inspected: `a/<absolute path>` passes as a whole
+    /// — mid-path, a drive letter or a leading separator is an ordinary component, and
+    /// `components()` even collapses the doubled separator — while the remainder is absolute and
+    /// replaces the root outright. Only testing the RESOLVED path catches it.
+    #[test]
+    fn a_labelled_key_cannot_smuggle_an_absolute_path_past_the_shape_check() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.md");
+        std::fs::write(&secret, b"x").unwrap();
+
+        let root_a = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let roots = vec![crate::root::Root {
+            label: "a".into(),
+            path: root_a.path().to_path_buf(),
+        }];
+        let i = DocIndex::open_or_create_at(&roots, state.path()).unwrap();
+
+        let key = format!("a/{}", secret.display());
+        assert!(
+            is_corpus_relative_key(&key),
+            "the shape check passes this key — that is exactly the gap: {key}"
+        );
+        assert!(
+            resolved_corpus_file(&i, &key).is_none(),
+            "but it resolves outside every root, so it must not be statted: {key}"
+        );
+        assert!(
+            !read(
+                root_a.path(),
+                &i,
+                None,
+                &key,
+                1,
+                false,
+                &TraceLog::disabled()
+            )
+            .text
+            .contains("exists on disk"),
+            "and the reply must not reveal that the smuggled target exists"
+        );
     }
 
     #[test]
