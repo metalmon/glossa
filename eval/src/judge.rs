@@ -92,19 +92,18 @@ fn load_evidence(source: &[String], idx: Option<&DocIndex>) -> Vec<(String, Stri
         let Some((path, loc)) = parse_ref(reference) else {
             continue;
         };
-        // An ord-style suffix (`gold_ord` matches) must resolve via `read_chunk_by_ord` — PDF/
-        // split-text chunks carry an empty `location` post-refactor, so a `read_chunk(path,
-        // location)` lookup on that suffix would silently miss them. A heading-style suffix (no
-        // ord) still falls back to the legacy `read_chunk` lookup.
-        let text = if let Some(ord) = crate::gepa::gold_ord(loc) {
-            idx.read_chunk_by_ord(path, ord)
-                .ok()
-                .flatten()
-                .map(|c| c.body)
-        } else {
-            idx.read_chunk(path, loc).ok().flatten()
+        // The live dataset's refs are all `path#N` (ordinal); a ref whose suffix isn't an ordinal
+        // (a heading-style label) can't be resolved any more and is skipped like any other
+        // unreadable one (see this function's doc comment).
+        let Some(ord) = crate::gepa::gold_ord(loc) else {
+            continue;
         };
-        if let Some(text) = text {
+        if let Some(text) = idx
+            .read_chunk_by_ord(path, ord)
+            .ok()
+            .flatten()
+            .map(|c| c.body)
+        {
             out.push((reference.trim().to_string(), text));
         }
     }

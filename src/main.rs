@@ -753,16 +753,13 @@ fn epoch_to_rfc3339(secs: i64) -> String {
     glossa::graph::temporal::epoch_to_rfc3339(secs)
 }
 
-fn print_read(path: &std::path::Path, location: Option<&str>) -> anyhow::Result<()> {
-    let text = glossa::read::read_region(path, location)?;
+fn print_read(path: &std::path::Path) -> anyhow::Result<()> {
+    let text = glossa::read::read_doc_text(path)?;
     if glossa::cli_fmt::stdout_is_tty() {
-        // Show a section/heading label, but drop a `p.N` page label (deprecated form). The RAW
-        // `location` still drives `read_region` above — only the head display is filtered.
-        let head = match location.and_then(glossa::cli_fmt::display_location) {
-            Some(l) => format!("── {} · {} ──", path.display(), l),
-            None => format!("── {} ──", path.display()),
-        };
-        println!("{}", glossa::cli_fmt::dim(&head));
+        println!(
+            "{}",
+            glossa::cli_fmt::dim(&format!("── {} ──", path.display()))
+        );
     }
     print!("{text}");
     if !text.ends_with('\n') {
@@ -1784,7 +1781,7 @@ fn main() -> anyhow::Result<()> {
             if !target.exists() {
                 anyhow::bail!("no such file: {}", target.display());
             }
-            print_read(&target, None)
+            print_read(&target)
         }
         Cmd::Read { target, n } => {
             let rr = resolve_inputs(None, &root_flags, state_dir.clone())?;

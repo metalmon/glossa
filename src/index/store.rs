@@ -571,46 +571,6 @@ impl DocIndex {
             .collect();
         Ok(filtered)
     }
-
-    /// Fetch a single chunk's stored body by exact path + location (an index lookup, no source
-    /// re-parse). Returns `None` when no chunk matches, so callers can fall back to reading the
-    /// file. This keeps `read` cheap on large bases where a single PDF may be hundreds of pages.
-    pub fn read_chunk(&self, path: &str, location: &str) -> anyhow::Result<Option<String>> {
-        use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
-        let searcher = self.reader.searcher();
-        let clauses: Vec<(Occur, Box<dyn Query>)> = vec![
-            (
-                Occur::Must,
-                Box::new(TermQuery::new(
-                    tantivy::Term::from_field_text(self.fields.path, path),
-                    IndexRecordOption::Basic,
-                )),
-            ),
-            (
-                Occur::Must,
-                Box::new(TermQuery::new(
-                    tantivy::Term::from_field_text(self.fields.location, location),
-                    IndexRecordOption::Basic,
-                )),
-            ),
-        ];
-        let top = searcher.search(
-            &BooleanQuery::new(clauses),
-            &TopDocs::with_limit(1).order_by_score(),
-        )?;
-        match top.first() {
-            Some((_score, addr)) => {
-                let d: TantivyDocument = searcher.doc(*addr)?;
-                let body = d
-                    .get_first(self.fields.body)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                Ok(Some(body))
-            }
-            None => Ok(None),
-        }
-    }
 }
 
 /// A chunk read by its canonical number, with the numbers of its in-document neighbors.
@@ -4758,31 +4718,6 @@ mod search_tests {
             hits[0].ord, 2,
             "ord is the 1-based write sequence, not a parsed page"
         );
-    }
-
-    #[test]
-    fn read_chunk_fetches_body_by_path_and_location() {
-        let dir = tempfile::tempdir().unwrap();
-        let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        let page = |loc: &str, text: &str| Chunk {
-            doc_path: PathBuf::from("doc.pdf"),
-            location: loc.into(),
-            file_type: "pdf".into(),
-            text: text.into(),
-        };
-        idx.write_chunks(&[
-            page("p.1", "first page body"),
-            page("p.2", "second page body"),
-        ])
-        .unwrap();
-
-        // Exact path+location returns that chunk's stored body — no file re-parse.
-        assert_eq!(
-            idx.read_chunk("doc.pdf", "p.2").unwrap().as_deref(),
-            Some("second page body")
-        );
-        // Unknown location -> None, so the caller falls back to reading the file.
-        assert_eq!(idx.read_chunk("doc.pdf", "p.99").unwrap(), None);
     }
 
     #[test]
