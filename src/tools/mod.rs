@@ -254,9 +254,7 @@ fn gather_mentions(
         }
         if let Some((p, frag)) = e.to.split_once('#') {
             if let Ok(ord) = frag.parse::<u64>() {
-                if idx.location_for_ord(p, ord).ok().flatten().is_some()
-                    && seen.insert((p.to_string(), ord))
-                {
+                if idx.chunk_exists(p, ord).unwrap_or(false) && seen.insert((p.to_string(), ord)) {
                     out.push((attr.to_string(), p.to_string(), ord));
                 }
             }
@@ -1294,9 +1292,9 @@ fn resolve_node_ref(
     }
     if let (Some(p), Some(nn)) = (path, n) {
         let nn = if nn == 0 { 1 } else { nn };
-        return match idx.location_for_ord(p, nn) {
-            Ok(Some(_)) => Ok((crate::graph::build::section_id(p, &nn.to_string()), None)),
-            Ok(None) => Err(format!(
+        return match idx.chunk_exists(p, nn) {
+            Ok(true) => Ok((crate::graph::build::section_id(p, &nn.to_string()), None)),
+            Ok(false) => Err(format!(
                 "no chunk #{nn} in {p}; chunk numbers start at #1 — take it from a search/grep/read"
             )),
             Err(e) => Err(format!("resolve error: {e}")),

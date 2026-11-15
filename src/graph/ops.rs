@@ -223,13 +223,13 @@ fn resolve_section_ref(idx: &DocIndex, s: &str) -> Result<Option<String>, String
             // those are a real mistake (a number copied from another file) — but the
             // message now states the 1-based convention.
             let n = if n == 0 { 1 } else { n };
-            return match idx.location_for_ord(&path, n) {
+            return match idx.chunk_exists(&path, n) {
                 // Keep the chunk ORDINAL the agent gave (`path#3`) as the reference, not
                 // the chunk's heading location — the agent works in chunk numbers (from
                 // grep/read), so a heading-based id never matches what it wrote and reads
-                // back as a "mangled" ref. We still resolve to confirm the chunk exists.
-                Ok(Some(_)) => Ok(Some(crate::graph::build::section_id(&path, &n.to_string()))),
-                Ok(None) => Err(format!(
+                // back as a "mangled" ref. We still probe to confirm the chunk exists.
+                Ok(true) => Ok(Some(crate::graph::build::section_id(&path, &n.to_string()))),
+                Ok(false) => Err(format!(
                     "chunk #{n} does not exist in {path}; chunk numbers start at #1 — take the number from a search/grep/read on THIS document, never reuse one from another file"
                 )),
                 Err(e) => Err(format!("could not resolve chunk #{n} in {path}: {e}")),

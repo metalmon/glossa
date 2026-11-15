@@ -777,6 +777,35 @@ impl DocIndex {
         }
     }
 
+    /// Probe whether chunk `n` exists for `path`, without resolving its location label.
+    /// Same (path, ord) query as `location_for_ord`, but skips the document fetch entirely
+    /// for callers that only ever asked "does this chunk exist?" through that function.
+    pub fn chunk_exists(&self, path: &str, n: u64) -> anyhow::Result<bool> {
+        use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+        let searcher = self.reader.searcher();
+        let clauses: Vec<(Occur, Box<dyn Query>)> = vec![
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    tantivy::Term::from_field_text(self.fields.path, path),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    tantivy::Term::from_field_u64(self.fields.ord, n),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+        ];
+        let top = searcher.search(
+            &BooleanQuery::new(clauses),
+            &TopDocs::with_limit(1).order_by_score(),
+        )?;
+        Ok(!top.is_empty())
+    }
+
     /// Return `true` iff the index contains at least one chunk whose `path` field equals `path`.
     /// Used by `graph_upsert` to reject hallucinated `source_path` values.
     pub fn has_document(&self, path: &str) -> anyhow::Result<bool> {
@@ -4754,6 +4783,21 @@ mod search_tests {
         );
         // Unknown location -> None, so the caller falls back to reading the file.
         assert_eq!(idx.read_chunk("doc.pdf", "p.99").unwrap(), None);
+    }
+
+    #[test]
+    fn chunk_exists_answers_the_probe_without_the_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[chunk("d.md", "first chunk"), chunk("d.md", "second chunk")])
+            .unwrap();
+
+        assert!(idx.chunk_exists("d.md", 1).unwrap());
+        assert!(
+            !idx.chunk_exists("d.md", 99).unwrap(),
+            "no chunk #99 in d.md"
+        );
+        assert!(!idx.chunk_exists("nope.md", 1).unwrap(), "no such document");
     }
 
     #[test]
