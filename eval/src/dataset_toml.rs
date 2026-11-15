@@ -25,10 +25,13 @@ struct RawCase {
     /// role as `hop_type`, on a separate axis.
     #[serde(default)]
     needs_graph: String,
-    /// Source chunk refs (`"<path>#<location>"`) behind this gold, e.g.
-    /// `source = ["a.pdf#p.1", "b.pdf#p.2"]`. Optional — defaults to empty, in which case the
-    /// judge grades gold-only (unchanged behavior). When present, the judge loads these chunks as
-    /// EVIDENCE and credits a correct answer that exceeds the terse gold.
+    /// Source chunk refs behind this gold, as `"<path>#<ordinal>"` — e.g.
+    /// `source = ["a.pdf#1", "b.pdf#2"]`. The fragment is the chunk's **ordinal**, 1-based within
+    /// its document, and nothing else: a `p.N` page label or a heading is a dataset error and is
+    /// refused rather than guessed into a number. (An earlier revision of this comment advertised
+    /// `"a.pdf#p.1"`, which is why the form still turns up in old files.) Optional — defaults to
+    /// empty, in which case the judge grades gold-only. When present, the judge loads these chunks
+    /// as EVIDENCE and credits a correct answer that exceeds the terse gold.
     #[serde(default)]
     source: Vec<String>,
     /// Whether the case is answerable FROM THE CORPUS. Absent defaults to `true` (every case

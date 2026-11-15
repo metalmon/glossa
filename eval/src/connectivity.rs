@@ -17,12 +17,31 @@ pub struct HopConn {
 
 const RANK_WINDOW: usize = 200;
 
-/// Map "<doc>#p.<N>" -> the reasoning nodes that MENTIONS a Section grounded at that doc+page.
+/// Map `<doc>#<N>` -> the reasoning nodes that MENTIONS a Section grounded at that doc+ordinal.
+///
+/// The fragment must be the ordinal and nothing else. This used to keep every ASCII digit in the
+/// fragment and drop the rest, which accepted `#p.14` as page 14 — and, far worse, turned
+/// `#4.1.3 Safety` into 413, inventing an ordinal out of a heading. That is the same guess
+/// `gold_ord` stopped making: the ordinal is the address, a label is not, and a ref written any
+/// other way is a dataset error. Refusing it surfaces where the old spelling still sits; absorbing
+/// it hid both the stale refs and the headings it silently mangled.
 fn answer_nodes(g: &GraphStore, source: &str) -> anyhow::Result<Vec<String>> {
+    // Three cases, and the third is why this is not just a stricter parse. No `#` at all is a
+    // DOCUMENT-level ref and matches every Section in the file — that is legitimate and unchanged.
+    // A fragment of digits is the ordinal. A fragment that is anything else is a dataset error, and
+    // it must match NOTHING: falling through to the document-level path would make a bad ref match
+    // every section instead of one, which is broader than the bug it replaces.
     let (doc, page) = match source.split_once('#') {
-        Some((d, frag)) => {
-            let digits: String = frag.chars().filter(|c| c.is_ascii_digit()).collect();
-            (d.to_string(), digits.parse::<u32>().ok())
+        Some((d, frag)) if !frag.is_empty() && frag.bytes().all(|b| b.is_ascii_digit()) => {
+            (d.to_string(), frag.parse::<u32>().ok())
+        }
+        Some((_, frag)) => {
+            tracing::warn!(
+                source,
+                fragment = frag,
+                "gold ref's fragment is not an ordinal; refusing it (write it as `path#N`)"
+            );
+            return Ok(Vec::new());
         }
         None => (source.to_string(), None),
     };
@@ -263,9 +282,17 @@ mod tests {
         let out = answer_nodes(&g, "d.pdf#14").unwrap();
         assert_eq!(out, vec!["res:ans".to_string()]);
 
-        // The `#p.<N>` gold spelling parses to the same page and must match identically.
-        let out2 = answer_nodes(&g, "d.pdf#p.14").unwrap();
-        assert_eq!(out2, vec!["res:ans".to_string()]);
+        // The `#p.<N>` spelling is NOT accepted any more. It is a dataset error, and refusing it is
+        // how we find where it still sits; absorbing it also meant `#4.1.3 Safety` became ordinal
+        // 413, an ordinal invented out of a heading.
+        assert!(
+            answer_nodes(&g, "d.pdf#p.14").unwrap().is_empty(),
+            "a `p.N` fragment must not resolve to ordinal 14"
+        );
+        assert!(
+            answer_nodes(&g, "d.pdf#4.1.3 Safety").unwrap().is_empty(),
+            "a heading fragment must not be mangled into an ordinal"
+        );
     }
 
     #[test]
