@@ -1678,6 +1678,14 @@ pub fn doc_owned_inventory(g: &GraphStore, doc: &str) -> anyhow::Result<Option<D
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One unlabelled root — what `doc_file_in` treats as `root.join(key)`.
+    fn one_root(p: &std::path::Path) -> Vec<crate::root::Root> {
+        vec![crate::root::Root {
+            label: String::new(),
+            path: p.to_path_buf(),
+        }]
+    }
     use crate::graph::agent::NodeUpdate;
     use crate::graph::store::{Edge, Node, Provenance};
 
@@ -3281,7 +3289,7 @@ strict = true
             }],
             vec![],
             1,
-            dir.path(),
+            &one_root(dir.path()),
             "agent",
         )
         .unwrap();
@@ -4174,7 +4182,7 @@ strict = true
             }],
             vec![],
             1,
-            dir.path(),
+            &one_root(dir.path()),
             "agent",
         )
         .unwrap();

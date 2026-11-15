@@ -756,8 +756,8 @@ to = ["Resolution"]
         let g = GraphStore::open(dir.path()).unwrap();
         let ont = Ontology::parse(ONT).unwrap();
 
-        import_merge_layer(&g, &ont, make_export(), 1, dir.path()).unwrap();
-        import_merge_layer(&g, &ont, make_export(), 2, dir.path()).unwrap();
+        import_merge_layer(&g, &ont, make_export(), 1, &one_root(dir.path())).unwrap();
+        import_merge_layer(&g, &ont, make_export(), 2, &one_root(dir.path())).unwrap();
 
         let nonstructural = g
             .all_nodes()
@@ -806,7 +806,7 @@ to = ["Resolution"]
         .unwrap();
 
         // make_export() carries id "s1" with label "Label A".
-        import_merge_layer(&g, &ont, make_export(), 2, dir.path()).unwrap();
+        import_merge_layer(&g, &ont, make_export(), 2, &one_root(dir.path())).unwrap();
 
         let s1 = g.get_node("s1").unwrap().unwrap();
         assert_eq!(

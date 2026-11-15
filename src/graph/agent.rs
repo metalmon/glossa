@@ -514,11 +514,11 @@ strict = true
         let dir = tempfile::tempdir().unwrap();
         // A real file at an existing path DOES get a signature...
         std::fs::write(dir.path().join("a.md"), "hello").unwrap();
-        assert!(stat_sig(dir.path(), "a.md").is_some());
+        assert!(stat_sig(&one_root(dir.path()), "a.md").is_some());
         // ...but a blank or whitespace-only source_path (an ungrounded node) must not fall back
         // to stamping the corpus ROOT directory's own signature.
-        assert_eq!(stat_sig(dir.path(), ""), None);
-        assert_eq!(stat_sig(dir.path(), "   "), None);
+        assert_eq!(stat_sig(&one_root(dir.path()), ""), None);
+        assert_eq!(stat_sig(&one_root(dir.path()), "   "), None);
     }
 
     #[test]
