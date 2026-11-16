@@ -5,8 +5,33 @@ use std::path::Path;
 
 pub const CHUNK_CHAR_THRESHOLD: usize = 4000;
 
+/// Where one emitted chunk came from: the index of the section it was built in, and the half-open
+/// range of that section's element indices it covers.
+///
+/// Reported parallel to the chunk vector — entry `i` describes chunk `i`. Element indices restart in
+/// every section while chunk indices do not, so the section is part of the answer, not context.
+///
+/// The mapping is not total the other way round: a run of elements that renders to nothing emits no
+/// chunk (`flush_buf` returns early), and an empty paragraph past the threshold is dropped without
+/// ever entering a buffer. Those element indices are covered by no span at all. A caller resolving
+/// an anchor treats "no span contains it" as a real answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkSpan {
+    pub section: usize,
+    pub elements: std::ops::Range<usize>,
+}
+
 pub fn chunk_ir(path: &Path, ir: &DocumentIR, file_type: &str) -> Vec<Chunk> {
     chunk_ir_with_threshold(path, ir, file_type, CHUNK_CHAR_THRESHOLD)
+}
+
+/// `chunk_ir` plus the per-chunk report of the elements each chunk covers.
+pub fn chunk_ir_with_spans(
+    path: &Path,
+    ir: &DocumentIR,
+    file_type: &str,
+) -> (Vec<Chunk>, Vec<ChunkSpan>) {
+    chunk_ir_inner(path, ir, file_type, CHUNK_CHAR_THRESHOLD)
 }
 
 pub fn chunk_ir_with_threshold(
@@ -15,16 +40,31 @@ pub fn chunk_ir_with_threshold(
     file_type: &str,
     threshold: usize,
 ) -> Vec<Chunk> {
-    let mut out = Vec::new();
+    chunk_ir_inner(path, ir, file_type, threshold).0
+}
 
-    for section in &ir.sections {
+fn chunk_ir_inner(
+    path: &Path,
+    ir: &DocumentIR,
+    file_type: &str,
+    threshold: usize,
+) -> (Vec<Chunk>, Vec<ChunkSpan>) {
+    let mut out = Vec::new();
+    let mut spans: Vec<ChunkSpan> = Vec::new();
+
+    for (section_index, section) in ir.sections.iter().enumerate() {
         let section_title = section.title.as_deref();
         let mut heading_path: Vec<String> = Vec::new();
         let mut buf: Vec<Element> = Vec::new();
+        let mut buf_start: Option<usize> = None;
         let mut glued_note_after_table = false;
 
-        for el in &section.elements {
-            if let Element::Heading(h) = el {
+        // Flush, and record the range only if a chunk actually came out. `flush_buf` emits at most
+        // one chunk and sometimes none, so the growth of `out` is what decides — the bookkeeping
+        // never decides anything the walk had not already decided.
+        macro_rules! flush_recording {
+            ($end:expr) => {{
+                let before = out.len();
                 flush_buf(
                     path,
                     file_type,
@@ -33,10 +73,24 @@ pub fn chunk_ir_with_threshold(
                     section_title,
                     &mut out,
                 );
+                if out.len() > before {
+                    spans.push(ChunkSpan {
+                        section: section_index,
+                        elements: buf_start.unwrap_or($end)..$end,
+                    });
+                }
+                buf_start = None;
+            }};
+        }
+
+        for (element_index, el) in section.elements.iter().enumerate() {
+            if let Element::Heading(h) = el {
+                flush_recording!(element_index);
                 glued_note_after_table = false;
                 let title = inline_md(&h.content);
                 let level = h.level as usize;
                 heading_path.truncate(level.saturating_sub(1));
+                buf_start.get_or_insert(element_index);
                 heading_path.push(title);
                 buf.push(el.clone());
                 continue;
@@ -45,17 +99,12 @@ pub fn chunk_ir_with_threshold(
             let rendered_len = render_elements(&buf).chars().count();
             if is_empty_paragraph(el) {
                 if rendered_len >= threshold {
-                    flush_buf(
-                        path,
-                        file_type,
-                        &mut buf,
-                        &heading_path,
-                        section_title,
-                        &mut out,
-                    );
+                    flush_recording!(element_index);
                     glued_note_after_table = false;
+                    // This element enters no buffer, so no span covers it: a gap, by design.
                     continue;
                 }
+                buf_start.get_or_insert(element_index);
                 buf.push(el.clone());
                 glued_note_after_table = false;
                 continue;
@@ -72,39 +121,28 @@ pub fn chunk_ir_with_threshold(
                     && !glued_note_after_table;
 
                 if glue_caption_to_table {
+                    buf_start.get_or_insert(element_index);
                     buf.push(el.clone());
                     glued_note_after_table = false;
                     continue;
                 }
                 if glue_note_to_table {
+                    buf_start.get_or_insert(element_index);
                     buf.push(el.clone());
                     glued_note_after_table = true;
                     continue;
                 }
 
-                flush_buf(
-                    path,
-                    file_type,
-                    &mut buf,
-                    &heading_path,
-                    section_title,
-                    &mut out,
-                );
+                flush_recording!(element_index);
             }
 
+            buf_start.get_or_insert(element_index);
             buf.push(el.clone());
             glued_note_after_table = false;
         }
-        flush_buf(
-            path,
-            file_type,
-            &mut buf,
-            &heading_path,
-            section_title,
-            &mut out,
-        );
+        flush_recording!(section.elements.len());
     }
-    out
+    (out, spans)
 }
 
 fn is_empty_paragraph(el: &Element) -> bool {
@@ -273,6 +311,102 @@ mod tests {
             })],
             ..Default::default()
         })
+    }
+
+    /// The report is parallel to the chunk vector and carries the section index, because element
+    /// indices restart in every section while chunk indices do not.
+    #[test]
+    fn chunk_ir_reports_a_section_and_element_range_per_chunk() {
+        let heading = |text: &str| {
+            Element::Heading(Heading {
+                level: 1,
+                content: vec![InlineContent::Text(TextSpan {
+                    text: text.into(),
+                    ..Default::default()
+                })],
+                ..Default::default()
+            })
+        };
+        let ir = DocumentIR {
+            sections: vec![
+                Section {
+                    elements: vec![heading("H1"), text_para("a"), text_para("b")],
+                    ..Default::default()
+                },
+                Section {
+                    elements: vec![text_para("c")],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let (chunks, spans) = chunk_ir_with_spans(Path::new("a.docx"), &ir, "docx");
+        assert_eq!(chunks.len(), spans.len(), "{spans:?}");
+        assert_eq!(
+            spans,
+            vec![
+                ChunkSpan {
+                    section: 0,
+                    elements: 0..3,
+                },
+                ChunkSpan {
+                    section: 1,
+                    elements: 0..1,
+                },
+            ],
+            "{spans:?}"
+        );
+        assert!(chunks[0].text.contains("H1") && chunks[0].text.contains('b'));
+        assert!(chunks[1].text.contains('c'));
+    }
+
+    /// The guard that the bookkeeping is additive: the chunks are byte-for-byte what they were
+    /// before the report existed, and the reporting entry point agrees with the plain one.
+    #[test]
+    fn chunk_ir_output_is_unchanged_by_the_reporting() {
+        let ir = DocumentIR {
+            sections: vec![Section {
+                elements: vec![
+                    Element::Heading(Heading {
+                        level: 1,
+                        content: vec![InlineContent::Text(TextSpan {
+                            text: "Alpha".into(),
+                            ..Default::default()
+                        })],
+                        ..Default::default()
+                    }),
+                    text_para("one"),
+                    text_para(""),
+                    Element::Heading(Heading {
+                        level: 2,
+                        content: vec![InlineContent::Text(TextSpan {
+                            text: "Beta".into(),
+                            ..Default::default()
+                        })],
+                        ..Default::default()
+                    }),
+                    text_para("two"),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let chunks = chunk_ir(Path::new("a.docx"), &ir, "docx");
+        let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+        let locs: Vec<String> = chunks.iter().map(|c| c.location.display()).collect();
+        assert_eq!(texts, ["# Alpha\n\none", "## Beta\n\ntwo"], "{texts:?}");
+        assert_eq!(locs, ["Alpha", "Alpha > Beta"], "{locs:?}");
+
+        let (reported, _) = chunk_ir_with_spans(Path::new("a.docx"), &ir, "docx");
+        assert_eq!(reported.len(), chunks.len());
+        for (a, b) in reported.iter().zip(&chunks) {
+            assert_eq!(a.text, b.text);
+            assert_eq!(a.location.display(), b.location.display());
+            assert_eq!(a.file_type, b.file_type);
+            assert_eq!(a.doc_path, b.doc_path);
+        }
     }
 
     #[test]
