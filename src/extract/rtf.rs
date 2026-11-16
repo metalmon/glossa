@@ -760,7 +760,10 @@ impl Extractor for RtfExtractor {
         }
         let mut ir = rtf_to_ir(bytes);
         crate::extract::office_table::expand_merged_tables(&mut ir);
-        let chunks = chunk_ir(path, &ir, "rtf");
+        let mut chunks = chunk_ir(path, &ir, "rtf");
+        // The body walk skips `{\object …}` whole (see `is_noise_destination`), so an embedded
+        // legacy chart's data grid is recovered separately, straight off the raw bytes.
+        chunks.extend(crate::extract::rtf_chart::extract_charts(path, bytes));
         if chunks.is_empty() {
             return Err(anyhow!("rtf produced no chunks for {}", path.display()));
         }
@@ -1014,5 +1017,104 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(chunks[0].file_type, "rtf");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Embedded legacy MSGraph chart (`rtf_chart.rs`)
+    // ---------------------------------------------------------------------------------------
+
+    /// The committed fixture, as text — pure ASCII by construction, so this never panics.
+    fn legacy_chart_fixture() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join("sample_chart_legacy.rtf");
+        String::from_utf8(std::fs::read(&path).unwrap()).unwrap()
+    }
+
+    fn joined(chunks: &[Chunk]) -> String {
+        chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn legacy_chart_datasheet_becomes_a_table_chunk() {
+        let rtf = legacy_chart_fixture();
+        let chunks = RtfExtractor
+            .extract(Path::new("chart.rtf"), rtf.as_bytes())
+            .unwrap();
+        let t = joined(&chunks);
+        assert!(t.contains("Chart: Chart 1"), "chart header missing:\n{t}");
+        assert!(t.contains('|') && t.contains("---"), "no GFM table:\n{t}");
+        // series names (datasheet column 0) and category labels (row 0)
+        for s in ["Apples", "Pears", "Plums", "Qtr1", "Qtr2", "Qtr3", "Qtr4"] {
+            assert!(t.contains(s), "label {s} missing:\n{t}");
+        }
+        // values, including the one whose zero fraction must not render as "90.0"
+        for v in ["20.4", "27.4", "90", "38.6", "45.9", "43.9"] {
+            assert!(t.contains(v), "value {v} missing:\n{t}");
+        }
+        assert!(chunks.iter().all(|c| c.file_type == "rtf"));
+    }
+
+    #[test]
+    fn the_object_group_does_not_eat_the_document_body() {
+        let rtf = legacy_chart_fixture();
+        let chunks = RtfExtractor
+            .extract(Path::new("chart.rtf"), rtf.as_bytes())
+            .unwrap();
+        let t = joined(&chunks);
+        for s in [
+            "glossa sample",
+            "Quarterly fruit sales, charted below.",
+            "End of sample.",
+        ] {
+            assert!(t.contains(s), "body text {s:?} missing:\n{t}");
+        }
+    }
+
+    /// Cutting the hex short leaves the OLE1 header's native-length field promising more bytes
+    /// than follow. The object is dropped; the document still extracts.
+    #[test]
+    fn a_truncated_objdata_yields_no_chart_and_no_error() {
+        let rtf = legacy_chart_fixture();
+        let start = rtf.find(r"{\*\objdata").unwrap();
+        let end = rtf[start..].find('}').unwrap() + start;
+        let cut = format!("{}{}", &rtf[..start + 400], &rtf[end..]);
+        let chunks = RtfExtractor
+            .extract(Path::new("cut.rtf"), cut.as_bytes())
+            .unwrap();
+        let t = joined(&chunks);
+        assert!(!t.contains("Chart:"), "chart survived truncation:\n{t}");
+        assert!(t.contains("glossa sample"), "body text lost:\n{t}");
+    }
+
+    /// The gate is the class in the OLE1 header, not `\objclass`. Flipping one hex digit of
+    /// "MSGraph" there makes this some other embedded object, which we leave alone.
+    #[test]
+    fn a_non_msgraph_class_yields_no_chart_and_no_error() {
+        // "MSGraph" as ASCII hex; the final `68` is 'h'.
+        let other = legacy_chart_fixture().replace("4d534772617068", "4d534772617039");
+        let chunks = RtfExtractor
+            .extract(Path::new("other.rtf"), other.as_bytes())
+            .unwrap();
+        let t = joined(&chunks);
+        assert!(!t.contains("Chart:"), "foreign class was parsed:\n{t}");
+        assert!(t.contains("glossa sample"), "body text lost:\n{t}");
+    }
+
+    /// A payload that is not a compound file at all (its magic cleared) must be skipped
+    /// quietly — never a panic, never an error.
+    #[test]
+    fn objdata_that_is_not_a_compound_file_does_not_panic() {
+        let junk = legacy_chart_fixture().replace("d0cf11e0a1b11ae1", "0000000000000000");
+        let chunks = RtfExtractor
+            .extract(Path::new("junk.rtf"), junk.as_bytes())
+            .unwrap();
+        let t = joined(&chunks);
+        assert!(!t.contains("Chart:"), "junk payload was parsed:\n{t}");
+        assert!(t.contains("glossa sample"), "body text lost:\n{t}");
     }
 }

@@ -28,6 +28,7 @@ pub mod office_table;
 pub mod ooxml_chart;
 pub mod pdf;
 pub mod rtf;
+pub mod rtf_chart;
 pub mod text;
 
 /// Extract one file's chunks into `sink`. Whole-file binary/doc formats (md/office/pdf) are read

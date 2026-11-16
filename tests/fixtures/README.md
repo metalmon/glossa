@@ -50,6 +50,14 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
   appends a synthetic "Charts" section to its IR) and our `ooxml_chart` OOXML chart-data
   extraction — and the de-duplication between them (`src/extract/office.rs`'s
   `synthetic_xlsx_chart_section_chart_count` and `xlsx_chart_part_names`).
+- `sample_chart_legacy.rtf` — hand-built RTF (pure ASCII, 6.6 KB) carrying an OLE1-embedded
+  legacy `MSGraph.Chart.8` object: `{\*\objdata <hex>}` → OLE1 native header → compound file →
+  `Workbook` stream (in the *mini* stream) → BIFF globals + chart substreams, the datasheet
+  written as `0x0004` LABEL / `0x0003` NUMBER records in the short BIFF2-shaped layout MSGraph
+  actually emits. Grid: Qtr1–Qtr4 × Apples/Pears/Plums. Exercises `src/extract/rtf_chart.rs`.
+  Hand-built, **not** Office-generated: a Word-produced version of this exact file carries
+  non-ASCII text in three separate layers (datasheet cells, series-name records, the EPRINT
+  metafile) plus 27 localized style names, none of which the chart path needs.
 - `sample_legacy.doc` / `sample_legacy.xls` — legacy binary OLE Office (Word 97-2003 / Excel
   97-2003) each carrying one embedded 1×1 PNG picture (exercises `office_oxide::{doc,xls}::images`
   extraction wired into `read.rs`). Generated via MS Office COM with document metadata scrubbed

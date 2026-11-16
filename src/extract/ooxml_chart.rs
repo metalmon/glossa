@@ -144,7 +144,7 @@ fn cell(text: &str) -> TableCell {
 
 /// Pivot ChartData into an IR table: header ["" , series names...], one body
 /// row per category index with the value from each series at that index.
-fn chart_to_table(cd: &ChartData) -> Table {
+pub(crate) fn chart_to_table(cd: &ChartData) -> Table {
     let n_rows = cd.series.iter().map(|s| s.vals.len()).max().unwrap_or(0);
     // category labels: take the longest cats list among series (they usually match)
     let cats = cd.series.iter().map(|s| &s.cats).max_by_key(|c| c.len());
