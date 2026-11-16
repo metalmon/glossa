@@ -64,6 +64,7 @@ fn chunk_ir_inner(
         // never decides anything the walk had not already decided.
         macro_rules! flush_recording {
             ($end:expr) => {{
+                let start = buf_start.take();
                 let before = out.len();
                 flush_buf(
                     path,
@@ -76,10 +77,9 @@ fn chunk_ir_inner(
                 if out.len() > before {
                     spans.push(ChunkSpan {
                         section: section_index,
-                        elements: buf_start.unwrap_or($end)..$end,
+                        elements: start.unwrap_or($end)..$end,
                     });
                 }
-                buf_start = None;
             }};
         }
 
