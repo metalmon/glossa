@@ -19,6 +19,17 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
   synthetic English bar chart: title "Sales by quarter", series "Series 1"/"Series 2", categories
   Q1–Q3, cached values). Exercises OOXML chart-data extraction. Hand-built (not Office-generated —
   real Office files carry locale boilerplate); the chart part is unreferenced, inert to the text path.
+- `sample_chart_anchored.docx` — hand-built FROM `sample_chart.docx` (same body paragraphs, the
+  same `word/charts/chart1.xml` verbatim), with the anchoring that one deliberately lacks: a real
+  `<w:drawing>` → `<a:graphicData>` → `<c:chart r:id="rId10"/>` and the
+  `word/_rels/document.xml.rels` chain that resolves it. Because the chart is actually referenced,
+  `office_oxide` 0.1.17 hoists its text into the body flow as plain paragraphs — so this is the
+  fixture that exercises the docx de-duplication in `src/extract/office.rs`
+  (`drop_hoisted_docx_chart_text`); `sample_chart.docx`'s unreferenced part cannot reach that path
+  at all. It also carries a SmartArt diagram (`<dgm:relIds r:dm="rId11"/>` →
+  `word/diagrams/data1.xml`, nodes "Diagram node alpha"/"beta") whose text rides the SAME converter
+  path with no chart chunk of ours to replace it — the guard that the de-duplication must not eat
+  it. Pure ASCII, built by an untracked scratchpad script, never Office-generated.
 - `sample_chart.ods` — the minimal `sample.ods` with an injected `Object 1/` embedded chart
   sub-document (`chart:bar`, title "Sales by quarter", a LOCAL `<table:table>` data cache: Series
   1/2, Q1–Q3). Exercises ODF chart-data extraction. Hand-built English; mirrors how LibreOffice/odfpy

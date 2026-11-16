@@ -48,6 +48,20 @@ const EXPECTED: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // The anchored counterpart: its chart part IS referenced from the body
+        // (`w:drawing` -> `a:graphicData` -> `c:chart r:id`), so `office_oxide` hoists the
+        // chart's text into the body flow and `drop_hoisted_docx_chart_text` takes that copy
+        // back out. If the body string below ever grows "Title: Sales by quarter" or a bare
+        // "Series 2: ..." line, the de-duplication stopped firing and the chart is indexed
+        // twice. The SmartArt lines ("Diagram node ...") belong in the body and must stay:
+        // nothing of ours re-emits them.
+        "sample_chart_anchored.docx",
+        &[
+            "Sample\n\nglossa sample document used as a neutral test fixture.\n\nBody text that follows the chart.\n\nDiagram node alpha\n\nDiagram node beta\n\nBody text that follows the diagram.",
+            "Chart: Sales by quarter (barChart)\n\n|  | Series 1 | Series 2 |\n| --- | --- | --- |\n| Q1 | 4.3 | 2.4 |\n| Q2 | 2.5 | 4.4 |\n| Q3 | 3.5 | 3.5 |",
+        ],
+    ),
+    (
         // The sheet, then the chart — exactly two. `office_oxide` also builds its own synthetic
         // "Charts" section for xlsx; a third chunk here means the pass that drops it stopped
         // recognising its shape and the chart's numbers are in the index twice.

@@ -4,7 +4,7 @@ use crate::extract::Extractor;
 use crate::model::Chunk;
 use anyhow::anyhow;
 use office_oxide::{Document, DocumentFormat};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::path::Path;
 
@@ -89,6 +89,258 @@ fn xlsx_chart_part_names(bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
+/// The OOXML relationship type of a chart part.
+const CHART_REL_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart";
+
+/// Every chart relationship declared by `word/_rels/document.xml.rels`, mapped from its id to the
+/// package part it resolves to — the same resolution `office_oxide`'s own reader does when it goes
+/// looking for a `<c:chart r:id="…"/>`'s text. Empty (so the whole docx pass is skipped) for a
+/// document that references no chart at all, which is the common case and the cheap one: it costs
+/// one small zip entry and no second parse of the document.
+fn docx_chart_parts_by_rel_id(bytes: &[u8]) -> HashMap<String, String> {
+    use quick_xml::events::Event;
+
+    use std::io::Read as _;
+
+    let mut out = HashMap::new();
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(bytes)) else {
+        return out;
+    };
+    let Ok(mut rels) = zip.by_name("word/_rels/document.xml.rels") else {
+        return out;
+    };
+    let mut xml = String::new();
+    if rels.read_to_string(&mut xml).is_err() {
+        return out;
+    }
+
+    let mut reader = quick_xml::Reader::from_str(&xml);
+    reader.config_mut().check_end_names = false;
+    loop {
+        let e = match reader.read_event() {
+            Ok(Event::Empty(e)) | Ok(Event::Start(e)) => e,
+            Ok(Event::Eof) | Err(_) => break,
+            _ => continue,
+        };
+        if e.local_name().as_ref() != b"Relationship" {
+            continue;
+        }
+        let mut id = None;
+        let mut ty = None;
+        let mut target = None;
+        // `TargetMode="External"` names a part outside the package, which neither pass can read;
+        // such a relationship is left out and so simply never matches a drawing.
+        let mut external = false;
+        for attr in e.attributes().flatten() {
+            let value = String::from_utf8_lossy(&attr.value).into_owned();
+            let name = attr.key.local_name();
+            let name = name.as_ref();
+            if name == b"Id" {
+                id = Some(value);
+            } else if name == b"Type" {
+                ty = Some(value);
+            } else if name == b"Target" {
+                target = Some(value);
+            } else if name == b"TargetMode" {
+                external = value == "External";
+            }
+        }
+        if external || ty.as_deref() != Some(CHART_REL_TYPE) {
+            continue;
+        }
+        if let (Some(id), Some(part)) =
+            (id, target.as_deref().and_then(resolve_document_rel_target))
+        {
+            out.insert(id, part);
+        }
+    }
+    out
+}
+
+/// A `word/_rels/document.xml.rels` target as a package part name. Targets are relative to the
+/// part that owns the relationship (`word/document.xml`), except a leading `/` which makes them
+/// package-absolute. Anything that walks upwards returns `None` rather than a guess — an
+/// unresolved chart keeps both copies, which is the safe side.
+fn resolve_document_rel_target(target: &str) -> Option<String> {
+    if let Some(abs) = target.strip_prefix('/') {
+        return Some(abs.to_string());
+    }
+    let t = target.strip_prefix("./").unwrap_or(target);
+    if t.is_empty() || t.contains("..") {
+        return None;
+    }
+    Some(format!("word/{t}"))
+}
+
+/// Every drawing in the body that references a chart part whose text `office_oxide` recovered, in
+/// document order, as `(relationship id, the lines it recovered)`. Those exact lines are what
+/// `convert_docx.rs`'s `collect_paragraph_chart_text` pushes into the IR as plain paragraphs, one
+/// per line, at the chart's slot in the body flow.
+///
+/// `dgm_text` — a SmartArt diagram's text, which travels the very same path — is deliberately NOT
+/// collected: nothing of ours re-emits it, so it must stay in the body flow or it is lost.
+fn collect_docx_chart_drawings(
+    blocks: &[office_oxide::docx::BlockElement],
+    out: &mut Vec<(String, Vec<String>)>,
+) {
+    use office_oxide::docx::{BlockElement, ParagraphContent, Run, RunContent};
+
+    for block in blocks {
+        match block {
+            BlockElement::Paragraph(p) => {
+                for pc in &p.content {
+                    let runs: &[Run] = match pc {
+                        ParagraphContent::Run(r) => std::slice::from_ref(r),
+                        ParagraphContent::Hyperlink(hl) => &hl.runs,
+                    };
+                    for run in runs {
+                        for rc in &run.content {
+                            match rc {
+                                RunContent::Drawing(d) => {
+                                    if let Some(rid) = d.chart_rel_id.as_deref() {
+                                        if !d.chart_text.is_empty() {
+                                            out.push((rid.to_string(), d.chart_text.to_vec()));
+                                        }
+                                    }
+                                }
+                                // A text box's body is ordinary block content and can hold a
+                                // chart of its own; `convert_docx` hoists from there too.
+                                RunContent::TextBox(inner) => {
+                                    collect_docx_chart_drawings(inner, out)
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            BlockElement::Table(t) => {
+                for row in &t.rows {
+                    for cell in &row.cells {
+                        collect_docx_chart_drawings(&cell.content, out);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The text of an IR element that is exactly the shape `collect_paragraph_chart_text` emits: a
+/// paragraph holding one plain text span and nothing else. Anything richer — a styled run, a
+/// heading, two spans — is a body paragraph and is never a candidate.
+fn hoisted_line_text(e: &office_oxide::ir::Element) -> Option<&str> {
+    use office_oxide::ir::{Element, InlineContent};
+
+    let Element::Paragraph(p) = e else {
+        return None;
+    };
+    match p.content.as_slice() {
+        [InlineContent::Text(t)] => Some(t.text.as_str()),
+        _ => None,
+    }
+}
+
+/// Where in the IR a chart's hoisted lines sit: the first contiguous run of plain paragraphs, at
+/// or after `from`, whose texts equal `lines` in order. Searching forward from the previous
+/// chart's run keeps two charts with identical text from both resolving to the first one.
+fn find_hoisted_chart_run(
+    ir: &office_oxide::ir::DocumentIR,
+    from: (usize, usize),
+    lines: &[String],
+) -> Option<(usize, usize)> {
+    for s in from.0..ir.sections.len() {
+        let els = &ir.sections[s].elements;
+        if els.len() < lines.len() {
+            continue;
+        }
+        let start = if s == from.0 { from.1 } else { 0 };
+        for i in start..=(els.len() - lines.len()) {
+            if lines
+                .iter()
+                .enumerate()
+                .all(|(k, line)| hoisted_line_text(&els[i + k]) == Some(line.as_str()))
+            {
+                return Some((s, i));
+            }
+        }
+    }
+    None
+}
+
+/// Drop the copy of a chart's text that `office_oxide` 0.1.17 hoists into the docx body flow —
+/// but only for a chart part our own `ooxml_chart` pass covered, so the words it removes are
+/// words that reach the index anyway, in a better shape (`Chart: <title>` plus a markdown table).
+///
+/// This is the xlsx de-duplication (`synthetic_xlsx_chart_section_chart_count` above) in the
+/// harder form the docx reader presents: there is no synthetic section and no heading pattern to
+/// recognise, because the lines are unmarked paragraphs sitting in the middle of the body. The
+/// identification is therefore made with `office_oxide`'s own public docx parser rather than by a
+/// text heuristic: `DrawingInfo::chart_rel_id` says which relationship a drawing points at and
+/// `DrawingInfo::chart_text` gives the exact lines the converter will emit for it, so the IR
+/// paragraphs are matched by that value, in document order, and nothing else is ever a candidate.
+///
+/// When identification fails — the relationship does not resolve, our pass did not cover the
+/// part (a chart with no series, say), or the lines are not where they should be — BOTH copies
+/// are kept and a warning names the file and the chart. Losing a chart to tidy the index is the
+/// worse failure, and it is doubly so for SmartArt, whose text rides the same converter path with
+/// no chart chunk of ours to replace it; `collect_docx_chart_drawings` never collects it.
+fn drop_hoisted_docx_chart_text(
+    path: &Path,
+    bytes: &[u8],
+    ir: &mut office_oxide::ir::DocumentIR,
+    covered_chart_parts: &[String],
+) {
+    let parts_by_rel_id = docx_chart_parts_by_rel_id(bytes);
+    if parts_by_rel_id.is_empty() {
+        return;
+    }
+    let doc = match office_oxide::docx::DocxDocument::from_reader(Cursor::new(bytes.to_vec())) {
+        Ok(doc) => doc,
+        Err(e) => {
+            tracing::warn!(
+                "docx {}: could not re-read the package to tell chart text from body text ({e}) — keeping both copies of every chart's text",
+                path.display()
+            );
+            return;
+        }
+    };
+    let mut drawings = Vec::new();
+    collect_docx_chart_drawings(&doc.body.elements, &mut drawings);
+    if drawings.is_empty() {
+        return;
+    }
+    let covered: HashSet<&str> = covered_chart_parts.iter().map(String::as_str).collect();
+    // Charts are visited in document order and the search never looks back, so one chart's run is
+    // never claimed by another. A chart we keep still advances the cursor past its own lines.
+    let mut cursor = (0usize, 0usize);
+    for (rel_id, lines) in drawings {
+        let part = parts_by_rel_id.get(&rel_id);
+        let Some((section, at)) = find_hoisted_chart_run(ir, cursor, &lines) else {
+            tracing::warn!(
+                "docx {}: chart relationship {rel_id} named {} line(s) of text that are not in the document flow where the converter puts them — keeping whatever is there rather than removing the wrong paragraphs",
+                path.display(),
+                lines.len()
+            );
+            continue;
+        };
+        match part {
+            Some(part) if covered.contains(part.as_str()) => {
+                ir.sections[section].elements.drain(at..at + lines.len());
+                cursor = (section, at);
+            }
+            _ => {
+                tracing::warn!(
+                    "docx {}: chart relationship {rel_id} resolves to {}, which our chart pass did not cover — keeping office_oxide's copy of its text rather than risk losing the chart",
+                    path.display(),
+                    part.map(String::as_str).unwrap_or("no readable chart part")
+                );
+                cursor = (section, at + lines.len());
+            }
+        }
+    }
+}
+
 impl Extractor for OfficeExtractor {
     fn file_types(&self) -> &'static [&'static str] {
         &["docx", "doc", "xlsx", "xlsb", "xls", "pptx", "ppt"]
@@ -131,6 +383,9 @@ impl Extractor for OfficeExtractor {
                     );
                 }
             }
+        }
+        if ext == "docx" {
+            drop_hoisted_docx_chart_text(path, bytes, &mut ir, &covered_chart_parts);
         }
         let mut chunks = chunk_ir(path, &ir, &ext);
         chunks.extend(chart_chunks);
@@ -320,6 +575,186 @@ mod tests {
             chunks.iter().any(|c| c.text.starts_with("Chart:")),
             "expected a chart chunk appended, got: {chunks:?}"
         );
+    }
+
+    /// Repack `sample_chart_anchored.docx` with one part swapped. Used to build the
+    /// identification-failure cases without committing a second near-identical fixture.
+    fn anchored_fixture_with(part: &str, replacement: &[u8]) -> Vec<u8> {
+        use std::io::{Read as _, Write as _};
+        let mut zr = zip::ZipArchive::new(Cursor::new(
+            include_bytes!("../../tests/fixtures/sample_chart_anchored.docx").to_vec(),
+        ))
+        .unwrap();
+        let names: Vec<String> = zr
+            .file_names()
+            .filter(|n| !n.ends_with('/'))
+            .map(|s| s.to_string())
+            .collect();
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            for name in names {
+                let mut bytes = Vec::new();
+                zr.by_name(&name).unwrap().read_to_end(&mut bytes).unwrap();
+                zw.start_file(&name, opts).unwrap();
+                zw.write_all(if name == part {
+                    replacement
+                } else {
+                    bytes.as_slice()
+                })
+                .unwrap();
+            }
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    fn joined(chunks: &[Chunk]) -> String {
+        chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// `office_oxide` 0.1.17 hoists a native chart's text into the docx body flow as plain
+    /// paragraphs at the chart's own slot, while our `ooxml_chart` pass builds a well-formed
+    /// `Chart: …` chunk from the very same part — so without the de-duplication the chart's
+    /// words reach the index twice, in two shapes. `sample_chart_anchored.docx` is the fixture
+    /// that actually exercises this: unlike `sample_chart.docx`, its chart part is referenced
+    /// through a real `w:drawing` → `a:graphicData` → `c:chart r:id`.
+    #[test]
+    fn docx_chart_text_is_not_duplicated() {
+        let bytes = include_bytes!("../../tests/fixtures/sample_chart_anchored.docx");
+        let chunks = OfficeExtractor
+            .extract(Path::new("sample_chart_anchored.docx"), bytes)
+            .unwrap();
+        let text = joined(&chunks);
+
+        // "4.4" is a cached value of the chart's second series and appears nowhere in the body —
+        // the only ways it reaches the index are the two chart paths, so it is the clean signal.
+        assert_eq!(
+            text.matches("4.4").count(),
+            1,
+            "chart value must be indexed exactly once, got:\n{text}"
+        );
+        // And the copy that survived is ours, not the flat hoisted one.
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.text.starts_with("Chart: Sales by quarter")),
+            "expected the structured chart chunk to survive, got: {chunks:?}"
+        );
+        assert!(
+            !text.contains("Series 2: 2.4, 4.4, 3.5"),
+            "office_oxide's flat hoisted line is still in the index:\n{text}"
+        );
+    }
+
+    /// The guard that matters more than the de-duplication: the paragraphs around the chart are
+    /// ordinary body text and must come through untouched.
+    #[test]
+    fn docx_body_text_survives_the_chart_dedup() {
+        let bytes = include_bytes!("../../tests/fixtures/sample_chart_anchored.docx");
+        let chunks = OfficeExtractor
+            .extract(Path::new("sample_chart_anchored.docx"), bytes)
+            .unwrap();
+        let text = joined(&chunks);
+        for expected in [
+            "glossa sample document used as a neutral test fixture.",
+            "Body text that follows the chart.",
+            "Body text that follows the diagram.",
+        ] {
+            assert!(
+                text.contains(expected),
+                "the chart de-duplication ate body text {expected:?}, got:\n{text}"
+            );
+        }
+    }
+
+    /// A document that references no chart never reaches the matching code at all, so its chunks
+    /// are whatever they were before. `sample_chart.docx` is the sharper of the two cases: it
+    /// HAS a chart part, so our chart pass runs, but nothing in the body points at it.
+    #[test]
+    fn a_docx_with_no_chart_is_untouched_by_the_dedup() {
+        let plain = OfficeExtractor
+            .extract(
+                Path::new("sample.docx"),
+                include_bytes!("../../tests/fixtures/sample.docx"),
+            )
+            .unwrap();
+        assert_eq!(
+            plain.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            vec!["Sample\n\nglossa sample document used as a neutral test fixture."],
+        );
+
+        let unreferenced = OfficeExtractor
+            .extract(
+                Path::new("sample_chart.docx"),
+                include_bytes!("../../tests/fixtures/sample_chart.docx"),
+            )
+            .unwrap();
+        assert_eq!(
+            unreferenced
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Sample\n\nglossa sample document used as a neutral test fixture.",
+                "Chart: Sales by quarter (barChart)\n\n|  | Series 1 | Series 2 |\n| --- | --- | --- |\n| Q1 | 4.3 | 2.4 |\n| Q2 | 2.5 | 4.4 |\n| Q3 | 3.5 | 3.5 |",
+            ],
+        );
+    }
+
+    /// The worse failure mode, pinned. 0.1.17 routes a SmartArt diagram's text through the same
+    /// converter path as a chart's — plain paragraphs hoisted into the body flow — but nothing
+    /// of ours re-emits it, so removing it would simply lose it. The anchored fixture carries a
+    /// real `dgm:relIds` diagram next to its chart for exactly this test.
+    #[test]
+    fn smartart_text_is_not_eaten_by_the_chart_dedup() {
+        let bytes = include_bytes!("../../tests/fixtures/sample_chart_anchored.docx");
+        let chunks = OfficeExtractor
+            .extract(Path::new("sample_chart_anchored.docx"), bytes)
+            .unwrap();
+        let text = joined(&chunks);
+        for node in ["Diagram node alpha", "Diagram node beta"] {
+            assert_eq!(
+                text.matches(node).count(),
+                1,
+                "SmartArt text {node:?} must reach the index exactly once (it has no chart chunk \
+                 to replace it), got:\n{text}"
+            );
+        }
+    }
+
+    /// The data-loss guard: when our own pass does not cover the chart part a drawing points at
+    /// — here a chart with a title and no `<c:ser>` at all, which `ooxml_chart` skips — the
+    /// hoisted copy is the ONLY place that chart's text reaches the index, so both are kept and
+    /// a warning says so.
+    #[test]
+    fn docx_keeps_the_hoisted_chart_text_when_our_pass_misses_the_part() {
+        const TITLE_ONLY_CHART: &[u8] = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>Sales by quarter</a:t></a:r></a:p></c:rich></c:tx></c:title>
+<c:plotArea><c:barChart></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+
+        let buf = anchored_fixture_with("word/charts/chart1.xml", TITLE_ONLY_CHART);
+        let chunks = OfficeExtractor
+            .extract(Path::new("sample_chart_title_only.docx"), &buf)
+            .unwrap();
+        let text = joined(&chunks);
+
+        assert!(
+            !chunks.iter().any(|c| c.text.starts_with("Chart:")),
+            "our chart pass should not have covered a title-only chart, got: {chunks:?}"
+        );
+        assert!(
+            text.contains("Title: Sales by quarter"),
+            "the hoisted copy is the only place this chart's text could reach the index, so it \
+             must survive, got:\n{text}"
+        );
+        assert!(text.contains("Body text that follows the chart."), "{text}");
     }
 
     /// For xlsx, `office_oxide` appends its own synthetic "Charts" section (a flat blob per
