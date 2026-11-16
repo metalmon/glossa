@@ -1700,15 +1700,30 @@ fn is_lock_busy(e: &anyhow::Error) -> bool {
 /// (capped attempts) clears it; on other platforms the first attempt succeeds. `is_transient_fs`
 /// decides what counts as transient; a structural error propagates immediately, and even a
 /// persistently-transient-looking error propagates once the attempt cap is hit (never an infinite loop).
+/// How many times [`with_writer_retry`] re-attempts a transient filesystem failure. Five retries at
+/// the exponential backoff below spend about 1.55s in total, chosen because the holder is usually a
+/// virus scanner working on a file tantivy just wrote rather than anything this process controls.
+const RETRY_ATTEMPTS: u32 = 5;
+
 pub(crate) fn with_writer_retry<T>(
     mut op: impl FnMut() -> tantivy::Result<T>,
 ) -> tantivy::Result<T> {
     let mut attempt = 0u32;
     loop {
         match op() {
-            Err(e) if attempt < 4 && is_transient_fs(&e) => {
+            Err(e) if attempt < RETRY_ATTEMPTS && is_transient_fs(&e) => {
                 attempt += 1;
-                std::thread::sleep(std::time::Duration::from_millis(u64::from(40 * attempt)));
+                // Exponential, because the thing being waited out is not ours. The old budget was
+                // linear 40/80/120/160ms — 400ms in total — and the holder is typically Defender
+                // scanning a file tantivy just wrote, which routinely takes longer than that. When
+                // the budget runs out the error surfaces as a red CI leg indistinguishable from a
+                // real failure, which is how two of the three Windows flakes observed on
+                // 2026-11-15 looked. 50/100/200/400/800ms spends 1.55s instead; the only cost is
+                // that a transient-LOOKING permanent error now takes that long to be reported,
+                // and `is_transient_fs` has already excluded the permanent kinds.
+                std::thread::sleep(std::time::Duration::from_millis(
+                    50u64 << (attempt - 1).min(4),
+                ));
             }
             other => return other,
         }
@@ -6223,6 +6238,28 @@ mod retry_tests {
             "a non-transient (structural) error propagates"
         );
         assert_eq!(calls.get(), 1, "a non-transient error is not retried");
+    }
+
+    /// The attempt cap is the promise that this is a bounded retry and not an infinite loop, and
+    /// until now nothing checked it — the doc comment was the only guarantee. An error that stays
+    /// transient forever must propagate after exactly `RETRY_ATTEMPTS` retries, which is also what
+    /// keeps the backoff budget honest: raise the cap and this test says by how much.
+    #[test]
+    fn with_writer_retry_gives_up_after_the_attempt_cap() {
+        let calls = Cell::new(0u32);
+        let out: tantivy::Result<u32> = with_writer_retry(|| {
+            calls.set(calls.get() + 1);
+            Err(perm_denied())
+        });
+        assert!(
+            out.is_err(),
+            "a permanently transient error still propagates"
+        );
+        assert_eq!(
+            calls.get(),
+            RETRY_ATTEMPTS + 1,
+            "one first attempt plus RETRY_ATTEMPTS retries, then it gives up"
+        );
     }
 
     fn transient_io_err() -> anyhow::Error {
