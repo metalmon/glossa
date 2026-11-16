@@ -428,7 +428,7 @@ mod tests {
             .expect("--tls-cert baked in");
         assert!(std::path::Path::new(&s.args[i + 1]).is_absolute());
         assert!(s.args.iter().any(|a| a == "--tls-key"));
-        // Не заданный клиентский корень не превращается в mTLS по недосмотру.
+        // An unset client root must not silently turn the service into mTLS.
         assert!(!s.args.iter().any(|a| a == "--tls-client-ca"));
     }
 
