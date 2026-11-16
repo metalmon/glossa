@@ -1117,4 +1117,59 @@ mod tests {
         assert!(!t.contains("Chart:"), "junk payload was parsed:\n{t}");
         assert!(t.contains("glossa sample"), "body text lost:\n{t}");
     }
+
+    /// The fixture with its `\objdata` hex joined into one line. The reader skips whitespace in
+    /// the hex run, so this is the same document — it just lets a test patch a record or a
+    /// header field without the generator's 128-column wrap landing inside the patch.
+    fn legacy_chart_fixture_flat() -> String {
+        let rtf = legacy_chart_fixture();
+        let tag = r"{\*\objdata";
+        let start = rtf.find(tag).unwrap() + tag.len();
+        let end = rtf[start..].find('}').unwrap() + start;
+        format!(
+            "{}{}{}",
+            &rtf[..start],
+            rtf[start..end].replace(['\r', '\n'], ""),
+            &rtf[end..]
+        )
+    }
+
+    /// A single NUMBER record declaring `rw = col = 65535` makes the datasheet's extents claim
+    /// ~4.3 billion cells. That must cost one skipped chart, not an indexer stall.
+    #[test]
+    fn an_absurd_cell_index_yields_no_chart_and_no_error() {
+        // the r1c1 NUMBER record: `0300 0f00 | rw=0100 col=0100 | attr=000000 | <f64>`
+        let huge =
+            legacy_chart_fixture_flat().replace("03000f0001000100000000", "03000f00ffffffff000000");
+        assert!(
+            huge.contains("03000f00ffffffff000000"),
+            "the r1c1 NUMBER record was not found to patch"
+        );
+        let chunks = RtfExtractor
+            .extract(Path::new("huge.rtf"), huge.as_bytes())
+            .unwrap();
+        let t = joined(&chunks);
+        assert!(
+            !t.contains("Chart:"),
+            "over-cap datasheet was pivoted:\n{t}"
+        );
+        assert!(t.contains("glossa sample"), "body text lost:\n{t}");
+    }
+
+    /// Compound-file bytes that are structurally broken past the magic (here: a first-directory
+    /// sector pointing into deep space) must be skipped without panicking and without failing
+    /// the document.
+    #[test]
+    fn a_malformed_compound_file_does_not_panic() {
+        // header offset 48 is "first directory sector"; the generator writes 1.
+        let rtf = legacy_chart_fixture_flat();
+        let at = rtf.find("d0cf11e0a1b11ae1").unwrap() + 48 * 2;
+        let broken = format!("{}{}{}", &rtf[..at], "ffffff7f", &rtf[at + 8..]);
+        let chunks = RtfExtractor
+            .extract(Path::new("broken.rtf"), broken.as_bytes())
+            .unwrap();
+        let t = joined(&chunks);
+        assert!(!t.contains("Chart:"), "broken container was parsed:\n{t}");
+        assert!(t.contains("glossa sample"), "body text lost:\n{t}");
+    }
 }

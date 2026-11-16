@@ -204,14 +204,7 @@ fn odf_ext(ext: &str) -> bool {
 // rows -> ir::Table -> markdown path as the local-table case.
 // ---------------------------------------------------------------------------
 
-/// Cap on a single ODF cell-range span (rows or columns) and on repeat-attribute
-/// expansion, mirroring the ODF text extractor's bound: real files never need
-/// more, and this keeps a malformed/adversarial range or repeat count from
-/// materializing an unbounded Vec.
-const MAX_REPEAT: usize = 4096;
-/// Cap on the total number of cells materialized while reading the container's
-/// sheet grid (summed across all rows), independent of any single dimension.
-const MAX_GRID_CELLS: usize = 200_000;
+use crate::extract::{MAX_GRID_CELLS, MAX_REPEAT};
 
 type SheetGrid = std::collections::HashMap<String, Vec<Vec<String>>>;
 

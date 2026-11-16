@@ -26,13 +26,20 @@
 
 use crate::extract::office_table::table_to_markdown;
 use crate::extract::ooxml_chart::{chart_to_table, ChartData, Series};
+use crate::extract::{MAX_GRID_CELLS, MAX_REPEAT};
 use crate::model::Chunk;
 use office_oxide::cfb::{CfbReader, CFB_SIGNATURE};
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::Path;
 
 /// The one embedded class this reader claims to understand.
 const MSGRAPH_CLASS: &str = "MSGraph.Chart.8";
+
+/// Cap on the `Workbook` stream a compound file may declare. The real Word file's is 3 KB and
+/// the whole embedded object is 17 KB; this leaves four orders of magnitude of headroom while
+/// still refusing a directory entry that claims gigabytes.
+const MAX_WORKBOOK_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Every `{\*\objdata …}` payload in the file, hex-decoded.
 ///
@@ -83,7 +90,9 @@ fn decode_hex(h: &[u8]) -> Vec<u8> {
             _ => b - b'A' + 10,
         }
     }
-    h.chunks_exact(2)
+    h.as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| (nib(p[0]) << 4) | nib(p[1]))
         .collect()
 }
@@ -111,6 +120,27 @@ fn ole1_native(data: &[u8]) -> Option<(String, &[u8])> {
     let n = u32at(p)?;
     p = p.checked_add(4)?;
     Some((class, data.get(p..p.checked_add(n)?)?))
+}
+
+/// Read the `Workbook` stream out of an embedded compound file, or `None` for anything that is
+/// not one.
+///
+/// Guarded by `catch_unwind` for the same reason as `read.rs`'s `legacy_ole_images_guarded`:
+/// `CfbReader` runs a fragile container parser over arbitrary user bytes, and a panic in it
+/// would otherwise abort the whole extraction rather than cost one chart. The declared stream
+/// size is checked against `MAX_WORKBOOK_BYTES` *before* reading, so a header promising a huge
+/// stream cannot make us materialize it.
+fn workbook_stream(native: &[u8]) -> Option<Vec<u8>> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut cfb = CfbReader::new(Cursor::new(native)).ok()?;
+        let idx = cfb.find_entry("Workbook")?;
+        if cfb.entries().get(idx)?.stream_size > MAX_WORKBOOK_BYTES {
+            return None;
+        }
+        cfb.read_stream_by_index(idx).ok()
+    }))
+    .ok()
+    .flatten()
 }
 
 /// Walk `type(2) len(2) data` and read the datasheet cells, as `(row, col, text)`.
@@ -161,14 +191,39 @@ fn cells(stream: &[u8]) -> Vec<(u16, u16, String)> {
 
 /// Pivot the datasheet into the shape `ooxml_chart` already renders: row 0 is the category
 /// header, column 0 the series names, the interior the values.
-fn grid_to_chart(grid: &[(u16, u16, String)]) -> ChartData {
-    let at = |r: u16, c: u16| {
-        grid.iter()
-            .find(|x| x.0 == r && x.1 == c)
-            .map(|x| x.2.clone())
-    };
-    let max_row = grid.iter().map(|x| x.0).max().unwrap_or(0);
-    let max_col = grid.iter().map(|x| x.1).max().unwrap_or(0);
+///
+/// Bounded against the same hazard as `odf_chart::grid_range_values`, with the same two caps:
+/// `rw` and `col` are `u16` fields read straight out of an untrusted file, so the grid's extents
+/// are attacker-chosen. One 15-byte NUMBER record declaring `rw = 65535, col = 65535` would
+/// otherwise pivot into ~4.3 billion strings — a stalled indexer from a few hundred bytes.
+///
+/// Where `odf_chart` truncates to the budget, this skips the chart outright, because the two
+/// cases differ: an ODF range that overruns still addresses a real sheet, whereas here the
+/// extents are *derived from the cells themselves*, so a span past the cap means a corrupt or
+/// hostile record rather than a big datasheet — truncating would materialize a six-figure table
+/// of empty strings around the handful of genuine cells. The document still extracts its text;
+/// one warning names the file and the measured extents, so this is never silent.
+///
+/// Lookup is a map rather than a scan over `grid`: with a scan, every cell visited would cost
+/// another pass over every record, so a clamp alone would still leave a quadratic.
+fn grid_to_chart(grid: &[(u16, u16, String)], file_ctx: &Path) -> Option<ChartData> {
+    let max_row = usize::from(grid.iter().map(|x| x.0).max()?);
+    let max_col = usize::from(grid.iter().map(|x| x.1).max()?);
+    let total = max_row.saturating_mul(max_col);
+    if max_row > MAX_REPEAT || max_col > MAX_REPEAT || total > MAX_GRID_CELLS {
+        tracing::warn!(
+            "rtf {}: embedded chart datasheet spans rows 0..{max_row}, cols 0..{max_col} \
+             ({total} cells, span cap {MAX_REPEAT}, cell cap {MAX_GRID_CELLS}); skipping it",
+            file_ctx.display()
+        );
+        return None;
+    }
+    let cells: HashMap<(u16, u16), &str> = grid
+        .iter()
+        .map(|(r, c, v)| ((*r, *c), v.as_str()))
+        .collect();
+    // in range by construction: both bounds passed the MAX_REPEAT check, well under u16::MAX
+    let at = |r: usize, c: usize| cells.get(&(r as u16, c as u16)).map(|s| s.to_string());
     let cats: Vec<String> = (1..=max_col)
         .map(|c| at(0, c).unwrap_or_default())
         .collect();
@@ -177,6 +232,7 @@ fn grid_to_chart(grid: &[(u16, u16, String)]) -> ChartData {
         let vals: Vec<String> = (1..=max_col)
             .map(|c| at(r, c).unwrap_or_default())
             .collect();
+        // A row of nothing but gaps is a hole in a sparse datasheet, not a series.
         if vals.iter().all(String::is_empty) {
             continue;
         }
@@ -186,11 +242,11 @@ fn grid_to_chart(grid: &[(u16, u16, String)]) -> ChartData {
             vals,
         });
     }
-    ChartData {
+    Some(ChartData {
         title: None,
         kind: String::new(),
         series,
-    }
+    })
 }
 
 /// Render every legacy MSGraph chart embedded in `bytes` as a searchable chunk (header + GFM
@@ -206,22 +262,18 @@ pub fn extract_charts(path: &Path, bytes: &[u8]) -> Vec<Chunk> {
         if class != MSGRAPH_CLASS || !native.starts_with(&CFB_SIGNATURE) {
             continue;
         }
-        let Ok(mut cfb) = CfbReader::new(Cursor::new(native)) else {
-            tracing::warn!("embedded chart in {} is not readable", path.display());
-            continue;
-        };
-        let Ok(stream) = cfb.open_stream("Workbook") else {
+        let Some(stream) = workbook_stream(native) else {
             tracing::warn!(
-                "embedded chart in {} has no Workbook stream",
+                "embedded chart in {} has no readable Workbook stream",
                 path.display()
             );
             continue;
         };
-        let cd = grid_to_chart(&cells(&stream));
-        if cd.series.is_empty() {
+        let Some(cd) = grid_to_chart(&cells(&stream), path).filter(|cd| !cd.series.is_empty())
+        else {
             tracing::warn!("embedded chart in {} had no datasheet", path.display());
             continue;
-        }
+        };
         // No parent: chart parenting and chart ordinals are an open design question, and
         // `ooxml_chart` is flat for the same reason. `Chunk::labelled` until that is settled.
         let title = format!("Chart {}", out.len() + 1);
