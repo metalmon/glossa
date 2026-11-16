@@ -18,12 +18,12 @@ ignore = "0.4"
 regex = "1"
 regex-syntax = "0.8"
 globset = "0.4"
-# office_oxide is CEILINGED at 0.1.11, not merely floored. 0.1.12 added a field to
-# `ir::DocumentIR`, and `pdf_oxide` (which depends on office_oxide and builds that struct with a
-# literal that names every field) therefore stops compiling at 0.1.12+. Cargo unifies both of us
-# onto one 0.1.x, so until pdf_oxide default-fills that literal, 0.1.11 is the newest we can take —
-# which also keeps `.xlsb` (0.1.12) out of reach. Raise the ceiling, do not just bump the floor.
-office_oxide = ">=0.1.11, <0.1.12"
+# The old `<0.1.12` ceiling was ours, and it was wrong: `pdf_oxide 0.3.78` asks only for ^0.1.9 and
+# compiles fine against 0.1.17. Lifting it cost one field in a row copy (`TableRow::height_rule`)
+# and unblocked `.xlsb`, which office_oxide has read since 0.1.12. Floored at 0.1.17 because that
+# is where the IR places docx chart text at its own slot in the body flow; the lock pins the exact
+# version. Any bump here changes what `to_ir()` yields, so it forces an INDEX_SCHEMA_VERSION bump.
+office_oxide = ">=0.1.17, <0.2"
 pdf_oxide = { version = "0.3.78", default-features = false, features = ["rendering", "legacy-crypto", "parallel"] }
 rdocx = "0.1"
 tantivy = { version = "0.26", default-features = false, features = ["mmap", "lz4-compression", "stemmer", "stopwords"] }

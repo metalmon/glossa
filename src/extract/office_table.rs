@@ -154,6 +154,7 @@ pub fn expand_table(table: &Table) -> Table {
             cells,
             is_header: row.is_header,
             height_twips: row.height_twips,
+            height_rule: row.height_rule,
             allow_break: row.allow_break,
             repeat_as_header: row.repeat_as_header,
         });
