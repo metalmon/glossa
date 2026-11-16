@@ -1386,7 +1386,9 @@ mod tests {
     /// `./` instead (`"./Object 2"`). Both must normalize to the bare directory name so either
     /// spelling lands on the same key `odf_chart.rs` derives from the zip part name — a
     /// mismatch here fails silently (the chart just keeps its label), so both forms are pinned
-    /// in one test rather than trusting only the fixture (which exercises one spelling).
+    /// in one test rather than trusting only the fixture (which exercises one spelling). Also
+    /// covers the `"odp" => current_slide.clone()` arm, which no real fixture exercises (every
+    /// `.odp` chart fixture is an orphan).
     #[test]
     fn draw_object_href_both_producer_spellings_normalize_to_same_key() {
         let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
@@ -1417,6 +1419,34 @@ mod tests {
             object_containers.get("Object 2").map(String::as_str),
             Some("B"),
             "hand-built-style leading-./ href not normalized: {object_containers:?}"
+        );
+
+        // The ODP arm ("odp" => current_slide.clone()) is otherwise untested: every real .odp
+        // fixture (sample_chart.odp) is an orphan, so nothing pins that a chart anchored inside
+        // a <draw:page> actually records the slide name.
+        let odp_xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:xlink="http://www.w3.org/1999/xlink">
+<office:body><office:presentation>
+<draw:page draw:name="S1">
+<draw:frame><draw:object xlink:href="Object 1/"/></draw:frame>
+</draw:page>
+<draw:page draw:name="S2">
+<draw:frame><draw:object xlink:href="./Object 2"/></draw:frame>
+</draw:page>
+</office:presentation></office:body>
+</office:document-content>"#;
+        let mut odp_object_containers = HashMap::new();
+        parse_to_ir_with_objects(odp_xml, "odp", &mut odp_object_containers).unwrap();
+
+        assert_eq!(
+            odp_object_containers.get("Object 1").map(String::as_str),
+            Some("S1"),
+            "odp slide container not recorded for a trailing-slash href: {odp_object_containers:?}"
+        );
+        assert_eq!(
+            odp_object_containers.get("Object 2").map(String::as_str),
+            Some("S2"),
+            "odp slide container not recorded for a leading-./ href: {odp_object_containers:?}"
         );
     }
 

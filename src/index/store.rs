@@ -5030,8 +5030,10 @@ mod search_tests {
     /// Together they cover the invariant; this test alone pins storage, not history.
     ///
     /// `sample_chart.docx` earns its place: `ooxml_chart` builds its chart chunk with
-    /// `Chunk::labelled`, so the `Chart:`-plus-flat-label predicate below becomes unsatisfiable
-    /// the moment someone switches it to `Chunk::nested`.
+    /// `Chunk::labelled` because OOXML charts have not been given a parent yet (ODF's have, see
+    /// `odf_chart.rs`) — not because a chart can't have one — so the `Chart:`-plus-flat-label
+    /// predicate below becomes unsatisfiable the moment that OOXML work lands and it switches to
+    /// `Chunk::nested`.
     #[test]
     fn fixture_locations_render_unchanged_and_keep_their_shape() {
         let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");

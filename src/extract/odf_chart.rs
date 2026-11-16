@@ -802,8 +802,14 @@ pub fn extract_odf_charts(
         // other leaf: nothing is ever addressed as living *inside* a chart, which justifies a
         // chart having no children, not a chart having no parent. The object key is the zip part
         // name with the trailing "/content.xml" dropped (e.g. "Object 1/content.xml" -> "Object
-        // 1"), matching the href key odf.rs normalizes by trimming the trailing "/" ODF writes
-        // on `xlink:href` (e.g. "Object 1/" -> "Object 1").
+        // 1"), matching the href key odf.rs normalizes on its side: a leading "./" and/or a
+        // trailing "/" stripped, since producers spell it differently (Office writes "Object 1/",
+        // hand-built/LibreOffice-style files write "./Object 1"). Percent-encoded hrefs (e.g.
+        // "Object%201/") are NOT decoded on either side — ODF's `xlink:href` is an IRI and a
+        // conformant producer may escape it, but neither Office nor LibreOffice does, and no such
+        // file has been observed; a general IRI decode is scope deliberately not taken, left as
+        // a note for whoever meets one rather than a partial `%20`-only fix that would look
+        // handled while `%2F` and the rest still miss.
         let object_key = name.strip_suffix("/content.xml").unwrap_or(name.as_str());
         match object_containers.get(object_key) {
             Some(container) => out.push(Chunk::nested(
@@ -993,6 +999,11 @@ mod tests {
             !chart.location.is_nested(),
             "orphan chart should stay a Label, got: {:?}",
             chart.location
+        );
+        assert_eq!(
+            chart.location.display(),
+            "Sales by quarter",
+            "orphan chart's rendered label mismatch"
         );
     }
 
