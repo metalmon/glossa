@@ -50,7 +50,7 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
   appends a synthetic "Charts" section to its IR) and our `ooxml_chart` OOXML chart-data
   extraction — and the de-duplication between them (`src/extract/office.rs`'s
   `synthetic_xlsx_chart_section_chart_count` and `xlsx_chart_part_names`).
-- `sample_chart_legacy.rtf` — hand-built RTF (pure ASCII, 6.6 KB) carrying an OLE1-embedded
+- `sample_chart_legacy.rtf` — hand-built RTF (pure ASCII, 6.4 KB) carrying an OLE1-embedded
   legacy `MSGraph.Chart.8` object: `{\*\objdata <hex>}` → OLE1 native header → compound file →
   `Workbook` stream (in the *mini* stream) → BIFF globals + chart substreams, the datasheet
   written as `0x0004` LABEL / `0x0003` NUMBER records in the short BIFF2-shaped layout MSGraph

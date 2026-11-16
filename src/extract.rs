@@ -1,19 +1,6 @@
 use crate::model::Chunk;
 use std::path::Path;
 
-/// Cap on a single cell-range span (rows or columns) and on repeat-attribute expansion,
-/// mirroring the ODF text extractor's bound: real files never need more, and this keeps a
-/// malformed/adversarial range, repeat count or declared cell index from materializing an
-/// unbounded Vec.
-///
-/// Shared rather than per-module on purpose: `odf_chart`'s cell ranges and `rtf_chart`'s legacy
-/// MSGraph datasheet extents are the same hazard — an attacker-chosen grid size — and two caps
-/// for one hazard is how one of them drifts.
-pub(crate) const MAX_REPEAT: usize = 4096;
-/// Cap on the total number of cells materialized while reading one grid (summed across all
-/// rows), independent of any single dimension.
-pub(crate) const MAX_GRID_CELLS: usize = 200_000;
-
 pub trait Extractor {
     /// Lower-case file extensions this extractor handles (e.g. `["md"]`).
     fn file_types(&self) -> &'static [&'static str];

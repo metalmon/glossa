@@ -204,7 +204,22 @@ fn odf_ext(ext: &str) -> bool {
 // rows -> ir::Table -> markdown path as the local-table case.
 // ---------------------------------------------------------------------------
 
-use crate::extract::{MAX_GRID_CELLS, MAX_REPEAT};
+/// Cap on a single ODF cell-range span (rows or columns) and on repeat-attribute expansion,
+/// mirroring the ODF text extractor's bound: real files never need more, and this keeps a
+/// malformed/adversarial range or repeat count from materializing an unbounded Vec.
+///
+/// `odf.rs` defines its own `MAX_REPEAT` with the same value, deliberately not shared: that one
+/// bounds a `number-columns-repeated`/`number-rows-repeated` ATTRIBUTE, this one a cell-range
+/// SPAN. Same number today, different hazards, free to diverge.
+const MAX_REPEAT: usize = 4096;
+/// TRUNCATION budget for the total number of cells materialized while reading the container's
+/// sheet grid (summed across all rows), independent of any single dimension. Overrunning it
+/// renders fewer cells, nothing else — so raising it is safe and only costs output size.
+///
+/// Deliberately NOT shared with `rtf_chart`'s look-alike cap, which is a rejection threshold:
+/// one constant whose two consumers want it to move in opposite directions is one constant too
+/// few.
+const MAX_GRID_CELLS: usize = 200_000;
 
 type SheetGrid = std::collections::HashMap<String, Vec<Vec<String>>>;
 

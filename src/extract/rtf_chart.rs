@@ -26,7 +26,6 @@
 
 use crate::extract::office_table::table_to_markdown;
 use crate::extract::ooxml_chart::{chart_to_table, ChartData, Series};
-use crate::extract::{MAX_GRID_CELLS, MAX_REPEAT};
 use crate::model::Chunk;
 use office_oxide::cfb::{CfbReader, CFB_SIGNATURE};
 use std::collections::HashMap;
@@ -36,10 +35,36 @@ use std::path::Path;
 /// The one embedded class this reader claims to understand.
 const MSGRAPH_CLASS: &str = "MSGraph.Chart.8";
 
-/// Cap on the `Workbook` stream a compound file may declare. The real Word file's is 3 KB and
-/// the whole embedded object is 17 KB; this leaves four orders of magnitude of headroom while
-/// still refusing a directory entry that claims gigabytes.
-const MAX_WORKBOOK_BYTES: u64 = 32 * 1024 * 1024;
+/// REJECTION bound on either extent of a legacy datasheet, in rows or columns.
+///
+/// Not a rendering limit and not a truncation budget: `rw`/`col` are `u16` fields read straight
+/// out of an untrusted file, so a span past this is a corrupt or hostile record, and the chart
+/// is dropped rather than clamped. **Do not raise it to let a bigger chart render** — that is
+/// what `odf_chart`'s separate `MAX_GRID_CELLS` budget is for, and widening this one widens a
+/// denial-of-service guard.
+const MAX_CHART_GRID_SPAN: usize = 4096;
+
+/// REJECTION bound on `rows * cols` of a legacy datasheet. Same standing as
+/// `MAX_CHART_GRID_SPAN`: a denial-of-service guard, not a rendering knob, and **it must not be
+/// raised to accommodate a chart someone wants to see**.
+///
+/// A format-legal `MSGraph.Chart.8` can declare 255 series of 4000 points — about 1.02 million
+/// cells — and this drops it whole. That is the intended ruling, not an oversight: a datasheet
+/// that size is not chart data any reader cites, and the alternative is emitting a
+/// multi-megabyte table chunk into the index. The warning names the file and the measured
+/// extents so a real occurrence is diagnosable rather than mysterious.
+const MAX_CHART_GRID_CELLS: usize = 200_000;
+
+/// Cap on the `Workbook` stream a compound file may declare, checked before the stream is read.
+///
+/// What it really bounds is the *record walk's* transient allocation, not disk: `cells` runs
+/// before any extent check and holds one `(u16, u16, String)` per cell-shaped record it finds.
+/// The shortest such record is 13 bytes (a 4-byte header plus a LABEL's 9-byte minimum), so
+/// this admits at most ~161k entries — below
+/// `MAX_CHART_GRID_CELLS`, which is the point: the two bounds now agree instead of the stream
+/// cap quietly admitting an order of magnitude more than the grid cap allows. A real MSGraph
+/// datasheet stream is about 3 KB, so this is still ~700x headroom.
+const MAX_WORKBOOK_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Every `{\*\objdata …}` payload in the file, hex-decoded.
 ///
@@ -192,17 +217,18 @@ fn cells(stream: &[u8]) -> Vec<(u16, u16, String)> {
 /// Pivot the datasheet into the shape `ooxml_chart` already renders: row 0 is the category
 /// header, column 0 the series names, the interior the values.
 ///
-/// Bounded against the same hazard as `odf_chart::grid_range_values`, with the same two caps:
-/// `rw` and `col` are `u16` fields read straight out of an untrusted file, so the grid's extents
-/// are attacker-chosen. One 15-byte NUMBER record declaring `rw = 65535, col = 65535` would
+/// Bounded against the hazard `odf_chart::grid_range_values` also guards: `rw` and `col` are
+/// `u16` fields read straight out of an untrusted file, so the grid's extents are
+/// attacker-chosen. One 15-byte NUMBER record declaring `rw = 65535, col = 65535` would
 /// otherwise pivot into ~4.3 billion strings — a stalled indexer from a few hundred bytes.
 ///
-/// Where `odf_chart` truncates to the budget, this skips the chart outright, because the two
-/// cases differ: an ODF range that overruns still addresses a real sheet, whereas here the
-/// extents are *derived from the cells themselves*, so a span past the cap means a corrupt or
-/// hostile record rather than a big datasheet — truncating would materialize a six-figure table
-/// of empty strings around the handful of genuine cells. The document still extracts its text;
-/// one warning names the file and the measured extents, so this is never silent.
+/// Where `odf_chart` truncates to a budget, this skips the chart outright, which is why the two
+/// modules keep separate constants: an ODF range that overruns still addresses a real sheet,
+/// whereas here the extents are *derived from the cells themselves*, so a span past the cap
+/// means a corrupt or hostile record rather than a big datasheet — truncating would materialize
+/// a six-figure table of empty strings around the handful of genuine cells. The document still
+/// extracts its text; one warning names the file and the measured extents, so this is never
+/// silent.
 ///
 /// Lookup is a map rather than a scan over `grid`: with a scan, every cell visited would cost
 /// another pass over every record, so a clamp alone would still leave a quadratic.
@@ -210,10 +236,14 @@ fn grid_to_chart(grid: &[(u16, u16, String)], file_ctx: &Path) -> Option<ChartDa
     let max_row = usize::from(grid.iter().map(|x| x.0).max()?);
     let max_col = usize::from(grid.iter().map(|x| x.1).max()?);
     let total = max_row.saturating_mul(max_col);
-    if max_row > MAX_REPEAT || max_col > MAX_REPEAT || total > MAX_GRID_CELLS {
+    if max_row > MAX_CHART_GRID_SPAN
+        || max_col > MAX_CHART_GRID_SPAN
+        || total > MAX_CHART_GRID_CELLS
+    {
         tracing::warn!(
             "rtf {}: embedded chart datasheet spans rows 0..{max_row}, cols 0..{max_col} \
-             ({total} cells, span cap {MAX_REPEAT}, cell cap {MAX_GRID_CELLS}); skipping it",
+             ({total} cells, span bound {MAX_CHART_GRID_SPAN}, cell bound \
+             {MAX_CHART_GRID_CELLS}); skipping the chart, the document still extracts",
             file_ctx.display()
         );
         return None;
@@ -222,7 +252,7 @@ fn grid_to_chart(grid: &[(u16, u16, String)], file_ctx: &Path) -> Option<ChartDa
         .iter()
         .map(|(r, c, v)| ((*r, *c), v.as_str()))
         .collect();
-    // in range by construction: both bounds passed the MAX_REPEAT check, well under u16::MAX
+    // in range by construction: both extents passed the span bound, well under u16::MAX
     let at = |r: usize, c: usize| cells.get(&(r as u16, c as u16)).map(|s| s.to_string());
     let cats: Vec<String> = (1..=max_col)
         .map(|c| at(0, c).unwrap_or_default())
