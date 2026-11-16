@@ -44,9 +44,14 @@ const MSGRAPH_CLASS: &str = "MSGraph.Chart.8";
 /// denial-of-service guard.
 const MAX_CHART_GRID_SPAN: usize = 4096;
 
-/// REJECTION bound on `rows * cols` of a legacy datasheet. Same standing as
+/// REJECTION bound on the cells one FILE may spend across every chart in it. Same standing as
 /// `MAX_CHART_GRID_SPAN`: a denial-of-service guard, not a rendering knob, and **it must not be
 /// raised to accommodate a chart someone wants to see**.
+///
+/// Per file, not per chart, and that distinction is the whole point: a per-item limit multiplies
+/// straight through when a document carries many `\object` groups, so N charts each sitting just
+/// under a per-chart cap would cost N times it. `extract_charts` spends this down as it goes and
+/// stops when it runs out.
 ///
 /// A format-legal `MSGraph.Chart.8` can declare 255 series of 4000 points — about 1.02 million
 /// cells — and this drops it whole. That is the intended ruling, not an oversight: a datasheet
@@ -55,15 +60,38 @@ const MAX_CHART_GRID_SPAN: usize = 4096;
 /// extents so a real occurrence is diagnosable rather than mysterious.
 const MAX_CHART_GRID_CELLS: usize = 200_000;
 
+/// REJECTION bound on how many charts one file may contribute, the count half of the per-file
+/// budget (`MAX_CHART_GRID_CELLS` is the size half). A document with more embedded charts than
+/// this is not something a reader cites, and without it a file could multiply the cell budget by
+/// however many `\object` groups it declares.
+pub(crate) const MAX_CHARTS_PER_FILE: usize = 64;
+
+/// REJECTION bound on how empty a datasheet's declared extent may be, as a ratio of extent to
+/// records actually present.
+///
+/// The shape it rejects: a handful of genuine cells plus one record with a far-away `rw`/`col`,
+/// which inflates the extent without carrying data — a fabricated extent rather than a big
+/// chart. The real fixtures are ~19 records in a 4x5 extent, a ratio near 1, so even a sparse
+/// genuine datasheet clears this by a wide margin.
+const MAX_GRID_SPARSITY: usize = 64;
+
+/// Cap on how many `{\*\objdata …}` groups one file is scanned for.
+///
+/// The decoded bytes were already bounded by the file — the hex runs are disjoint, so their sum
+/// cannot exceed it — but the *count* was not, and every blob costs a `Vec` allocation plus a
+/// pass through the pipeline's gates before any chart budget can apply. A real document carries
+/// a handful.
+const MAX_OBJDATA_BLOBS: usize = 1024;
+
 /// Cap on the `Workbook` stream a compound file may declare, checked before the stream is read.
 ///
 /// What it really bounds is the *record walk's* transient allocation, not disk: `cells` runs
 /// before any extent check and holds one `(u16, u16, String)` per cell-shaped record it finds.
 /// The shortest such record is 13 bytes (a 4-byte header plus a LABEL's 9-byte minimum), so
-/// this admits at most ~161k entries — below
-/// `MAX_CHART_GRID_CELLS`, which is the point: the two bounds now agree instead of the stream
-/// cap quietly admitting an order of magnitude more than the grid cap allows. A real MSGraph
-/// datasheet stream is about 3 KB, so this is still ~700x headroom.
+/// this admits at most ~161k entries — below `MAX_CHART_GRID_CELLS`, which is the point: the two
+/// bounds agree instead of the stream cap quietly admitting an order of magnitude more than the
+/// grid bound allows. A real MSGraph datasheet stream is about 3 KB, so this is still ~700x
+/// headroom.
 const MAX_WORKBOOK_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Every `{\*\objdata …}` payload in the file, hex-decoded.
@@ -71,11 +99,14 @@ const MAX_WORKBOOK_BYTES: u64 = 2 * 1024 * 1024;
 /// Only the hex form is handled. An `\objdata` whose payload is a `\bin` binary run (legal RTF,
 /// not what Word writes here) contains a backslash, which ends collection for that object and
 /// leaves it out — the document still extracts, it just contributes no chart.
+///
+/// Stops after `MAX_OBJDATA_BLOBS`, so a file declaring a million tiny groups cannot make the
+/// caller walk a million pipeline entries before any chart budget gets a say.
 fn objdata_blobs(bytes: &[u8]) -> Vec<Vec<u8>> {
     const TAG: &[u8] = br"{\*\objdata";
     let mut out = Vec::new();
     let mut i = 0usize;
-    while i < bytes.len() {
+    while i < bytes.len() && out.len() < MAX_OBJDATA_BLOBS {
         let Some(p) = find(&bytes[i..], TAG) else {
             break;
         };
@@ -232,19 +263,34 @@ fn cells(stream: &[u8]) -> Vec<(u16, u16, String)> {
 ///
 /// Lookup is a map rather than a scan over `grid`: with a scan, every cell visited would cost
 /// another pass over every record, so a clamp alone would still leave a quadratic.
-fn grid_to_chart(grid: &[(u16, u16, String)], file_ctx: &Path) -> Option<ChartData> {
+///
+/// `cell_budget` is what is left of the FILE's budget, not a fresh per-chart allowance, and the
+/// extent this chart costs comes back with it so the caller can spend it down.
+fn grid_to_chart(
+    grid: &[(u16, u16, String)],
+    file_ctx: &Path,
+    cell_budget: usize,
+) -> Option<(ChartData, usize)> {
     let max_row = usize::from(grid.iter().map(|x| x.0).max()?);
     let max_col = usize::from(grid.iter().map(|x| x.1).max()?);
-    let total = max_row.saturating_mul(max_col);
-    if max_row > MAX_CHART_GRID_SPAN
-        || max_col > MAX_CHART_GRID_SPAN
-        || total > MAX_CHART_GRID_CELLS
-    {
+    let extent = (max_row + 1).saturating_mul(max_col + 1);
+    let refused = if max_row > MAX_CHART_GRID_SPAN || max_col > MAX_CHART_GRID_SPAN {
+        Some("an extent past the span bound")
+    } else if extent > grid.len().saturating_mul(MAX_GRID_SPARSITY) {
+        // A fabricated extent: a far-away `rw`/`col` inflating the grid around a few real cells.
+        Some("an extent that is almost entirely holes")
+    } else if extent > cell_budget {
+        Some("no cell budget left in this file")
+    } else {
+        None
+    };
+    if let Some(why) = refused {
         tracing::warn!(
-            "rtf {}: embedded chart datasheet spans rows 0..{max_row}, cols 0..{max_col} \
-             ({total} cells, span bound {MAX_CHART_GRID_SPAN}, cell bound \
-             {MAX_CHART_GRID_CELLS}); skipping the chart, the document still extracts",
-            file_ctx.display()
+            "rtf {}: skipping an embedded chart with {why} — rows 0..{max_row}, cols 0..{max_col} \
+             ({extent} cells) from {} records, span bound {MAX_CHART_GRID_SPAN}, sparsity bound \
+             {MAX_GRID_SPARSITY}, {cell_budget} cells of budget left; the document still extracts",
+            file_ctx.display(),
+            grid.len()
         );
         return None;
     }
@@ -272,20 +318,38 @@ fn grid_to_chart(grid: &[(u16, u16, String)], file_ctx: &Path) -> Option<ChartDa
             vals,
         });
     }
-    Some(ChartData {
-        title: None,
-        kind: String::new(),
-        series,
-    })
+    Some((
+        ChartData {
+            title: None,
+            kind: String::new(),
+            series,
+        },
+        extent,
+    ))
 }
 
 /// Render every legacy MSGraph chart embedded in `bytes` as a searchable chunk (header + GFM
 /// data table). Infallible by design, exactly like `ooxml_chart::extract_charts`: anything
 /// unrecognised — a non-hex `\objdata`, another embedded class, a truncated blob, a payload that
 /// is not a compound file — skips that object and leaves the document's own text untouched.
+///
+/// The budgets are per FILE, spent down across the loop, because the per-chart bounds alone are
+/// not bounds at all: a document may carry any number of `\object` groups, so N charts each
+/// sitting just under a per-chart cap would cost N times it. Running out stops the loop — it is
+/// never an error, and the chunks already built, plus the document's own text, still come back.
 pub fn extract_charts(path: &Path, bytes: &[u8]) -> Vec<Chunk> {
     let mut out = Vec::new();
+    let mut cell_budget = MAX_CHART_GRID_CELLS;
+    let mut exhausted = None;
     for blob in objdata_blobs(bytes) {
+        if out.len() >= MAX_CHARTS_PER_FILE {
+            exhausted = Some("the per-file chart count");
+            break;
+        }
+        if cell_budget == 0 {
+            exhausted = Some("the per-file cell budget");
+            break;
+        }
         let Some((class, native)) = ole1_native(&blob) else {
             continue;
         };
@@ -299,11 +363,13 @@ pub fn extract_charts(path: &Path, bytes: &[u8]) -> Vec<Chunk> {
             );
             continue;
         };
-        let Some(cd) = grid_to_chart(&cells(&stream), path).filter(|cd| !cd.series.is_empty())
+        let Some((cd, extent)) = grid_to_chart(&cells(&stream), path, cell_budget)
+            .filter(|(cd, _)| !cd.series.is_empty())
         else {
             tracing::warn!("embedded chart in {} had no datasheet", path.display());
             continue;
         };
+        cell_budget = cell_budget.saturating_sub(extent);
         // No parent: chart parenting and chart ordinals are an open design question, and
         // `ooxml_chart` is flat for the same reason. `Chunk::labelled` until that is settled.
         let title = format!("Chart {}", out.len() + 1);
@@ -318,6 +384,15 @@ pub fn extract_charts(path: &Path, bytes: &[u8]) -> Vec<Chunk> {
             title,
             text,
         ));
+    }
+    if let Some(which) = exhausted {
+        tracing::warn!(
+            "rtf {}: stopped extracting embedded charts — {which} ran out after {} chart(s) \
+             (count bound {MAX_CHARTS_PER_FILE}, cell bound {MAX_CHART_GRID_CELLS}); the \
+             document still extracts",
+            path.display(),
+            out.len()
+        );
     }
     out
 }

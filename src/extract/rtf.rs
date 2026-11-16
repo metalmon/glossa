@@ -1156,6 +1156,57 @@ mod tests {
         assert!(t.contains("glossa sample"), "body text lost:\n{t}");
     }
 
+    /// The span/sparsity/cell bounds each police ONE chart; without a per-file budget a document
+    /// may carry any number of `\object` groups and multiply straight through. Repeating the
+    /// fixture's own object group past the cap must yield a bounded number of chart chunks — and
+    /// still extract the body text.
+    ///
+    /// This exercises the count half of the budget. The cell half is the same mechanism (the
+    /// loop spends one budget down and stops), but reaching it from a fixture would need a
+    /// datasheet of thousands of real records to get past the sparsity bound first.
+    #[test]
+    fn the_per_file_budget_bounds_how_many_charts_one_document_yields() {
+        use crate::extract::rtf_chart::MAX_CHARTS_PER_FILE;
+        let rtf = legacy_chart_fixture();
+        // Brace-match the single `{\object …}` group. The generator emits no escaped braces
+        // inside it, and the hex run contains none, so a plain depth counter is exact here.
+        let start = rtf.find(r"{\object").unwrap();
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, b) in rtf[start..].bytes().enumerate() {
+            if b == b'{' {
+                depth += 1;
+            } else if b == b'}' {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(start + i + 1);
+                    break;
+                }
+            }
+        }
+        let end = end.expect("the object group must be brace-balanced");
+        let copies = MAX_CHARTS_PER_FILE + 6;
+        let many = format!(
+            "{}{}{}",
+            &rtf[..start],
+            rtf[start..end].repeat(copies),
+            &rtf[end..]
+        );
+        let chunks = RtfExtractor
+            .extract(Path::new("many.rtf"), many.as_bytes())
+            .unwrap();
+        let charts = chunks
+            .iter()
+            .filter(|c| c.text.starts_with("Chart: "))
+            .count();
+        assert_eq!(
+            charts, MAX_CHARTS_PER_FILE,
+            "{copies} chart objects must be capped at {MAX_CHARTS_PER_FILE}, got {charts}"
+        );
+        let t = joined(&chunks);
+        assert!(t.contains("glossa sample"), "body text lost:\n{t}");
+    }
+
     /// Compound-file bytes that are structurally broken past the magic (here: a first-directory
     /// sector pointing into deep space) must be skipped without panicking and without failing
     /// the document.
