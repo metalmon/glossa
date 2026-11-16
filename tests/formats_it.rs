@@ -32,10 +32,14 @@ fn collects_ooxml_chart_chunks() {
         .iter()
         .filter(|c| c.file_type == "docx" && c.text.starts_with("Chart:"))
         .count();
-    // sample_chart.docx has exactly one chart; sample.docx has none
+    // One each from sample_chart.docx (chart part present but unreferenced) and
+    // sample_chart_anchored.docx (the same chart, referenced through a w:drawing); sample.docx
+    // and sample_table.docx have none. Two, not three: the anchored fixture's chart text also
+    // reaches the IR as body paragraphs, and `drop_hoisted_docx_chart_text` takes that copy out
+    // rather than letting it become a second chunk.
     assert_eq!(
-        docx_chart_chunks, 1,
-        "expected exactly one docx chart chunk"
+        docx_chart_chunks, 2,
+        "expected exactly one docx chart chunk per chart-bearing docx fixture"
     );
 }
 
