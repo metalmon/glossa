@@ -5044,6 +5044,7 @@ mod search_tests {
             "sample.docx",
             "sample_table.docx",
             "sample_chart.docx",
+            "sample_chart.xlsx",
             "sample.odt",
             "sample.ods",
             "sample.odp",
@@ -5074,7 +5075,7 @@ mod search_tests {
                     shapes.1 += 1;
                 }
             }
-            if name == "sample_chart.docx" {
+            if name == "sample_chart.docx" || name == "sample_chart.xlsx" {
                 // A chart is an attachment, not a container the author wrote headings into.
                 assert!(
                     chunks

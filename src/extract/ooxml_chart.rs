@@ -190,13 +190,27 @@ fn chart_names_for(ext: &str) -> bool {
 /// Scan the OOXML zip for `*/charts/chart*.xml` parts and render each into a
 /// searchable chunk (title + GFM data table). Infallible by design: any
 /// problem (bad zip, unreadable part, empty parse) skips that chart with a
-/// warning rather than failing the whole file's extraction.
+/// warning rather than failing the whole file's extraction. A flat zip-part
+/// scan, matched by path and read directly — it never reads a `.rels` part.
 pub fn extract_charts(path: &Path, bytes: &[u8], ext: &str) -> Vec<Chunk> {
+    extract_charts_with_coverage(path, bytes, ext).0
+}
+
+/// Same scan as [`extract_charts`], but also returns the names of the chart parts that
+/// actually survived into a chunk (passed our "has at least one `<c:ser>`" accept rule).
+/// `office.rs`'s xlsx de-duplication needs those names, not just a count, to check whether
+/// this pass covers every chart part `office_oxide`'s own (differently-gated) xlsx chart scan
+/// could have found.
+pub(crate) fn extract_charts_with_coverage(
+    path: &Path,
+    bytes: &[u8],
+    ext: &str,
+) -> (Vec<Chunk>, Vec<String>) {
     if !chart_names_for(ext) {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(bytes)) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     // early-out: only pay for charts if any exist
     let parts: Vec<String> = zip
@@ -211,9 +225,10 @@ pub fn extract_charts(path: &Path, bytes: &[u8], ext: &str) -> Vec<Chunk> {
         .map(|s| s.to_string())
         .collect();
     if parts.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let mut out = Vec::new();
+    let mut covered = Vec::new();
     for (i, name) in parts.iter().enumerate() {
         let mut xml = String::new();
         let read_ok = zip
@@ -252,8 +267,9 @@ pub fn extract_charts(path: &Path, bytes: &[u8], ext: &str) -> Vec<Chunk> {
             title,
             text,
         ));
+        covered.push(name.clone());
     }
-    out
+    (out, covered)
 }
 
 #[cfg(test)]

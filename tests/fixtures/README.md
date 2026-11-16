@@ -40,6 +40,16 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
   resolves to the sheet it's anchored in and renders as `Sheet1 > Sales by quarter`
   (`Chunk::nested`) instead of a bare label. Exercises the hand-built-style href spelling
   (leading `./`, no trailing slash) as opposed to Office's own `"Object 1/"` spelling.
+- `sample_chart.xlsx` — hand-built xlsx: one sheet (`Sheet1`, carrying the `glossa sample`
+  marker plus a small Q1-Q3 data table) and a chart part at `xl/charts/chart1.xml`, with the
+  conventional rels chain to it (`xl/worksheets/_rels/sheet1.xml.rels` ->
+  `xl/drawings/drawing1.xml` -> `xl/charts/chart1.xml`) for fidelity to a real xlsx package —
+  neither extraction pass below actually reads it; both find the chart part by a flat scan of
+  the zip's part names. Title "Sales by quarter", same series/categories/cached values as
+  `sample_chart.docx`'s chart. Exercises both `office_oxide`'s own xlsx chart-text pass (which
+  appends a synthetic "Charts" section to its IR) and our `ooxml_chart` OOXML chart-data
+  extraction — and the de-duplication between them (`src/extract/office.rs`'s
+  `synthetic_xlsx_chart_section_chart_count` and `xlsx_chart_part_names`).
 - `sample_legacy.doc` / `sample_legacy.xls` — legacy binary OLE Office (Word 97-2003 / Excel
   97-2003) each carrying one embedded 1×1 PNG picture (exercises `office_oxide::{doc,xls}::images`
   extraction wired into `read.rs`). Generated via MS Office COM with document metadata scrubbed
