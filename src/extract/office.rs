@@ -14,7 +14,9 @@ fn format_for(ext: &str) -> Option<DocumentFormat> {
     match ext {
         "docx" => Some(DocumentFormat::Docx),
         "doc" => Some(DocumentFormat::Doc),
-        "xlsx" => Some(DocumentFormat::Xlsx),
+        // BIFF12 is a different encoding of the same model, so it rides the Xlsx format — which is
+        // how office_oxide's own `from_extension` maps it.
+        "xlsx" | "xlsb" => Some(DocumentFormat::Xlsx),
         "xls" => Some(DocumentFormat::Xls),
         "pptx" => Some(DocumentFormat::Pptx),
         "ppt" => Some(DocumentFormat::Ppt),
@@ -89,7 +91,7 @@ fn xlsx_chart_part_names(bytes: &[u8]) -> Vec<String> {
 
 impl Extractor for OfficeExtractor {
     fn file_types(&self) -> &'static [&'static str] {
-        &["docx", "doc", "xlsx", "xls", "pptx", "ppt"]
+        &["docx", "doc", "xlsx", "xlsb", "xls", "pptx", "ppt"]
     }
 
     fn extract(&self, path: &Path, bytes: &[u8]) -> anyhow::Result<Vec<Chunk>> {
@@ -239,6 +241,40 @@ mod tests {
             "expected fixture marker text, got: {joined}"
         );
         assert!(chunks.iter().all(|c| c.file_type == "docx"));
+    }
+
+    #[test]
+    fn extracts_text_from_xlsb_fixture() {
+        // `.xlsb` is a BIFF12 binary workbook — a different encoding of the same model as `.xlsx`,
+        // which `office_oxide` reads since 0.1.12. Before that it was not in `file_types()`, so a
+        // `.xlsb` in a corpus produced NOTHING, silently: no extractor claimed it and no error said
+        // so. The fixture is synthetic and English-only (see tests/fixtures/README if adding more).
+        let bytes = include_bytes!("../../tests/fixtures/sample.xlsb");
+        let chunks = OfficeExtractor
+            .extract(Path::new("sample.xlsb"), bytes)
+            .unwrap();
+        let joined = chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("glossa sample"),
+            "expected fixture marker text, got: {joined}"
+        );
+        assert!(
+            joined.contains("inlet pressure") && joined.contains("97"),
+            "expected the sheet's cells, got: {joined}"
+        );
+        assert!(chunks.iter().all(|c| c.file_type == "xlsb"));
+    }
+
+    #[test]
+    fn claims_xlsb_as_a_supported_type() {
+        // `file_types()` is the gate: a type absent here is never routed to this extractor, so the
+        // mapping below and this list have to agree.
+        assert!(OfficeExtractor.file_types().contains(&"xlsb"));
+        assert_eq!(format_for("xlsb"), Some(DocumentFormat::Xlsx));
     }
 
     #[test]

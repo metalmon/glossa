@@ -173,7 +173,10 @@ fn is_nonempty_text_block(el: &Element) -> bool {
 /// `heading_path`. Prepending that would either duplicate the heading or, worse, hang every later
 /// heading in the document under the first one. `odt` sections carry no title at all.
 fn section_is_container(file_type: &str) -> bool {
-    matches!(file_type, "xlsx" | "xls" | "ods" | "pptx" | "ppt" | "odp")
+    matches!(
+        file_type,
+        "xlsx" | "xlsb" | "xls" | "ods" | "pptx" | "ppt" | "odp"
+    )
 }
 
 fn flush_buf(
