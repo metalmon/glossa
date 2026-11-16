@@ -57,16 +57,33 @@ fn collects_odf_chart_chunks() {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let chunks = collect_chunks(&fixtures, None, true).unwrap();
     // one chart chunk from sample_chart.ods (Object 1/content.xml, local
-    // table) and one from sample_chart_ref.ods (ref-only chart, resolved
-    // against sheet cells).
+    // table), one from sample_chart_ref.ods (ref-only chart, resolved
+    // against sheet cells), and one from sample_chart_anchored.ods (a real
+    // in-body <draw:object> anchor, giving the chart chunk the sheet as its
+    // parent instead of a bare label).
     let ods_chart_chunks: Vec<_> = chunks
         .iter()
         .filter(|c| c.file_type == "ods" && c.text.starts_with("Chart:"))
         .collect();
     assert_eq!(
         ods_chart_chunks.len(),
-        2,
-        "expected two ods chart chunks: {ods_chart_chunks:?}"
+        3,
+        "expected three ods chart chunks: {ods_chart_chunks:?}"
+    );
+
+    let anchored_chart = ods_chart_chunks
+        .iter()
+        .find(|c| c.text.starts_with("Chart: Units by Month"))
+        .unwrap_or_else(|| panic!("no anchored chart chunk: {ods_chart_chunks:?}"));
+    assert!(
+        anchored_chart.location.is_nested(),
+        "anchored chart should carry its sheet as a parent, got: {:?}",
+        anchored_chart.location
+    );
+    assert_eq!(
+        anchored_chart.location.display(),
+        "Quarterly > Units by Month",
+        "anchored chart's rendered location mismatch"
     );
 
     // Both fixtures happen to share the title/kind ("Sales by quarter (bar)")

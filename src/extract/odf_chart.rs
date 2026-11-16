@@ -9,6 +9,7 @@ use crate::model::Chunk;
 use office_oxide::ir::{Element, InlineContent, Paragraph, Table, TableCell, TableRow, TextSpan};
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::path::Path;
 
@@ -713,7 +714,12 @@ fn load_sheet_grid(zip: &mut zip::ZipArchive<Cursor<&[u8]>>, path: &Path) -> She
 /// each into a searchable chunk (title + GFM data table). Infallible by
 /// design: any problem (bad zip, unreadable part, no local data table) skips
 /// that chart with a warning rather than failing the whole file's extraction.
-pub fn extract_odf_charts(path: &Path, bytes: &[u8], ext: &str) -> Vec<Chunk> {
+pub fn extract_odf_charts(
+    path: &Path,
+    bytes: &[u8],
+    ext: &str,
+    object_containers: &HashMap<String, String>,
+) -> Vec<Chunk> {
     if !odf_ext(ext) {
         return Vec::new();
     }
@@ -792,14 +798,29 @@ pub fn extract_odf_charts(path: &Path, bytes: &[u8], ext: &str) -> Vec<Chunk> {
             format!("Chart: {} ({})", title, cd.kind)
         };
         let text = format!("{}\n\n{}", header, body);
-        // A chart is an attachment hanging off the sheet, not a container with children: nothing
-        // is ever addressed as living *inside* "Chart 1", so its title is a label, not a path.
-        out.push(Chunk::labelled(
-            path.to_path_buf(),
-            ext.to_string(),
-            title,
-            text,
-        ));
+        // A chart is a child of its container (the sheet/slide it's anchored in), same as any
+        // other leaf: nothing is ever addressed as living *inside* a chart, which justifies a
+        // chart having no children, not a chart having no parent. The object key is the zip part
+        // name with the trailing "/content.xml" dropped (e.g. "Object 1/content.xml" -> "Object
+        // 1"), matching the href key odf.rs normalizes by trimming the trailing "/" ODF writes
+        // on `xlink:href` (e.g. "Object 1/" -> "Object 1").
+        let object_key = name.strip_suffix("/content.xml").unwrap_or(name.as_str());
+        match object_containers.get(object_key) {
+            Some(container) => out.push(Chunk::nested(
+                path.to_path_buf(),
+                ext.to_string(),
+                vec![container.clone(), title],
+                text,
+            )),
+            // No anchor known (every pre-existing fixture): keep today's label-only shape — no
+            // parent claimed.
+            None => out.push(Chunk::labelled(
+                path.to_path_buf(),
+                ext.to_string(),
+                title,
+                text,
+            )),
+        }
     }
     out
 }
@@ -879,7 +900,7 @@ mod tests {
             .join(fixture);
         let bytes = std::fs::read(&path).unwrap();
         let ext = fixture.rsplit('.').next().unwrap();
-        super::extract_odf_charts(&path, &bytes, ext)
+        super::extract_odf_charts(&path, &bytes, ext, &HashMap::new())
     }
 
     #[test]
@@ -930,6 +951,51 @@ mod tests {
         );
     }
 
+    /// `sample_chart_anchored.ods` has a real in-body `<draw:frame><draw:object
+    /// xlink:href="Object 1/"/></draw:frame>` nested inside the `Quarterly` sheet — the first
+    /// real anchored chart fixture in this repo. The chart chunk must come out as a `Path`
+    /// (sheet, then chart title), not a bare `Label`.
+    #[test]
+    fn odf_extractor_anchored_chart_gets_sheet_as_parent() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_chart_anchored.ods");
+        let bytes = std::fs::read(&path).unwrap();
+        let chunks = OdfExtractor.extract(&path, &bytes).unwrap();
+        let chart = chunks
+            .iter()
+            .find(|c| c.text.starts_with("Chart:"))
+            .unwrap_or_else(|| panic!("expected a chart chunk, got: {chunks:?}"));
+        assert!(
+            chart.location.is_nested(),
+            "anchored chart should be a Path, got: {:?}",
+            chart.location
+        );
+        assert_eq!(
+            chart.location.display(),
+            "Quarterly > Units by Month",
+            "anchored chart's rendered location mismatch"
+        );
+    }
+
+    /// `sample_chart.ods` is an orphan fixture (chart part with no `draw:frame`/`draw:object`
+    /// pointing at it anywhere in the body) — today's behavior must be unchanged: the chart
+    /// chunk stays a bare `Label`, no parent claimed.
+    #[test]
+    fn odf_extractor_orphan_chart_stays_a_label() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_chart.ods");
+        let bytes = std::fs::read(&path).unwrap();
+        let chunks = OdfExtractor.extract(&path, &bytes).unwrap();
+        let chart = chunks
+            .iter()
+            .find(|c| c.text.starts_with("Chart:"))
+            .unwrap_or_else(|| panic!("expected a chart chunk, got: {chunks:?}"));
+        assert!(
+            !chart.location.is_nested(),
+            "orphan chart should stay a Label, got: {:?}",
+            chart.location
+        );
+    }
+
     /// FIX 4: ODF chart extraction is container-agnostic — the same
     /// embedded local-table chart (`Object N/content.xml`) works from a text
     /// document or a presentation, not just a spreadsheet.
@@ -972,7 +1038,7 @@ mod tests {
                 .unwrap();
             zw.finish().unwrap();
         }
-        let cs = extract_odf_charts(Path::new("garbage.ods"), &buf, "ods");
+        let cs = extract_odf_charts(Path::new("garbage.ods"), &buf, "ods", &HashMap::new());
         assert!(
             cs.is_empty(),
             "garbage chart part should yield no chunks, got: {cs:?}"
@@ -1024,7 +1090,7 @@ mod tests {
             .unwrap();
             zw.finish().unwrap();
         }
-        let cs = extract_odf_charts(Path::new("mixed.ods"), &buf, "ods");
+        let cs = extract_odf_charts(Path::new("mixed.ods"), &buf, "ods", &HashMap::new());
         assert_eq!(cs.len(), 1, "expected exactly one chart chunk, got: {cs:?}");
         assert_eq!(
             cs[0].location.display(),
@@ -1036,7 +1102,12 @@ mod tests {
     /// A truncated/malformed zip entirely must not panic either.
     #[test]
     fn not_a_zip_no_panic() {
-        let cs = extract_odf_charts(Path::new("junk.ods"), b"not a zip at all", "ods");
+        let cs = extract_odf_charts(
+            Path::new("junk.ods"),
+            b"not a zip at all",
+            "ods",
+            &HashMap::new(),
+        );
         assert!(cs.is_empty());
     }
 
@@ -1047,7 +1118,7 @@ mod tests {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_chart.ods"),
         )
         .unwrap();
-        let cs = extract_odf_charts(Path::new("x.docx"), &bytes, "docx");
+        let cs = extract_odf_charts(Path::new("x.docx"), &bytes, "docx", &HashMap::new());
         assert!(cs.is_empty());
     }
 
@@ -1271,7 +1342,7 @@ mod tests {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_chart_ref.ods");
         let bytes = std::fs::read(&path).unwrap();
-        let cs = extract_odf_charts(&path, &bytes, "ods");
+        let cs = extract_odf_charts(&path, &bytes, "ods", &HashMap::new());
         assert!(!cs.is_empty(), "expected a resolved ref-only chart chunk");
         let t = cs
             .iter()
@@ -1384,7 +1455,7 @@ mod tests {
 
             zw.finish().unwrap();
         }
-        let cs = extract_odf_charts(Path::new("mixed_ref.ods"), &buf, "ods");
+        let cs = extract_odf_charts(Path::new("mixed_ref.ods"), &buf, "ods", &HashMap::new());
         assert_eq!(
             cs.len(),
             1,
@@ -1439,7 +1510,7 @@ mod tests {
             .unwrap();
             zw.finish().unwrap();
         }
-        let cs = extract_odf_charts(Path::new("bad_range.ods"), &buf, "ods");
+        let cs = extract_odf_charts(Path::new("bad_range.ods"), &buf, "ods", &HashMap::new());
         assert!(
             cs.is_empty(),
             "bad series range must skip the chart, not panic: {cs:?}"
@@ -1525,7 +1596,7 @@ mod tests {
         }
         // The only hard requirement is "returns promptly without panicking";
         // whether it resolves (truncated) or gives up cleanly is secondary.
-        let cs = extract_odf_charts(Path::new("adversarial.ods"), &buf, "ods");
+        let cs = extract_odf_charts(Path::new("adversarial.ods"), &buf, "ods", &HashMap::new());
         if let Some(chart) = cs.first() {
             assert!(chart.text.starts_with("Chart:"), "{}", chart.text);
         }

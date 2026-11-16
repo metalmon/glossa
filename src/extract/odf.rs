@@ -9,6 +9,7 @@ use office_oxide::ir::{
 };
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::path::Path;
 
@@ -146,7 +147,24 @@ fn row_is_empty(cells: &[TableCell]) -> bool {
     })
 }
 
+/// Test-only convenience wrapper around [`parse_to_ir_with_objects`] for callers that don't
+/// care about the embedded-object container map (every existing test).
+#[cfg(test)]
 fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
+    let mut object_containers = HashMap::new();
+    parse_to_ir_with_objects(xml, ext, &mut object_containers)
+}
+
+/// Parse `content.xml` into the shared IR, and fill `object_containers` with
+/// `embedded-object-path -> container name` for every `<draw:object>` the scan passes while a
+/// sheet (ODS) or slide (ODP) is in force. The key is the object's `xlink:href` with any
+/// trailing `/` trimmed (ODF writes it as e.g. `"Object 1/"`), matching the key
+/// `odf_chart.rs::extract_odf_charts` derives from the zip part name (`"Object 1/content.xml"`).
+fn parse_to_ir_with_objects(
+    xml: &str,
+    ext: &str,
+    object_containers: &mut HashMap<String, String>,
+) -> anyhow::Result<DocumentIR> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
     // Deliver every self-closing element (<table:table-cell .../>, <text:tab/>,
@@ -279,6 +297,25 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
                         "number-rows-repeated",
                         ext,
                     );
+                }
+                b"object" => {
+                    // <draw:object xlink:href="Object 1/" .../> — an embedded chart or other
+                    // OLE object anchored in the body. Record which container (sheet/slide) it
+                    // sits in, if any; odf_chart.rs looks this up by the same normalized key to
+                    // give the chart chunk a parent instead of a bare label.
+                    if let Some(href) = attr(&e, b"href") {
+                        let key = href.trim_end_matches('/').to_string();
+                        let container = match ext {
+                            "ods" => current_sheet.clone(),
+                            "odp" => current_slide.clone(),
+                            _ => None,
+                        };
+                        if !key.is_empty() {
+                            if let Some(container) = container {
+                                object_containers.insert(key, container);
+                            }
+                        }
+                    }
                 }
                 b"table-cell" => {
                     buf.clear();
@@ -518,11 +555,15 @@ impl Extractor for OdfExtractor {
             .unwrap_or("")
             .to_lowercase();
         let xml = read_content_xml(bytes, path)?;
-        let mut ir = parse_to_ir(&xml, &ext)?;
+        let mut object_containers = HashMap::new();
+        let mut ir = parse_to_ir_with_objects(&xml, &ext, &mut object_containers)?;
         expand_merged_tables(&mut ir);
         let mut chunks = chunk_ir(path, &ir, &ext);
         chunks.extend(crate::extract::odf_chart::extract_odf_charts(
-            path, bytes, &ext,
+            path,
+            bytes,
+            &ext,
+            &object_containers,
         ));
         if chunks.is_empty() {
             return Err(anyhow!("odf produced no chunks for {}", path.display()));

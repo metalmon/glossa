@@ -30,6 +30,12 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
   (`chart:values-cell-range-address="Sheet1.$B$2:.$B$4"` etc.) instead of embedding a local data
   table — the Excel→ODS export form. Sheet1 holds the data (Cat / Series 1; Q1–Q3; 4.3/2.5/3.5).
   Exercises ref-only chart resolution (resolve the ranges against the sheet). English, hand-built.
+- `sample_chart_anchored.ods` — an ODS with a REAL in-body chart anchor: a sheet named
+  `Quarterly` holding a `<draw:frame><draw:object xlink:href="Object 1/"/></draw:frame>` nested
+  inside its `<table:table>`, and an embedded chart titled "Units by Month". Every other chart
+  fixture in this repo has a chart part but no `draw:frame`/`draw:object` anywhere in the body
+  (an orphan chunk); this is the only one with a resolvable anchor, so the chart chunk's location
+  renders as `Quarterly > Units by Month` instead of a bare label. Built with Excel (not odfpy).
 - `sample_legacy.doc` / `sample_legacy.xls` — legacy binary OLE Office (Word 97-2003 / Excel
   97-2003) each carrying one embedded 1×1 PNG picture (exercises `office_oxide::{doc,xls}::images`
   extraction wired into `read.rs`). Generated via MS Office COM with document metadata scrubbed
