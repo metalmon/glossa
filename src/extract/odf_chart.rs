@@ -952,9 +952,9 @@ mod tests {
     }
 
     /// `sample_chart_anchored.ods` has a real in-body `<draw:frame><draw:object
-    /// xlink:href="Object 1/"/></draw:frame>` nested inside the `Quarterly` sheet — the first
-    /// real anchored chart fixture in this repo. The chart chunk must come out as a `Path`
-    /// (sheet, then chart title), not a bare `Label`.
+    /// xlink:href="./Object 1"/></draw:frame>` nested inside the `Sheet1` sheet — hand-built
+    /// (same lineage as `sample_chart.ods`), the first real anchored chart fixture in this repo.
+    /// The chart chunk must come out as a `Path` (sheet, then chart title), not a bare `Label`.
     #[test]
     fn odf_extractor_anchored_chart_gets_sheet_as_parent() {
         let path =
@@ -972,7 +972,7 @@ mod tests {
         );
         assert_eq!(
             chart.location.display(),
-            "Quarterly > Units by Month",
+            "Sheet1 > Sales by quarter",
             "anchored chart's rendered location mismatch"
         );
     }

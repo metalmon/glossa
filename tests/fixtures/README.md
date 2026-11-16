@@ -30,12 +30,16 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
   (`chart:values-cell-range-address="Sheet1.$B$2:.$B$4"` etc.) instead of embedding a local data
   table — the Excel→ODS export form. Sheet1 holds the data (Cat / Series 1; Q1–Q3; 4.3/2.5/3.5).
   Exercises ref-only chart resolution (resolve the ranges against the sheet). English, hand-built.
-- `sample_chart_anchored.ods` — an ODS with a REAL in-body chart anchor: a sheet named
-  `Quarterly` holding a `<draw:frame><draw:object xlink:href="Object 1/"/></draw:frame>` nested
-  inside its `<table:table>`, and an embedded chart titled "Units by Month". Every other chart
-  fixture in this repo has a chart part but no `draw:frame`/`draw:object` anywhere in the body
-  (an orphan chunk); this is the only one with a resolvable anchor, so the chart chunk's location
-  renders as `Quarterly > Units by Month` instead of a bare label. Built with Excel (not odfpy).
+- `sample_chart_anchored.ods` — hand-built FROM `sample_chart.ods` (same lineage, same
+  `Object 1/` local-table chart data), with one addition: a `<draw:frame><draw:object
+  xlink:href="./Object 1"/></draw:frame>` placed inside `Sheet1`'s own `<table:table>`, actually
+  referencing the embedded chart. This is the referenced counterpart to `sample_chart.ods`'s
+  deliberately unreferenced chart part — the contrast between the two is the point of having
+  both: `sample_chart.ods`'s chart part sits in the zip with nothing in the body pointing at it
+  (an orphan chunk, `Chunk::labelled`), while this one is anchored, so its chart chunk's location
+  resolves to the sheet it's anchored in and renders as `Sheet1 > Sales by quarter`
+  (`Chunk::nested`) instead of a bare label. Exercises the hand-built-style href spelling
+  (leading `./`, no trailing slash) as opposed to Office's own `"Object 1/"` spelling.
 - `sample_legacy.doc` / `sample_legacy.xls` — legacy binary OLE Office (Word 97-2003 / Excel
   97-2003) each carrying one embedded 1×1 PNG picture (exercises `office_oxide::{doc,xls}::images`
   extraction wired into `read.rs`). Generated via MS Office COM with document metadata scrubbed

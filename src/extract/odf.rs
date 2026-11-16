@@ -157,8 +157,9 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
 
 /// Parse `content.xml` into the shared IR, and fill `object_containers` with
 /// `embedded-object-path -> container name` for every `<draw:object>` the scan passes while a
-/// sheet (ODS) or slide (ODP) is in force. The key is the object's `xlink:href` with any
-/// trailing `/` trimmed (ODF writes it as e.g. `"Object 1/"`), matching the key
+/// sheet (ODS) or slide (ODP) is in force. The key is the object's `xlink:href` with a leading
+/// `./` and/or a trailing `/` stripped (different producers spell it differently: Office writes
+/// `"Object 1/"`, hand-built/LibreOffice-style files write `"./Object 1"`), matching the key
 /// `odf_chart.rs::extract_odf_charts` derives from the zip part name (`"Object 1/content.xml"`).
 fn parse_to_ir_with_objects(
     xml: &str,
@@ -299,12 +300,24 @@ fn parse_to_ir_with_objects(
                     );
                 }
                 b"object" => {
-                    // <draw:object xlink:href="Object 1/" .../> — an embedded chart or other
-                    // OLE object anchored in the body. Record which container (sheet/slide) it
-                    // sits in, if any; odf_chart.rs looks this up by the same normalized key to
-                    // give the chart chunk a parent instead of a bare label.
+                    // <draw:object xlink:href="..." .../> — an embedded chart or other OLE
+                    // object anchored in the body. Record which container (sheet/slide) it sits
+                    // in, if any; odf_chart.rs looks this up by the same normalized key to give
+                    // the chart chunk a parent instead of a bare label.
+                    //
+                    // Different producers spell the same object directory differently: Office
+                    // writes "Object 1/" (trailing slash, no leading "./"); hand-built/LibreOffice
+                    // style files write "./Object 1" (leading "./", no trailing slash). Strip
+                    // both so either form lands on the same key as the zip part name
+                    // ("Object 1/content.xml", normalized on the odf_chart.rs side by dropping
+                    // "/content.xml") — a mismatch here fails silently (the map never hits and
+                    // every chart quietly keeps its label), so both real-world spellings matter.
                     if let Some(href) = attr(&e, b"href") {
-                        let key = href.trim_end_matches('/').to_string();
+                        let key = href
+                            .strip_prefix("./")
+                            .unwrap_or(&href)
+                            .trim_end_matches('/')
+                            .to_string();
                         let container = match ext {
                             "ods" => current_sheet.clone(),
                             "odp" => current_slide.clone(),
@@ -1365,6 +1378,45 @@ mod tests {
         assert!(
             text.contains("a   b"),
             "text:s repeat count not expanded to 3 spaces: {text:?}"
+        );
+    }
+
+    /// Different ODF producers spell the same embedded-object href differently: Office writes
+    /// a trailing slash (`"Object 1/"`), hand-built/LibreOffice-style files write a leading
+    /// `./` instead (`"./Object 2"`). Both must normalize to the bare directory name so either
+    /// spelling lands on the same key `odf_chart.rs` derives from the zip part name — a
+    /// mismatch here fails silently (the chart just keeps its label), so both forms are pinned
+    /// in one test rather than trusting only the fixture (which exercises one spelling).
+    #[test]
+    fn draw_object_href_both_producer_spellings_normalize_to_same_key() {
+        let xml = r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:xlink="http://www.w3.org/1999/xlink">
+<office:body><office:spreadsheet>
+<table:table table:name="A">
+<table:table-row>
+<table:table-cell><draw:frame><draw:object xlink:href="Object 1/"/></draw:frame></table:table-cell>
+</table:table-row>
+</table:table>
+<table:table table:name="B">
+<table:table-row>
+<table:table-cell><draw:frame><draw:object xlink:href="./Object 2"/></draw:frame></table:table-cell>
+</table:table-row>
+</table:table>
+</office:spreadsheet></office:body>
+</office:document-content>"#;
+
+        let mut object_containers = HashMap::new();
+        parse_to_ir_with_objects(xml, "ods", &mut object_containers).unwrap();
+
+        assert_eq!(
+            object_containers.get("Object 1").map(String::as_str),
+            Some("A"),
+            "Office-style trailing-slash href not normalized: {object_containers:?}"
+        );
+        assert_eq!(
+            object_containers.get("Object 2").map(String::as_str),
+            Some("B"),
+            "hand-built-style leading-./ href not normalized: {object_containers:?}"
         );
     }
 

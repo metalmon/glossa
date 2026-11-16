@@ -57,10 +57,14 @@ fn collects_odf_chart_chunks() {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let chunks = collect_chunks(&fixtures, None, true).unwrap();
     // one chart chunk from sample_chart.ods (Object 1/content.xml, local
-    // table), one from sample_chart_ref.ods (ref-only chart, resolved
-    // against sheet cells), and one from sample_chart_anchored.ods (a real
-    // in-body <draw:object> anchor, giving the chart chunk the sheet as its
-    // parent instead of a bare label).
+    // table, unreferenced/orphan), one from sample_chart_ref.ods (ref-only
+    // chart, resolved against sheet cells), and one from
+    // sample_chart_anchored.ods (a real in-body <draw:object> anchor, giving
+    // the chart chunk the sheet as its parent instead of a bare label).
+    // sample_chart_anchored.ods is hand-built FROM sample_chart.ods (same
+    // lineage, same data) with only the anchor added, so its chart chunk's
+    // TEXT is byte-identical to sample_chart.ods's — the two are only
+    // distinguishable by `location` (Path vs Label), never by text content.
     let ods_chart_chunks: Vec<_> = chunks
         .iter()
         .filter(|c| c.file_type == "ods" && c.text.starts_with("Chart:"))
@@ -73,22 +77,17 @@ fn collects_odf_chart_chunks() {
 
     let anchored_chart = ods_chart_chunks
         .iter()
-        .find(|c| c.text.starts_with("Chart: Units by Month"))
-        .unwrap_or_else(|| panic!("no anchored chart chunk: {ods_chart_chunks:?}"));
-    assert!(
-        anchored_chart.location.is_nested(),
-        "anchored chart should carry its sheet as a parent, got: {:?}",
-        anchored_chart.location
-    );
+        .find(|c| c.location.is_nested())
+        .unwrap_or_else(|| panic!("no nested (anchored) chart chunk: {ods_chart_chunks:?}"));
     assert_eq!(
         anchored_chart.location.display(),
-        "Quarterly > Units by Month",
+        "Sheet1 > Sales by quarter",
         "anchored chart's rendered location mismatch"
     );
 
-    // Both fixtures happen to share the title/kind ("Sales by quarter (bar)")
-    // and the Series 1 values, so disambiguate the ref-only chart by the
-    // absence of "Series 2" — only sample_chart.ods's local table has it.
+    // The ref-only chart's text is distinct from the two local-table charts
+    // (no "Series 2", different category/value cells), so it's still
+    // findable by text alone.
     let ref_chart = ods_chart_chunks
         .iter()
         .find(|c| {
@@ -109,14 +108,27 @@ fn collects_odf_chart_chunks() {
             && ref_chart.text.contains("3.5")
     );
 
-    let local_table_chart = ods_chart_chunks
+    // The two local-table charts (sample_chart.ods, sample_chart_anchored.ods) share identical
+    // text ("Series 2", "4.4"); split them apart by location instead.
+    let local_table_charts: Vec<_> = ods_chart_chunks
         .iter()
-        .find(|c| c.text.contains("Series 2"))
-        .unwrap_or_else(|| panic!("no local-table chart chunk: {ods_chart_chunks:?}"));
+        .filter(|c| c.text.contains("Series 2"))
+        .collect();
+    assert_eq!(
+        local_table_charts.len(),
+        2,
+        "expected two local-table chart chunks (orphan + anchored): {local_table_charts:?}"
+    );
+    for c in &local_table_charts {
+        assert!(c.text.contains("4.4"), "{}", c.text);
+    }
     assert!(
-        local_table_chart.text.contains("4.4"),
-        "{}",
-        local_table_chart.text
+        local_table_charts.iter().any(|c| !c.location.is_nested()),
+        "expected the orphan (sample_chart.ods) local-table chart to stay a Label: {local_table_charts:?}"
+    );
+    assert!(
+        local_table_charts.iter().any(|c| c.location.is_nested()),
+        "expected the anchored (sample_chart_anchored.ods) local-table chart to be a Path: {local_table_charts:?}"
     );
 
     // FIX 4: chart extraction is container-agnostic — sample_chart.odt and
