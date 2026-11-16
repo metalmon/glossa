@@ -93,6 +93,11 @@ fn xlsx_chart_part_names(bytes: &[u8]) -> Vec<String> {
 const CHART_REL_TYPE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart";
 
+/// REJECTION bound on how much of `word/_rels/document.xml.rels` is read. A zip entry's
+/// decompressed size is a claim the file makes, so the read is capped instead of believed. Real
+/// relationship parts are kilobytes; 4 MiB is far past any document a reader cites.
+const MAX_DOCUMENT_RELS_BYTES: u64 = 4 * 1024 * 1024;
+
 /// Every chart relationship declared by `word/_rels/document.xml.rels`, mapped from its id to the
 /// package part it resolves to — the same resolution `office_oxide`'s own reader does when it goes
 /// looking for a `<c:chart r:id="…"/>`'s text. Empty (so the whole docx pass is skipped) for a
@@ -107,11 +112,18 @@ fn docx_chart_parts_by_rel_id(bytes: &[u8]) -> HashMap<String, String> {
     let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(bytes)) else {
         return out;
     };
-    let Ok(mut rels) = zip.by_name("word/_rels/document.xml.rels") else {
+    let Ok(rels) = zip.by_name("word/_rels/document.xml.rels") else {
         return out;
     };
     let mut xml = String::new();
-    if rels.read_to_string(&mut xml).is_err() {
+    // The decompressed size of a zip entry is whatever the file says it is, so this read is
+    // bounded rather than trusted. A relationship part past this size is not one a reader cites;
+    // the truncation leaves the map short or empty, and a short map means "keep both copies".
+    if rels
+        .take(MAX_DOCUMENT_RELS_BYTES)
+        .read_to_string(&mut xml)
+        .is_err()
+    {
         return out;
     }
 
@@ -154,6 +166,12 @@ fn docx_chart_parts_by_rel_id(bytes: &[u8]) -> HashMap<String, String> {
         {
             out.insert(id, part);
         }
+        // The caller rejects a document with more chart drawings than this anyway, so a table
+        // bigger than the bound can only be a file inflating the work. Stopping here leaves the
+        // table short, and a drawing whose relationship is not in it keeps both copies.
+        if out.len() >= MAX_DEDUPED_CHART_DRAWINGS_PER_FILE {
+            break;
+        }
     }
     out
 }
@@ -173,16 +191,29 @@ fn resolve_document_rel_target(target: &str) -> Option<String> {
     Some(format!("word/{t}"))
 }
 
+/// REJECTION bound on how many chart-bearing drawings one docx may have de-duplicated, and on how
+/// many chart relationships its `document.xml.rels` may declare. Both counts come straight out of
+/// the file — a small zip can declare a great many of either — and each one costs a walk of the
+/// body flow looking for its text, so without a per-file bound a crafted document buys quadratic
+/// work for a few hundred bytes. Past the bound the de-duplication is skipped entirely and both
+/// copies of every chart's text are kept, which is the same answer this pass already gives
+/// whenever identification fails. A document with more charts than this is not one a reader
+/// cites; the same number as `rtf_chart`'s `MAX_CHARTS_PER_FILE`, for the same reason.
+const MAX_DEDUPED_CHART_DRAWINGS_PER_FILE: usize = 64;
+
 /// Every drawing in the body that references a chart part whose text `office_oxide` recovered, in
-/// document order, as `(relationship id, the lines it recovered)`. Those exact lines are what
-/// `convert_docx.rs`'s `collect_paragraph_chart_text` pushes into the IR as plain paragraphs, one
-/// per line, at the chart's slot in the body flow.
+/// document order, as `(relationship id, the lines it recovered)`, plus the total number found —
+/// which keeps counting after `out` stops growing at `MAX_DEDUPED_CHART_DRAWINGS_PER_FILE`, so the
+/// caller can say how far over the bound a document is without holding a line of it. Those exact
+/// lines are what `convert_docx.rs`'s `collect_paragraph_chart_text` pushes into the IR as plain
+/// paragraphs, one per line, at the chart's slot in the body flow.
 ///
 /// `dgm_text` — a SmartArt diagram's text, which travels the very same path — is deliberately NOT
 /// collected: nothing of ours re-emits it, so it must stay in the body flow or it is lost.
-fn collect_docx_chart_drawings(
-    blocks: &[office_oxide::docx::BlockElement],
-    out: &mut Vec<(String, Vec<String>)>,
+fn collect_docx_chart_drawings<'a>(
+    blocks: &'a [office_oxide::docx::BlockElement],
+    out: &mut Vec<(&'a str, std::sync::Arc<[String]>)>,
+    total: &mut usize,
 ) {
     use office_oxide::docx::{BlockElement, ParagraphContent, Run, RunContent};
 
@@ -200,14 +231,20 @@ fn collect_docx_chart_drawings(
                                 RunContent::Drawing(d) => {
                                     if let Some(rid) = d.chart_rel_id.as_deref() {
                                         if !d.chart_text.is_empty() {
-                                            out.push((rid.to_string(), d.chart_text.to_vec()));
+                                            *total += 1;
+                                            if out.len() < MAX_DEDUPED_CHART_DRAWINGS_PER_FILE {
+                                                out.push((
+                                                    rid,
+                                                    std::sync::Arc::clone(&d.chart_text),
+                                                ));
+                                            }
                                         }
                                     }
                                 }
                                 // A text box's body is ordinary block content and can hold a
                                 // chart of its own; `convert_docx` hoists from there too.
                                 RunContent::TextBox(inner) => {
-                                    collect_docx_chart_drawings(inner, out)
+                                    collect_docx_chart_drawings(inner, out, total)
                                 }
                                 _ => {}
                             }
@@ -218,7 +255,7 @@ fn collect_docx_chart_drawings(
             BlockElement::Table(t) => {
                 for row in &t.rows {
                     for cell in &row.cells {
-                        collect_docx_chart_drawings(&cell.content, out);
+                        collect_docx_chart_drawings(&cell.content, out, total);
                     }
                 }
             }
@@ -249,19 +286,22 @@ fn find_hoisted_chart_run(
     from: (usize, usize),
     lines: &[String],
 ) -> Option<(usize, usize)> {
-    for s in from.0..ir.sections.len() {
-        let els = &ir.sections[s].elements;
+    if lines.is_empty() {
+        return None;
+    }
+    for (s, section) in ir.sections.iter().enumerate().skip(from.0) {
+        let els = &section.elements;
         if els.len() < lines.len() {
             continue;
         }
         let start = if s == from.0 { from.1 } else { 0 };
-        for i in start..=(els.len() - lines.len()) {
-            if lines
+        for (at, window) in els.windows(lines.len()).enumerate().skip(start) {
+            if window
                 .iter()
-                .enumerate()
-                .all(|(k, line)| hoisted_line_text(&els[i + k]) == Some(line.as_str()))
+                .zip(lines)
+                .all(|(e, line)| hoisted_line_text(e) == Some(line.as_str()))
             {
-                return Some((s, i));
+                return Some((s, at));
             }
         }
     }
@@ -306,28 +346,44 @@ fn drop_hoisted_docx_chart_text(
         }
     };
     let mut drawings = Vec::new();
-    collect_docx_chart_drawings(&doc.body.elements, &mut drawings);
+    let mut total_drawings = 0usize;
+    collect_docx_chart_drawings(&doc.body.elements, &mut drawings, &mut total_drawings);
     if drawings.is_empty() {
         return;
     }
+    if total_drawings > MAX_DEDUPED_CHART_DRAWINGS_PER_FILE {
+        tracing::warn!(
+            "docx {}: {total_drawings} chart-bearing drawings is past the per-file bound of {MAX_DEDUPED_CHART_DRAWINGS_PER_FILE} — skipping the chart de-duplication entirely and keeping both copies of every chart's text; {} drawing(s) went unprocessed",
+            path.display(),
+            total_drawings - MAX_DEDUPED_CHART_DRAWINGS_PER_FILE
+        );
+        return;
+    }
     let covered: HashSet<&str> = covered_chart_parts.iter().map(String::as_str).collect();
-    // Charts are visited in document order and the search never looks back, so one chart's run is
-    // never claimed by another. A chart we keep still advances the cursor past its own lines.
+    // Resolve every chart to its range FIRST, then rebuild each section in one pass. Removing as
+    // we went would shift every later element once per chart, and the cursor only ever moves
+    // forward, so one chart's run is never claimed by another and the whole scan stays linear in
+    // the number of elements however many charts there are.
+    let mut to_remove: Vec<(usize, usize, usize)> = Vec::new();
     let mut cursor = (0usize, 0usize);
-    for (rel_id, lines) in drawings {
-        let part = parts_by_rel_id.get(&rel_id);
-        let Some((section, at)) = find_hoisted_chart_run(ir, cursor, &lines) else {
+    for (i, (rel_id, lines)) in drawings.iter().enumerate() {
+        let part = parts_by_rel_id.get(*rel_id);
+        let Some((section, at)) = find_hoisted_chart_run(ir, cursor, lines) else {
+            // Our model of where the converter puts chart text no longer matches this document,
+            // and the charts after this one are found by walking on from here — so stop rather
+            // than rescan the same tail for each of them, and leave the rest of the flow alone.
             tracing::warn!(
-                "docx {}: chart relationship {rel_id} named {} line(s) of text that are not in the document flow where the converter puts them — keeping whatever is there rather than removing the wrong paragraphs",
+                "docx {}: chart relationship {rel_id} named {} line(s) of text that are not in the document flow where the converter puts them — keeping both copies from here on, {} chart(s) left untouched",
                 path.display(),
-                lines.len()
+                lines.len(),
+                drawings.len() - i
             );
-            continue;
+            break;
         };
+        cursor = (section, at + lines.len());
         match part {
             Some(part) if covered.contains(part.as_str()) => {
-                ir.sections[section].elements.drain(at..at + lines.len());
-                cursor = (section, at);
+                to_remove.push((section, at, lines.len()));
             }
             _ => {
                 tracing::warn!(
@@ -335,9 +391,27 @@ fn drop_hoisted_docx_chart_text(
                     path.display(),
                     part.map(String::as_str).unwrap_or("no readable chart part")
                 );
-                cursor = (section, at + lines.len());
             }
         }
+    }
+    let mut by_section: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
+    for (section, at, len) in to_remove {
+        by_section.entry(section).or_default().push((at, len));
+    }
+    for (section, ranges) in by_section {
+        let elements = &mut ir.sections[section].elements;
+        let mut drop_it = vec![false; elements.len()];
+        for (at, len) in ranges {
+            for slot in drop_it.iter_mut().skip(at).take(len) {
+                *slot = true;
+            }
+        }
+        let mut i = 0;
+        elements.retain(|_| {
+            let keep = !drop_it[i];
+            i += 1;
+            keep
+        });
     }
 }
 
@@ -726,6 +800,51 @@ mod tests {
                  to replace it), got:\n{text}"
             );
         }
+    }
+
+    /// The denial-of-service guard. Both the number of chart relationships a `.docx` declares and
+    /// the number of drawings that point at them come straight out of the file, and each drawing
+    /// costs a walk of the body flow — so a few hundred bytes of zip could buy quadratic work.
+    /// Past `MAX_DEDUPED_CHART_DRAWINGS_PER_FILE` the de-duplication is skipped and both copies
+    /// are kept, so the document still extracts, body text and all. Built by repeating the
+    /// fixture's own chart drawing rather than by committing a second fixture.
+    #[test]
+    fn a_docx_declaring_absurdly_many_chart_drawings_still_extracts() {
+        let drawing = {
+            let mut zr = zip::ZipArchive::new(Cursor::new(
+                include_bytes!("../../tests/fixtures/sample_chart_anchored.docx").to_vec(),
+            ))
+            .unwrap();
+            use std::io::Read as _;
+            let mut doc = String::new();
+            zr.by_name("word/document.xml")
+                .unwrap()
+                .read_to_string(&mut doc)
+                .unwrap();
+            let start = doc.find("<w:drawing>").unwrap();
+            let end = doc.find("</w:drawing>").unwrap() + "</w:drawing>".len();
+            doc[start..end].to_string()
+        };
+        let mut body = String::from(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"><w:body><w:p><w:r><w:t>glossa sample document used as a neutral test fixture.</w:t></w:r></w:p>"#,
+        );
+        for _ in 0..(MAX_DEDUPED_CHART_DRAWINGS_PER_FILE * 8) {
+            body.push_str("<w:p><w:r>");
+            body.push_str(&drawing);
+            body.push_str("</w:r></w:p>");
+        }
+        body.push_str("<w:sectPr/></w:body></w:document>");
+
+        let buf = anchored_fixture_with("word/document.xml", body.as_bytes());
+        let chunks = OfficeExtractor
+            .extract(Path::new("many_charts.docx"), &buf)
+            .unwrap();
+        let text = joined(&chunks);
+        assert!(
+            text.contains("glossa sample document used as a neutral test fixture."),
+            "the bound must skip the de-duplication, not the extraction, got:\n{text}"
+        );
     }
 
     /// The data-loss guard: when our own pass does not cover the chart part a drawing points at
