@@ -47,7 +47,7 @@ Provenance on graph nodes records `source_path`, optional range, file signature,
 | Format | Library | Notes |
 |--------|---------|-------|
 | PDF | [pdf_oxide](https://github.com/yfedoseev/pdf_oxide) | Per-page text; blank pages indexed empty; page raster for vision agents (bounded at 16 megapixels, scaled to fit); embedded image extraction; scans indexed by filename if no text |
-| Office (OOXML + legacy) | [office_oxide](https://github.com/yfedoseev/office_oxide) | doc/docx, xls/xlsx, ppt/pptx; `DocumentIR` → merge-cell densify → IR-level chunking (not whole-doc markdown) |
+| Office (OOXML + legacy) | [office_oxide](https://github.com/yfedoseev/office_oxide) | doc/docx, xls/xlsx/xlsb, ppt/pptx; `DocumentIR` → merge-cell densify → IR-level chunking (not whole-doc markdown) |
 | OpenDocument | built-in | odt/ods/odp; `content.xml` parsed to `DocumentIR` (headings, tables with merged cells / repeats / clamps, section-per-sheet/slide), reusing the office chunker |
 | RTF | built-in | rtf; control-word reader → `DocumentIR`, reusing the office chunker. Code pages come from the file (`\ansicpg`, per-font `\fcharset`, `\'hh`, `\uN`), heading level from the stylesheet's `\outlinelevel` (English style names as a fallback), tables from `\trowd`/`\cell`/`\row`. `\pict`, headers/footers and footnotes are skipped. **A file whose extension lies is rescued:** when the reader that owns the extension fails and the bytes start with `{\rtf`, RTF is tried — the `.doc` that is really RTF |
 | Charts | built-in | OOXML (`charts/chartN.xml` cache) and ODF (embedded local `<table:table>`, or cell-range refs resolved against the sheet) → chart **data** as a searchable GFM table, one chunk per chart |

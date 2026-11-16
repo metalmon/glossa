@@ -27,6 +27,7 @@ pub const DEFAULT_IGNORE: &str = "\
 !*.docx
 !*.doc
 !*.xlsx
+!*.xlsb
 !*.xls
 !*.pptx
 !*.ppt
