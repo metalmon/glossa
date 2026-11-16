@@ -400,9 +400,31 @@ impl DocIndex {
         // The whole write (open writer → delete → add → commit) runs under a transient-IO retry:
         // on Windows a just-created index file is briefly locked (Defender scan, lingering reader)
         // and opening the writer can fail with "Access is denied (os error 5)". The transaction is
-        // idempotent (delete-by-path then re-add), so retrying the whole thing is safe.
+        // idempotent in DATA (delete-by-path then re-add) — but NOT in the files it writes, which
+        // is why every attempt after the first collects garbage before doing anything else.
+        //
+        // This closure opens a NEW writer on every attempt, so a commit that fails partway and
+        // already wrote `<segment>.<opstamp>.del` leaves the next attempt building a fresh writer
+        // whose stamper reloads the committed opstamp — the SAME one — and it tries to create that
+        // file again and dies on `FileAlreadyExists`, which `is_transient_fs` also reads as
+        // transient. (A reused writer does not have this problem: its stamper hands out a new
+        // opstamp on every `prepare_commit`, so there is nothing to collide with — see the commit
+        // retries in `index_dir_at_locked` and friends, which build the writer once and skip the
+        // collect.) Without the collect here, one recoverable blip burns every attempt and reports
+        // the collision instead of the original cause. Note that a `FileAlreadyExists` on a `.del`
+        // is NOT proof that a retry happened on THIS process — an earlier process killed mid-commit
+        // (e.g. a killed indexer) leaves the identical orphan for a first attempt to meet.
+        // `garbage_collect_files` deletes whatever the live segment inventory — the committed AND
+        // uncommitted `SegmentMeta`s tantivy tracks via `list_all_segment_metas`, not just what
+        // `meta.json` on disk says — no longer references, which is exactly that orphan, so the
+        // re-commit can land.
+        let mut attempt = 0u32;
         with_writer_retry(|| {
             let mut writer = self.index.writer(50_000_000)?;
+            attempt += 1;
+            if attempt > 1 {
+                writer.garbage_collect_files().wait()?;
+            }
             for path_str in &distinct_paths {
                 writer.delete_term(tantivy::Term::from_field_text(self.fields.path, path_str));
             }
@@ -1279,8 +1301,18 @@ impl DocIndex {
     }
 
     pub fn delete_path(&self, path: &str) -> anyhow::Result<()> {
+        // Collects garbage on every attempt after the first, for the reason spelled out in
+        // `write_chunks`: this closure opens a NEW writer each attempt, so its stamper reloads the
+        // committed opstamp and a half-written commit's `.del` collides with the retry's own. (A
+        // reused writer would get a fresh opstamp per attempt and never collide — that is why the
+        // commit-only retries elsewhere skip the collect.)
+        let mut attempt = 0u32;
         with_writer_retry(|| {
             let mut writer = self.index.writer::<TantivyDocument>(50_000_000)?;
+            attempt += 1;
+            if attempt > 1 {
+                writer.garbage_collect_files().wait()?;
+            }
             writer.delete_term(tantivy::Term::from_field_text(self.fields.path, path));
             writer.commit()?;
             Ok(())
@@ -1678,15 +1710,36 @@ fn is_lock_busy(e: &anyhow::Error) -> bool {
 /// (capped attempts) clears it; on other platforms the first attempt succeeds. `is_transient_fs`
 /// decides what counts as transient; a structural error propagates immediately, and even a
 /// persistently-transient-looking error propagates once the attempt cap is hit (never an infinite loop).
+/// How many times [`with_writer_retry`] re-attempts a transient filesystem failure. Five retries at
+/// the exponential backoff below spend about 1.55s in total, chosen because the holder is usually a
+/// virus scanner working on a file tantivy just wrote rather than anything this process controls.
+/// The backoff's per-attempt cap is 800ms, so raising this constant adds flat 800ms steps rather
+/// than continuing to double — a deliberate choice, not an oversight (see the sleep call below).
+const RETRY_ATTEMPTS: u32 = 5;
+
 pub(crate) fn with_writer_retry<T>(
     mut op: impl FnMut() -> tantivy::Result<T>,
 ) -> tantivy::Result<T> {
     let mut attempt = 0u32;
     loop {
         match op() {
-            Err(e) if attempt < 4 && is_transient_fs(&e) => {
+            Err(e) if attempt < RETRY_ATTEMPTS && is_transient_fs(&e) => {
                 attempt += 1;
-                std::thread::sleep(std::time::Duration::from_millis(u64::from(40 * attempt)));
+                // Exponential, because the thing being waited out is not ours. The old budget was
+                // linear 40/80/120/160ms — 400ms in total — and the holder is typically Defender
+                // scanning a file tantivy just wrote, which routinely takes longer than that. When
+                // the budget runs out the error surfaces as a red CI leg indistinguishable from a
+                // real failure, which is how two of the three Windows flakes observed on
+                // 2026-11-15 looked. 50/100/200/400/800ms spends 1.55s instead; the only cost is
+                // that a transient-LOOKING permanent error now takes that long to be reported,
+                // and `is_transient_fs` has already excluded the permanent kinds.
+                //
+                // The `.min(4)` caps each sleep at 50 << 4 = 800ms: a deliberate ceiling on the
+                // per-attempt wait, not an accident of the shift. Raising `RETRY_ATTEMPTS` beyond
+                // 5 does not keep doubling past 800ms — it adds more 800ms steps instead.
+                std::thread::sleep(std::time::Duration::from_millis(
+                    50u64 << (attempt - 1).min(4),
+                ));
             }
             other => return other,
         }
@@ -2401,7 +2454,11 @@ pub fn index_dir_at_locked(
     }
     // Commit under the bounded transient-FS retry — the commit writes+renames `meta.json`, the same
     // frame that flakes on Windows (Defender / a racing reader briefly holds it). Idempotent: the
-    // writer's pending ops stay staged, so re-committing after a transient failure is safe.
+    // writer's pending ops stay staged, so re-committing after a transient failure is safe. No
+    // garbage collection here: `writer` is this one writer, built once above, so each retry calls
+    // `prepare_commit` on the SAME writer and its stamper hands out a fresh opstamp every time —
+    // there is no same-named `.del` for a retry to collide with (contrast `DocIndex::write_chunks`,
+    // which reopens the writer per attempt).
     eprintln!("committing index...");
     with_writer_retry(|| writer.commit())?;
     eprintln!("index committed");
@@ -2487,7 +2544,11 @@ pub fn index_one_file_locked_at(
     let mut manifest = Manifest::load(state_base);
     manifest.files.insert(rel.to_string(), sig);
     let _ = resolve_reference_links(&idx.roots, &graph, &manifest.files, &links);
-    // Bounded transient-FS retry around the `meta.json`-writing commit (see index_dir_locked).
+    // Bounded transient-FS retry around the `meta.json`-writing commit (see index_dir_locked). No
+    // garbage collection here: `writer` is this one writer, built once above, so each retry calls
+    // `prepare_commit` on the SAME writer and its stamper hands out a fresh opstamp every time —
+    // there is no same-named `.del` for a retry to collide with (contrast `DocIndex::write_chunks`,
+    // which reopens the writer per attempt).
     with_writer_retry(|| writer.commit())?;
     let mut m = Manifest::load(state_base);
     m.files.insert(rel.to_string(), sig);
@@ -3136,6 +3197,10 @@ pub fn reindex_dirs_at_locked(
     // Deliberately NOT bracketed with the phase markers the full pass prints: `freshen_blocking_at`
     // routes here, so a running server would log two lines per freshen cycle — for a pass that is
     // scoped and short by construction. The markers exist for the pass that goes quiet for minutes.
+    // No garbage collection here: `writer` is this one writer, built once above, so each retry calls
+    // `prepare_commit` on the SAME writer and its stamper hands out a fresh opstamp every time —
+    // there is no same-named `.del` for a retry to collide with (contrast `DocIndex::write_chunks`,
+    // which reopens the writer per attempt).
     with_writer_retry(|| writer.commit())?;
     // Carry the schema version forward as-is: this is not a schema-migrating path (that's
     // `index_dir_at_locked`'s job), so resetting it to `Manifest::default()`'s value would make
@@ -6165,6 +6230,31 @@ mod retry_tests {
             "a non-transient (structural) error propagates"
         );
         assert_eq!(calls.get(), 1, "a non-transient error is not retried");
+    }
+
+    /// The attempt cap is the promise that this is a bounded retry and not an infinite loop, and
+    /// until now nothing checked it — the doc comment was the only guarantee. An error that stays
+    /// transient forever must propagate after exactly `RETRY_ATTEMPTS` retries. The call-count
+    /// assertion alone would still pass if someone just raised `RETRY_ATTEMPTS`, since it reads the
+    /// constant rather than pinning it — so this also asserts the constant's current value
+    /// directly, which a change to the budget has to touch.
+    #[test]
+    fn with_writer_retry_gives_up_after_the_attempt_cap() {
+        assert_eq!(RETRY_ATTEMPTS, 5, "the retry budget this test documents");
+        let calls = Cell::new(0u32);
+        let out: tantivy::Result<u32> = with_writer_retry(|| {
+            calls.set(calls.get() + 1);
+            Err(perm_denied())
+        });
+        assert!(
+            out.is_err(),
+            "a permanently transient error still propagates"
+        );
+        assert_eq!(
+            calls.get(),
+            RETRY_ATTEMPTS + 1,
+            "one first attempt plus RETRY_ATTEMPTS retries, then it gives up"
+        );
     }
 
     fn transient_io_err() -> anyhow::Error {
