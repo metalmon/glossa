@@ -534,12 +534,12 @@ mod tests {
         // Empty → None, so the caller omits the block entirely (gold-only prompt).
         assert!(evidence_block(&[]).is_none());
         let snippets = vec![
-            ("a.pdf#p.1".to_string(), "chunk one".to_string()),
-            ("b.pdf#p.2".to_string(), "chunk two".to_string()),
+            ("a.pdf#1".to_string(), "chunk one".to_string()),
+            ("b.pdf#2".to_string(), "chunk two".to_string()),
         ];
         assert_eq!(
             evidence_block(&snippets).unwrap(),
-            "EVIDENCE:\n[a.pdf#p.1]\nchunk one\n[b.pdf#p.2]\nchunk two"
+            "EVIDENCE:\n[a.pdf#1]\nchunk one\n[b.pdf#2]\nchunk two"
         );
     }
 
@@ -612,10 +612,10 @@ mod tests {
     fn user_prompt_with_evidence_injects_block_between_gold_and_answer() {
         let s = legacy_sections();
         // Stubbed chunk text (mock) — no corpus, no network.
-        let snippets = vec![("a.pdf#p.1".to_string(), "stub evidence text".to_string())];
+        let snippets = vec![("a.pdf#1".to_string(), "stub evidence text".to_string())];
         let ev = evidence_block(&snippets);
         let prompt = build_user("Q?", "G", "A", ev.as_deref(), true, false, &[], &s);
-        assert!(prompt.contains("EVIDENCE:\n[a.pdf#p.1]\nstub evidence text"));
+        assert!(prompt.contains("EVIDENCE:\n[a.pdf#1]\nstub evidence text"));
         // Block sits between GOLD and ANSWER.
         let gold_at = prompt.find("GOLD: G").unwrap();
         let ev_at = prompt.find("EVIDENCE:").unwrap();

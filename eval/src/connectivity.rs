@@ -28,18 +28,28 @@ const RANK_WINDOW: usize = 200;
 fn answer_nodes(g: &GraphStore, source: &str) -> anyhow::Result<Vec<String>> {
     // Three cases, and the third is why this is not just a stricter parse. No `#` at all is a
     // DOCUMENT-level ref and matches every Section in the file — that is legitimate and unchanged.
-    // A fragment of digits is the ordinal. A fragment that is anything else is a dataset error, and
-    // it must match NOTHING: falling through to the document-level path would make a bad ref match
-    // every section instead of one, which is broader than the bug it replaces.
-    let (doc, page) = match source.split_once('#') {
+    // A fragment of digits that fits a u32 is the ordinal. Anything else — including an
+    // all-digit fragment that overflows u32 — is a dataset error and must match NOTHING: falling
+    // through to the document-level path (page == None) would make a bad ref match every section
+    // instead of one, which is broader than the bug it replaces. So the parse is matched, not
+    // discarded with `.ok()`: a failed parse joins the refusal arm rather than silently becoming
+    // `None`. Split on the LAST `#` (`rsplit_once`), matching `judge::parse_ref`, so a path that
+    // itself contains `#` still resolves against its final locator.
+    let (doc, page) = match source.rsplit_once('#') {
         Some((d, frag)) if !frag.is_empty() && frag.bytes().all(|b| b.is_ascii_digit()) => {
-            (d.to_string(), frag.parse::<u32>().ok())
+            match frag.parse::<u32>() {
+                Ok(n) => (d.to_string(), Some(n)),
+                Err(_) => {
+                    eprintln!(
+                        "gold ref's fragment overflows an ordinal: {source:?} (fragment {frag:?}); write it as `path#N`"
+                    );
+                    return Ok(Vec::new());
+                }
+            }
         }
         Some((_, frag)) => {
-            tracing::warn!(
-                source,
-                fragment = frag,
-                "gold ref's fragment is not an ordinal; refusing it (write it as `path#N`)"
+            eprintln!(
+                "gold ref's fragment is not an ordinal: {source:?} (fragment {frag:?}); write it as `path#N`"
             );
             return Ok(Vec::new());
         }
@@ -285,6 +295,19 @@ mod tests {
         let out = answer_nodes(&g, "d.pdf#14").unwrap();
         assert_eq!(out, vec!["res:ans".to_string()]);
 
+        // A Section at ordinal 413 — the exact ordinal the OLD lenient parse invented out of
+        // `#4.1.3 Safety` by keeping every ASCII digit (4, 1, 3) and dropping the rest. Without
+        // this node the heading assertion below would pass under the old parse too (413 matched
+        // no Section in this fixture), which would pin nothing.
+        let sec_413 = Node {
+            id: "d.pdf#413".into(),
+            node_type: "Section".into(),
+            label: "Section 413".into(),
+            aliases: vec![],
+            prov: prov("d.pdf", None),
+        };
+        g.put_node(&sec_413).unwrap();
+
         // The `#p.<N>` spelling is NOT accepted any more. It is a dataset error, and refusing it is
         // how we find where it still sits; absorbing it also meant `#4.1.3 Safety` became ordinal
         // 413, an ordinal invented out of a heading.
@@ -294,7 +317,15 @@ mod tests {
         );
         assert!(
             answer_nodes(&g, "d.pdf#4.1.3 Safety").unwrap().is_empty(),
-            "a heading fragment must not be mangled into an ordinal"
+            "a heading fragment must not be mangled into an ordinal 413 (see the `d.pdf#413` Section above)"
+        );
+
+        // An all-digit fragment that overflows u32 must join the refusal arm, not fall through to
+        // a document-level match (which would match every Section in the file, including d.pdf#14
+        // and d.pdf#413 above) — the exact trap the third case exists to close.
+        assert!(
+            answer_nodes(&g, "d.pdf#4294967296").unwrap().is_empty(),
+            "an overflowing ordinal must not match the whole document"
         );
     }
 
