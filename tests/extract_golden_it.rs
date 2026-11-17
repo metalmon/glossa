@@ -94,20 +94,89 @@ const EXPECTED: &[(&str, &[&str])] = &[
         // gave an rtf legacy chart its own ordinal position, so the chart chunk's place in this
         // sequence is already the new interleaved behaviour, not what the extractor emitted
         // before that commit.
+        // Caveat on what this row can witness: the whole rtf body is ONE chunk, so the chart's
+        // ordinal position and an end-of-document append produce the same sequence here. Pinning
+        // the rtf ORDER would need a fixture whose body splits into several chunks.
         "sample_chart_legacy.rtf",
-        &[],
+        &[
+            "glossa sample\n\nQuarterly fruit sales, charted below.\n\nEnd of sample.",
+            "Chart: Chart 1\n\n|  | Apples | Pears | Plums |\n| --- | --- | --- | --- |\n| Qtr1 | 20.4 | 30.6 | 45.9 |\n| Qtr2 | 27.4 | 38.6 | 46.9 |\n| Qtr3 | 90 | 34.6 | 45 |\n| Qtr4 | 20.4 | 31.6 | 43.9 |",
+        ],
     ),
     // The odf rows below are PRE-CHANGE: odf charts still append at the end of the document.
     // Tasks 6 and 7 of the chart-ordinals plan move them to their anchors, which will red these
     // rows on purpose — update them there deliberately.
-    ("sample.odt", &[]),
-    ("sample_chart.odt", &[]),
-    ("sample.ods", &[]),
-    ("sample_chart.ods", &[]),
-    ("sample_chart_anchored.ods", &[]),
-    ("sample_chart_ref.ods", &[]),
-    ("sample.odp", &[]),
-    ("sample_chart.odp", &[]),
+    (
+        // The chartless control for odt: `sample_chart.odt`'s first three chunks must stay
+        // byte-identical to these.
+        "sample.odt",
+        &[
+            "glossa sample document.",
+            "# Alpha Section\n\nAlpha body paragraph one.\n\nAlpha body paragraph two.",
+            "# Beta Section\n\nBeta body paragraph.\n\n| h1 | h2 |\n| --- | --- |\n| wide | wide |",
+        ],
+    ),
+    (
+        "sample_chart.odt",
+        &[
+            "glossa sample document.",
+            "# Alpha Section\n\nAlpha body paragraph one.\n\nAlpha body paragraph two.",
+            "# Beta Section\n\nBeta body paragraph.\n\n| h1 | h2 |\n| --- | --- |\n| wide | wide |",
+            "Chart: Sales by quarter (bar)\n\n|  | Series 1 |\n| --- | --- |\n| Q1 | 4.3 |\n| Q2 | 2.5 |",
+        ],
+    ),
+    (
+        // Two sheets, one chunk each: `Sheet1` then `Data`.
+        "sample.ods",
+        &[
+            "| glossa sample |  |\n| --- | --- |\n| a | b |\n| 1 | 2 |",
+            "| x | dup | dup | dup | y |\n| --- | --- | --- | --- | --- |",
+        ],
+    ),
+    (
+        "sample_chart.ods",
+        &[
+            "| glossa sample |  |\n| --- | --- |\n| a | b |\n| 1 | 2 |",
+            "| x | dup | dup | dup | y |\n| --- | --- | --- | --- | --- |",
+            "Chart: Sales by quarter (bar)\n\n|  | Series 1 | Series 2 |\n| --- | --- | --- |\n| Q1 | 4.3 | 2.4 |\n| Q2 | 2.5 | 4.4 |\n| Q3 | 3.5 | 3.5 |",
+        ],
+    ),
+    (
+        // Same lineage as `sample_chart.ods`, and `Sheet1` differs by one empty row: the
+        // `<draw:frame>` that anchors the chart sits in its own `<table:table-row>`, so the sheet
+        // renders a blank `|  |  |` line the unanchored fixture does not have. That is today's
+        // behaviour, pinned here rather than endorsed.
+        "sample_chart_anchored.ods",
+        &[
+            "| glossa sample |  |\n| --- | --- |\n|  |  |\n| a | b |\n| 1 | 2 |",
+            "| x | dup | dup | dup | y |\n| --- | --- | --- | --- | --- |",
+            "Chart: Sales by quarter (bar)\n\n|  | Series 1 | Series 2 |\n| --- | --- | --- |\n| Q1 | 4.3 | 2.4 |\n| Q2 | 2.5 | 4.4 |\n| Q3 | 3.5 | 3.5 |",
+        ],
+    ),
+    (
+        // The ref-only chart: its values came from resolving the cell ranges against `Sheet1`,
+        // which is why the chart table repeats the sheet's own numbers.
+        "sample_chart_ref.ods",
+        &[
+            "| Cat | Series 1 |\n| --- | --- |\n| Q1 | 4.3 |\n| Q2 | 2.5 |\n| Q3 | 3.5 |",
+            "Chart: Sales by quarter (bar)\n\n|  | Series 1 |\n| --- | --- |\n| Q1 | 4.3 |\n| Q2 | 2.5 |\n| Q3 | 3.5 |",
+        ],
+    ),
+    (
+        "sample.odp",
+        &[
+            "# glossa sample slide\n\nFirst slide body text.",
+            "# Second Heading\n\nSecond slide body text.",
+        ],
+    ),
+    (
+        "sample_chart.odp",
+        &[
+            "# glossa sample slide\n\nFirst slide body text.",
+            "# Second Heading\n\nSecond slide body text.",
+            "Chart: Sales by quarter (bar)\n\n|  | Series 1 |\n| --- | --- |\n| Q1 | 4.3 |\n| Q2 | 2.5 |",
+        ],
+    ),
 ];
 
 #[test]
