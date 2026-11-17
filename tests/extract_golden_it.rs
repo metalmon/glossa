@@ -94,9 +94,14 @@ const EXPECTED: &[(&str, &[&str])] = &[
         // gave an rtf legacy chart its own ordinal position, so the chart chunk's place in this
         // sequence is already the new interleaved behaviour, not what the extractor emitted
         // before that commit.
-        // Caveat on what this row can witness: the whole rtf body is ONE chunk, so the chart's
-        // ordinal position and an end-of-document append produce the same sequence here. Pinning
-        // the rtf ORDER would need a fixture whose body splits into several chunks.
+        // Caveat on what this row can witness: **this fixture cannot demonstrate chart
+        // placement at all, and a reader must not take these two chunks as evidence either
+        // way.** It carries no heading and sits under the 4000-character threshold, so
+        // `chunk_ir` coalesces the whole body into ONE chunk — which makes "after the chunk
+        // containing the anchor" and "appended at the end" the same sequence. The test that
+        // actually demonstrates the ordinal placement is
+        // `src/extract/rtf.rs::a_legacy_chart_lands_after_the_paragraph_that_contains_it`,
+        // which injects a heading into this fixture first so the body splits.
         "sample_chart_legacy.rtf",
         &[
             "glossa sample\n\nQuarterly fruit sales, charted below.\n\nEnd of sample.",
@@ -156,6 +161,11 @@ const EXPECTED: &[(&str, &[&str])] = &[
     (
         // The ref-only chart: its values came from resolving the cell ranges against `Sheet1`,
         // which is why the chart table repeats the sheet's own numbers.
+        //
+        // Same caveat as the rtf row: this fixture has a single sheet, so its body is ONE chunk
+        // and "after the chunk containing the anchor" coincides with "appended at the end".
+        // When the ods anchoring lands, this row will not witness it — a multi-sheet fixture
+        // (`sample.ods`'s two sheets, or `sample_chart_anchored.ods`) is what can.
         "sample_chart_ref.ods",
         &[
             "| Cat | Series 1 |\n| --- | --- |\n| Q1 | 4.3 |\n| Q2 | 2.5 |\n| Q3 | 3.5 |",
