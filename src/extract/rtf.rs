@@ -20,7 +20,9 @@
 //! that yields no chunks is an error, same as the other extractors, because "indexed, empty" is the
 //! failure mode that hides.
 
-use crate::extract::office_chunk::chunk_ir;
+use crate::extract::chart_splice::splice_charts_at_anchors;
+use crate::extract::office_chunk::chunk_ir_with_spans;
+use crate::extract::rtf_chart::MAX_OBJDATA_BLOBS;
 use crate::extract::{Chunk, Extractor};
 use anyhow::{anyhow, Result};
 use encoding_rs::{Encoding, WINDOWS_1252};
@@ -410,8 +412,25 @@ fn literal_for(w: &str) -> Option<&'static str> {
     })
 }
 
-/// The body walk: tokens in, `DocumentIR` out.
-fn parse_to_ir(bytes: &[u8], header: &Header) -> DocumentIR {
+/// Where the body walk saw the file's `{\object …}` groups, so a legacy chart can be placed at
+/// the chart's own slot instead of after all the body text.
+///
+/// The mechanism is positional — the Nth `{\object}` group the lexer walks past is the Nth
+/// `{\*\objdata}` blob `rtf_chart`'s raw byte scan finds — so the COUNT is as load-bearing as the
+/// indices, and `seen` is kept separately from `at` for exactly that comparison: `at` stops
+/// growing at `MAX_OBJDATA_BLOBS`, where the raw scan stops too, so no file can make either side
+/// allocate per `{\object}` it declares. A document whose two counts disagree gets no
+/// interleaving at all (see `Extractor::extract`).
+#[derive(Default)]
+struct ObjectAnchors {
+    /// Every `{\object}` group the walk passed, counted whether or not its index was recorded.
+    seen: usize,
+    /// Per group, the element index the block containing it occupies once that block is flushed.
+    at: Vec<usize>,
+}
+
+/// The body walk: tokens in, `DocumentIR` plus the object anchors out.
+fn parse_to_ir(bytes: &[u8], header: &Header) -> (DocumentIR, ObjectAnchors) {
     let mut lex = Lexer::new(bytes);
     let mut stack: Vec<State> = vec![State {
         enc: header.doc_encoding(),
@@ -420,6 +439,7 @@ fn parse_to_ir(bytes: &[u8], header: &Header) -> DocumentIR {
         skip: false,
     }];
     let mut elements: Vec<Element> = Vec::new();
+    let mut objects = ObjectAnchors::default();
 
     // The paragraph under construction: decoded text plus the undecoded byte run feeding it.
     let mut text = String::new();
@@ -705,6 +725,18 @@ fn parse_to_ir(bytes: &[u8], header: &Header) -> DocumentIR {
                     "bin" => lex.skip_bytes(p.unwrap_or(0).max(0) as usize),
                     _ => {
                         if is_noise_destination(w) {
+                            if w == "object" {
+                                objects.seen += 1;
+                                if objects.at.len() < MAX_OBJDATA_BLOBS {
+                                    // A block element is pushed at its CLOSING tag — `end_paragraph!`
+                                    // runs at `\par`/`\sect` — so `elements.len()` here is the index
+                                    // the block that contains this object will occupy once it is
+                                    // flushed, and the chart is spliced after the chunk covering it.
+                                    // The count of flushed elements, read as an insert position,
+                                    // would land the chart before its own text instead.
+                                    objects.at.push(elements.len());
+                                }
+                            }
                             if let Some(st) = stack.last_mut() {
                                 st.skip = true;
                             }
@@ -730,20 +762,23 @@ fn parse_to_ir(bytes: &[u8], header: &Header) -> DocumentIR {
     end_paragraph!(last);
     close_table!();
 
-    DocumentIR {
-        sections: vec![Section {
-            elements,
+    (
+        DocumentIR {
+            sections: vec![Section {
+                elements,
+                ..Default::default()
+            }],
             ..Default::default()
-        }],
-        ..Default::default()
-    }
+        },
+        objects,
+    )
 }
 
 /// Parse `bytes` into the IR. Public so the mislabeled-extension fallback can reuse it without
 /// going through `Extractor::extract`'s path handling.
 pub fn rtf_to_ir(bytes: &[u8]) -> DocumentIR {
     let header = scan_header(bytes);
-    parse_to_ir(bytes, &header)
+    parse_to_ir(bytes, &header).0
 }
 
 impl Extractor for RtfExtractor {
@@ -758,12 +793,43 @@ impl Extractor for RtfExtractor {
                 path.display()
             ));
         }
-        let mut ir = rtf_to_ir(bytes);
+        let header = scan_header(bytes);
+        let (mut ir, objects) = parse_to_ir(bytes, &header);
+        // Expansion rewrites tables in place and never adds or drops an element, so the anchors
+        // recorded during the walk still address the same elements afterwards.
         crate::extract::office_table::expand_merged_tables(&mut ir);
-        let mut chunks = chunk_ir(path, &ir, "rtf");
+        let (chunks, spans) = chunk_ir_with_spans(path, &ir, "rtf");
         // The body walk skips `{\object …}` whole (see `is_noise_destination`), so an embedded
-        // legacy chart's data grid is recovered separately, straight off the raw bytes.
-        chunks.extend(crate::extract::rtf_chart::extract_charts(path, bytes));
+        // legacy chart's data grid is recovered separately, straight off the raw bytes. Only its
+        // POSITION comes from the walk, by pairing the Nth group with the Nth blob.
+        let (charts, blobs) = crate::extract::rtf_chart::extract_charts(path, bytes);
+        let chunks = if objects.seen == blobs {
+            // rtf builds one section, so every anchor's section index is 0.
+            splice_charts_at_anchors(
+                chunks,
+                &spans,
+                charts
+                    .into_iter()
+                    .filter_map(|(blob, chunk)| Some(((0, *objects.at.get(blob)?), chunk)))
+                    .collect(),
+            )
+        } else {
+            // The counts disagree, so the pairing that the whole mechanism rests on is broken for
+            // this document — an `{\object}` with no `\objdata`, a `\bin` payload, or either side
+            // truncating at `MAX_OBJDATA_BLOBS`. Placing some charts correctly while placing
+            // others wrongly is the failure this refuses: every chart in the file appends at the
+            // end, exactly as it did before interleaving existed.
+            tracing::warn!(
+                "rtf {}: {} embedded object group(s) but {blobs} objdata blob(s) — appending every \
+                 chart at the end rather than guessing which belongs where",
+                path.display(),
+                objects.seen
+            );
+            chunks
+                .into_iter()
+                .chain(charts.into_iter().map(|(_, chunk)| chunk))
+                .collect()
+        };
         if chunks.is_empty() {
             return Err(anyhow!("rtf produced no chunks for {}", path.display()));
         }
@@ -1168,29 +1234,13 @@ mod tests {
     fn the_per_file_budget_bounds_how_many_charts_one_document_yields() {
         use crate::extract::rtf_chart::MAX_CHARTS_PER_FILE;
         let rtf = legacy_chart_fixture();
-        // Brace-match the single `{\object …}` group. The generator emits no escaped braces
-        // inside it, and the hex run contains none, so a plain depth counter is exact here.
-        let start = rtf.find(r"{\object").unwrap();
-        let mut depth = 0usize;
-        let mut end = None;
-        for (i, b) in rtf[start..].bytes().enumerate() {
-            if b == b'{' {
-                depth += 1;
-            } else if b == b'}' {
-                depth -= 1;
-                if depth == 0 {
-                    end = Some(start + i + 1);
-                    break;
-                }
-            }
-        }
-        let end = end.expect("the object group must be brace-balanced");
+        let group = object_group_span(&rtf);
         let copies = MAX_CHARTS_PER_FILE + 6;
         let many = format!(
             "{}{}{}",
-            &rtf[..start],
-            rtf[start..end].repeat(copies),
-            &rtf[end..]
+            &rtf[..group.start],
+            rtf[group.clone()].repeat(copies),
+            &rtf[group.end..]
         );
         let chunks = RtfExtractor
             .extract(Path::new("many.rtf"), many.as_bytes())
@@ -1222,5 +1272,277 @@ mod tests {
         let t = joined(&chunks);
         assert!(!t.contains("Chart:"), "broken container was parsed:\n{t}");
         assert!(t.contains("glossa sample"), "body text lost:\n{t}");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Where the chart chunk lands (`chart_splice.rs`)
+    // ---------------------------------------------------------------------------------------
+
+    /// The byte range of the first `{\object …}` group in `rtf`, braces included.
+    ///
+    /// The generator emits no escaped braces inside the group and the hex run contains none, so a
+    /// plain depth counter is exact for these fixtures.
+    fn object_group_span(rtf: &str) -> std::ops::Range<usize> {
+        let start = rtf
+            .find(r"{\object")
+            .expect("the fixture has an object group");
+        let mut depth = 0usize;
+        for (i, b) in rtf[start..].bytes().enumerate() {
+            if b == b'{' {
+                depth += 1;
+            } else if b == b'}' {
+                depth -= 1;
+                if depth == 0 {
+                    return start..start + i + 1;
+                }
+            }
+        }
+        panic!("the object group must be brace-balanced");
+    }
+
+    /// The fixture's `{\object …}` group with its hex on one line, ready to be pasted into a
+    /// hand-written body and patched.
+    fn legacy_object_group() -> String {
+        let flat = legacy_chart_fixture_flat();
+        flat[object_group_span(&flat)].to_string()
+    }
+
+    /// The first series name in the fixture's datasheet, as a UTF-16LE LABEL payload in hex, and
+    /// the six-character name that replaces it. Equal byte lengths, so the embedded compound
+    /// file's own offsets are untouched.
+    const APPLES_LABEL_HEX: &str = "4100700070006c0065007300";
+    const CHERRY_LABEL_HEX: &str = "430068006500720072007900";
+    /// The datasheet's two cells holding 20.4, as whole NUMBER records
+    /// (`code(2) len(2) rw(2) col(2) attr(3) f64`), and their replacements.
+    ///
+    /// Whole records rather than the bare f64 because 20.4 sits at both r1c1 and r1c4, so the
+    /// value alone is not a unique anchor — and BOTH must be patched, or 20.4 would survive in the
+    /// second chart and stop telling the two apart.
+    const CELLS_20_4: [&str; 2] = [
+        "03000f00010001000000006666666666663440",
+        "03000f00010004000000006666666666663440",
+    ];
+    const CELLS_REPLACED: [&str; 2] = [
+        "03000f0001000100000000cdcccccccc6c5340",
+        "03000f00010004000000003333333333335640",
+    ];
+
+    /// A second embedded chart, distinguishable from the fixture's by both a series name and its
+    /// values, so a test can tell which object each chart chunk came from.
+    fn second_object_group() -> String {
+        let mut patched = legacy_object_group().replace(APPLES_LABEL_HEX, CHERRY_LABEL_HEX);
+        for (old, new) in CELLS_20_4.iter().zip(CELLS_REPLACED) {
+            assert!(
+                patched.contains(old),
+                "the datasheet record {old} was not found in the fixture"
+            );
+            patched = patched.replace(old, new);
+        }
+        assert!(
+            patched.contains(CHERRY_LABEL_HEX),
+            "the series-name label was not found in the fixture"
+        );
+        patched
+    }
+
+    /// A stylesheet declaring one heading style, so a hand-written body can force a chunk break
+    /// and a chart's position can be asserted against more than one body chunk.
+    const HEADING_STYLESHEET: &str = r"{\stylesheet{\s1\outlinelevel0 heading 1;}}";
+
+    /// The index of the single chunk whose text contains `needle`.
+    fn only_chunk_with(chunks: &[Chunk], needle: &str) -> usize {
+        let hits: Vec<usize> = chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.text.contains(needle))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "{needle:?} must appear in exactly one chunk, found {hits:?} in:\n{}",
+            joined(chunks)
+        );
+        hits[0]
+    }
+
+    /// The assumption the whole rtf mechanism rests on, and which the design flagged as
+    /// unverified: the Nth `{\object}` group the body walk passes is the Nth `{\*\objdata}` blob
+    /// the raw byte scan finds. If the two orders disagreed, each chart's data would be attached
+    /// to the wrong object — worse than appending every chart at the end.
+    ///
+    /// Two charts that differ in both a series name and a value, each inside its own paragraph in
+    /// its own heading section, so the pairing is readable off the output.
+    #[test]
+    fn the_lexer_and_the_objdata_scan_agree_on_object_order() {
+        let first = legacy_object_group();
+        let second = second_object_group();
+        let rtf = format!(
+            "{{\\rtf1\\ansi\\ansicpg1252\\deff0\n{{\\fonttbl{{\\f0\\fswiss Arial;}}}}\n\
+             {HEADING_STYLESHEET}\n\
+             \\pard\\s1 First section\\par\n\
+             \\pard Chart one belongs here.{first}\\par\n\
+             \\pard\\s1 Second section\\par\n\
+             \\pard Chart two belongs here.{second}\\par\n\
+             \\pard\\s1 Third section\\par\n\
+             \\pard glossa sample tail.\\par\n}}\n"
+        );
+        let chunks = RtfExtractor
+            .extract(Path::new("two.rtf"), rtf.as_bytes())
+            .unwrap();
+        let t = joined(&chunks);
+
+        // Each object's own datasheet reached exactly one chart chunk: no blob was read twice and
+        // none was dropped.
+        let apples = only_chunk_with(&chunks, "Apples");
+        let cherry = only_chunk_with(&chunks, "Cherry");
+        assert_eq!(only_chunk_with(&chunks, "20.4"), apples, "value 20.4:\n{t}");
+        assert_eq!(only_chunk_with(&chunks, "77.7"), cherry, "value 77.7:\n{t}");
+
+        // And each landed against its own paragraph, which is what makes the orders the same
+        // order rather than merely the same multiset.
+        assert_eq!(
+            apples,
+            only_chunk_with(&chunks, "Chart one belongs here.") + 1,
+            "the first object's chart must follow the first paragraph:\n{t}"
+        );
+        assert_eq!(
+            cherry,
+            only_chunk_with(&chunks, "Chart two belongs here.") + 1,
+            "the second object's chart must follow the second paragraph:\n{t}"
+        );
+    }
+
+    /// The committed fixture, with a heading section appended after the object group.
+    ///
+    /// The fixture alone cannot witness this: its three paragraphs coalesce into ONE body chunk,
+    /// so "after the chunk that contains the chart" and "at the end" are the same position. The
+    /// appended section gives the body a second chunk, and the chart has to land between them.
+    #[test]
+    fn a_legacy_chart_lands_after_the_paragraph_that_contains_it() {
+        let rtf = legacy_chart_fixture()
+            .replace(r"{\fonttbl", &format!("{HEADING_STYLESHEET}\n{{\\fonttbl"))
+            .replace(
+                r"\pard End of sample.\par",
+                "\\pard End of sample.\\par\n\\pard\\s1 Appendix\\par\n\\pard Appendix text.\\par",
+            );
+        let chunks = RtfExtractor
+            .extract(Path::new("placed.rtf"), rtf.as_bytes())
+            .unwrap();
+        let t = joined(&chunks);
+        let body = only_chunk_with(&chunks, "End of sample.");
+        let chart = only_chunk_with(&chunks, "Chart: Chart 1");
+        let appendix = only_chunk_with(&chunks, "Appendix text.");
+        assert_eq!(chart, body + 1, "the chart must follow its own text:\n{t}");
+        assert_eq!(
+            appendix,
+            chart + 1,
+            "the chart must precede the section after it, not be appended past it:\n{t}"
+        );
+    }
+
+    /// A `tracing` writer that keeps formatted log lines, so the mismatch warning can be counted
+    /// rather than taken on trust. Same shape as `tls.rs`'s.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// An `{\object}` carrying no `\objdata` makes the lexer's group count and the raw scan's blob
+    /// count disagree, and then the positional pairing means nothing for this document. The
+    /// ruling: NO chart in the file is interleaved — all of them append, as before the feature
+    /// existed — with one warning naming both counts. The chartless object is placed FIRST, so an
+    /// implementation that paired anyway would put the real chart one position after the first
+    /// paragraph instead of at the end.
+    #[test]
+    fn a_count_mismatch_sends_every_chart_to_the_end() {
+        let captured = CapturedLogs::default();
+        let make_writer = {
+            let captured = captured.clone();
+            move || captured.clone()
+        };
+        let _log_guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(make_writer)
+                .with_max_level(tracing::Level::WARN)
+                .without_time()
+                .with_target(false)
+                .finish(),
+        );
+
+        let real = legacy_object_group();
+        let rtf = format!(
+            "{{\\rtf1\\ansi\\ansicpg1252\\deff0\n{{\\fonttbl{{\\f0\\fswiss Arial;}}}}\n\
+             {HEADING_STYLESHEET}\n\
+             \\pard\\s1 First section\\par\n\
+             \\pard glossa sample body.{{\\object\\objemb{{\\*\\objclass MSGraph.Chart.8}}}}\\par\n\
+             \\pard\\s1 Second section\\par\n\
+             \\pard Chart two belongs here.{real}\\par\n\
+             \\pard\\s1 Third section\\par\n\
+             \\pard Tail text.\\par\n}}\n"
+        );
+        let chunks = RtfExtractor
+            .extract(Path::new("mismatch.rtf"), rtf.as_bytes())
+            .unwrap();
+        let t = joined(&chunks);
+
+        let charts: Vec<usize> = chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.text.starts_with("Chart: "))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(charts, vec![chunks.len() - 1], "chart not at the end:\n{t}");
+        for s in [
+            "glossa sample body.",
+            "Chart two belongs here.",
+            "Tail text.",
+        ] {
+            assert!(t.contains(s), "body text {s:?} missing:\n{t}");
+        }
+
+        let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let warned: Vec<&str> = logs
+            .lines()
+            .filter(|l| l.contains("objdata blob(s)"))
+            .collect();
+        assert_eq!(
+            warned.len(),
+            1,
+            "expected one mismatch warning, got:\n{logs}"
+        );
+        assert!(
+            warned[0].contains("2 embedded object group(s) but 1 objdata blob(s)"),
+            "the warning must name both counts: {}",
+            warned[0]
+        );
+    }
+
+    /// The guarantee for the overwhelming majority of files: a document with no embedded object
+    /// gets the chunk sequence it always got, `Location` and all.
+    ///
+    /// "As before" is recomputed rather than pinned as literals — the pre-change path was
+    /// `rtf_to_ir` + `expand_merged_tables` + `chunk_ir`, and `chunk_ir`'s signature never moved,
+    /// so the right-hand side below IS the old code path rather than a restatement of the new one.
+    #[test]
+    fn a_chartless_rtf_chunks_exactly_as_before() {
+        let rtf = br"{\rtf1\ansi{\stylesheet{\s1\outlinelevel0 heading 1;}}\pard\s1 Title\par\pard glossa sample body.\par\pard\s1 Second\par\trowd\intbl A\cell B\cell\row\pard More text.\par}";
+        let path = Path::new("plain.rtf");
+        let mut ir = rtf_to_ir(rtf);
+        crate::extract::office_table::expand_merged_tables(&mut ir);
+        let before = crate::extract::office_chunk::chunk_ir(path, &ir, "rtf");
+        assert!(
+            before.len() > 1,
+            "the control needs more than one chunk to be worth comparing: {before:?}"
+        );
+        assert_eq!(RtfExtractor.extract(path, rtf).unwrap(), before);
     }
 }

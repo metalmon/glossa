@@ -81,7 +81,10 @@ const MAX_GRID_SPARSITY: usize = 64;
 /// cannot exceed it — but the *count* was not, and every blob costs a `Vec` allocation plus a
 /// pass through the pipeline's gates before any chart budget can apply. A real document carries
 /// a handful.
-const MAX_OBJDATA_BLOBS: usize = 1024;
+///
+/// `rtf.rs`'s body walk stops recording object anchors at the same number, so the two sides of
+/// the positional pairing truncate together rather than one of them growing with the file.
+pub(crate) const MAX_OBJDATA_BLOBS: usize = 1024;
 
 /// Cap on the `Workbook` stream a compound file may declare, checked before the stream is read.
 ///
@@ -333,15 +336,25 @@ fn grid_to_chart(
 /// unrecognised — a non-hex `\objdata`, another embedded class, a truncated blob, a payload that
 /// is not a compound file — skips that object and leaves the document's own text untouched.
 ///
+/// Each chunk comes back paired with the index of the `{\*\objdata …}` blob it was built from,
+/// and the second half of the return is how many blobs the scan found in total. Both exist for
+/// the caller's positional pairing: the Nth `{\object}` group the body walk passes is the Nth
+/// blob here, so a chart's anchor is looked up by its blob index, and the total is what the
+/// caller compares against its own `{\object}` count before trusting any of it. The pairing is
+/// explicit rather than implied by output order because this loop skips objects (a foreign class,
+/// an unreadable datasheet) and can stop early on budget.
+///
 /// The budgets are per FILE, spent down across the loop, because the per-chart bounds alone are
 /// not bounds at all: a document may carry any number of `\object` groups, so N charts each
 /// sitting just under a per-chart cap would cost N times it. Running out stops the loop — it is
 /// never an error, and the chunks already built, plus the document's own text, still come back.
-pub fn extract_charts(path: &Path, bytes: &[u8]) -> Vec<Chunk> {
-    let mut out = Vec::new();
+pub fn extract_charts(path: &Path, bytes: &[u8]) -> (Vec<(usize, Chunk)>, usize) {
+    let mut out: Vec<(usize, Chunk)> = Vec::new();
     let mut cell_budget = MAX_CHART_GRID_CELLS;
     let mut exhausted = None;
-    for blob in objdata_blobs(bytes) {
+    let blobs = objdata_blobs(bytes);
+    let blob_count = blobs.len();
+    for (blob_index, blob) in blobs.into_iter().enumerate() {
         if out.len() >= MAX_CHARTS_PER_FILE {
             exhausted = Some("the per-file chart count");
             break;
@@ -378,11 +391,9 @@ pub fn extract_charts(path: &Path, bytes: &[u8]) -> Vec<Chunk> {
             title,
             table_to_markdown(&chart_to_table(&cd))
         );
-        out.push(Chunk::labelled(
-            path.to_path_buf(),
-            "rtf".to_string(),
-            title,
-            text,
+        out.push((
+            blob_index,
+            Chunk::labelled(path.to_path_buf(), "rtf".to_string(), title, text),
         ));
     }
     if let Some(which) = exhausted {
@@ -394,5 +405,5 @@ pub fn extract_charts(path: &Path, bytes: &[u8]) -> Vec<Chunk> {
             out.len()
         );
     }
-    out
+    (out, blob_count)
 }
