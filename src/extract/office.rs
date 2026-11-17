@@ -374,15 +374,42 @@ fn hoisted_chart_run_occurrences(
 /// are kept and a warning names the file and the chart. Losing a chart to tidy the index is the
 /// worse failure, and it is doubly so for SmartArt, whose text rides the same converter path with
 /// no chart chunk of ours to replace it; `collect_docx_chart_drawings` never collects it.
+///
+/// Returns WHICH of those endings happened. Production ignores it, but naming the outcome is what
+/// makes each bound testable on its own: without it a test can only observe "both copies were
+/// kept", which every guard here produces, so a test meant to pin the comparison budget would go
+/// on passing if the budget were deleted and some other guard took over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DedupOutcome {
+    /// `document.xml.rels` declares no chart relationship we could resolve.
+    NoChartRelationships,
+    /// The package would not re-open through the docx parser.
+    Unreadable,
+    /// No drawing in the body flow references a chart part with text.
+    NoChartDrawings,
+    /// Past `MAX_DEDUPED_CHART_DRAWINGS_PER_FILE`.
+    TooManyDrawings,
+    /// Past `MAX_DEDUP_SECTION_ELEMENTS`.
+    TooManyElements,
+    /// The shared comparison budget ran out mid-scan.
+    BudgetExhausted,
+    /// At least one group's run count did not equal its drawing count.
+    Ambiguous,
+    /// Two charts' runs overlapped, so the file's de-duplication was abandoned.
+    OverlappingRuns,
+    /// Every group resolved; whatever was covered was removed.
+    Resolved,
+}
+
 fn drop_hoisted_docx_chart_text(
     path: &Path,
     bytes: &[u8],
     ir: &mut office_oxide::ir::DocumentIR,
     covered_chart_parts: &[String],
-) {
+) -> DedupOutcome {
     let parts_by_rel_id = docx_chart_parts_by_rel_id(path, bytes);
     if parts_by_rel_id.is_empty() {
-        return;
+        return DedupOutcome::NoChartRelationships;
     }
     // The price of identifying charts without a library change, paid only by documents that
     // actually declare one: `bytes.to_vec()` is a second full copy of the package, this is a
@@ -396,14 +423,14 @@ fn drop_hoisted_docx_chart_text(
                 "docx {}: could not re-read the package to tell chart text from body text ({e}) — keeping both copies of every chart's text",
                 path.display()
             );
-            return;
+            return DedupOutcome::Unreadable;
         }
     };
     let mut drawings = Vec::new();
     let mut total_drawings = 0usize;
     collect_docx_chart_drawings(&doc.body.elements, &mut drawings, &mut total_drawings);
     if drawings.is_empty() {
-        return;
+        return DedupOutcome::NoChartDrawings;
     }
     if total_drawings > MAX_DEDUPED_CHART_DRAWINGS_PER_FILE {
         tracing::warn!(
@@ -411,7 +438,7 @@ fn drop_hoisted_docx_chart_text(
             path.display(),
             total_drawings - MAX_DEDUPED_CHART_DRAWINGS_PER_FILE
         );
-        return;
+        return DedupOutcome::TooManyDrawings;
     }
     let covered: HashSet<&str> = covered_chart_parts.iter().map(String::as_str).collect();
 
@@ -433,7 +460,7 @@ fn drop_hoisted_docx_chart_text(
             "docx {}: {elements} body elements is past the bound of {MAX_DEDUP_SECTION_ELEMENTS} — skipping the chart de-duplication and keeping both copies of every chart's text",
             path.display()
         );
-        return;
+        return DedupOutcome::TooManyElements;
     }
     // ONE budget for the whole call, spent across every group. Bounding the line count, the
     // drawing count, or the cost of any single window each bound a factor; only this bounds
@@ -446,6 +473,7 @@ fn drop_hoisted_docx_chart_text(
     // costs itself: the others are found independently, so one unmatchable chart never disables
     // the de-duplication for the rest of the document.
     let mut to_remove: Vec<(usize, usize, usize)> = Vec::new();
+    let mut any_ambiguous = false;
     for (i, (lines, rel_ids)) in groups.iter().enumerate() {
         let Some(occurrences) =
             hoisted_chart_run_occurrences(ir, lines, rel_ids.len(), &mut budget)
@@ -455,9 +483,10 @@ fn drop_hoisted_docx_chart_text(
                 path.display(),
                 groups.len() - i
             );
-            return;
+            return DedupOutcome::BudgetExhausted;
         };
         if occurrences.len() != rel_ids.len() {
+            any_ambiguous = true;
             tracing::warn!(
                 "docx {}: {} drawing(s) ({}) recovered {} line(s) of chart text, but the document flow holds {} run(s) of exactly those lines — cannot say which run is the hoisted copy, so keeping both copies for all of them",
                 path.display(),
@@ -498,7 +527,7 @@ fn drop_hoisted_docx_chart_text(
             "docx {}: two charts' hoisted text resolved to overlapping runs in the document flow — keeping both copies of every chart's text rather than remove the wrong paragraphs",
             path.display()
         );
-        return;
+        return DedupOutcome::OverlappingRuns;
     }
     let mut by_section: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
     for (section, at, len) in to_remove {
@@ -518,6 +547,11 @@ fn drop_hoisted_docx_chart_text(
             i += 1;
             keep
         });
+    }
+    if any_ambiguous {
+        DedupOutcome::Ambiguous
+    } else {
+        DedupOutcome::Resolved
     }
 }
 
@@ -565,6 +599,8 @@ impl Extractor for OfficeExtractor {
             }
         }
         if ext == "docx" {
+            // The outcome is for the tests, which need to tell the guards apart; the warnings
+            // inside already say everything a reader of the log needs.
             drop_hoisted_docx_chart_text(path, bytes, &mut ir, &covered_chart_parts);
         }
         let mut chunks = chunk_ir(path, &ir, &ext);
@@ -817,6 +853,35 @@ mod tests {
         (open, doc[start..end].to_string())
     }
 
+    /// Which ending the de-duplication took for this package, by running exactly what `extract`
+    /// runs. Asserting on this rather than on "both copies were kept" is what separates the
+    /// guards: every one of them keeps both copies, so only the outcome says which one acted.
+    fn dedup_outcome_for(bytes: &[u8]) -> DedupOutcome {
+        let path = Path::new("outcome.docx");
+        let doc = Document::from_reader(Cursor::new(bytes.to_vec()), DocumentFormat::Docx).unwrap();
+        let mut ir = doc.to_ir();
+        expand_merged_tables(&mut ir);
+        let (_, covered) =
+            crate::extract::ooxml_chart::extract_charts_with_coverage(path, bytes, "docx");
+        drop_hoisted_docx_chart_text(path, bytes, &mut ir, &covered)
+    }
+
+    /// A chart part whose recovered text is exactly one `Series: <name>` line per name, in order:
+    /// no `<c:title>` and no values, which is the shape `core::chart::chart_text_lines` turns
+    /// into `Series: …` lines and nothing else. Deterministic, so a test can write the very same
+    /// strings into the body.
+    fn series_only_chart(names: &[&str]) -> String {
+        let mut chart = String::from(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea><c:barChart>"#,
+        );
+        for name in names {
+            chart.push_str(&format!("<c:ser><c:tx><c:v>{name}</c:v></c:tx></c:ser>"));
+        }
+        chart.push_str("</c:barChart></c:plotArea></c:chart></c:chartSpace>");
+        chart
+    }
+
     fn joined(chunks: &[Chunk]) -> String {
         chunks
             .iter()
@@ -974,17 +1039,10 @@ mod tests {
     /// both copies — the hoisted lines are still in the flow afterwards.
     #[test]
     fn a_docx_built_to_defeat_the_cheap_match_guards_still_terminates() {
-        // No `<c:title>` and no values, so `chart_text_lines` yields exactly one "Series: <name>"
-        // line per `<c:ser>`, in order: 19 identical, then one that differs.
-        let mut chart = String::from(
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea><c:barChart>"#,
-        );
-        for i in 0..20 {
-            let name = if i == 19 { "Z" } else { "S" };
-            chart.push_str(&format!("<c:ser><c:tx><c:v>{name}</c:v></c:tx></c:ser>"));
-        }
-        chart.push_str("</c:barChart></c:plotArea></c:chart></c:chartSpace>");
+        // 19 identical series names, then one that differs.
+        let mut names = vec!["S"; 19];
+        names.push("Z");
+        let chart = series_only_chart(&names);
 
         let (open, drawing) = anchored_chart_drawing();
         let mut body = format!(
@@ -1004,10 +1062,52 @@ mod tests {
             .unwrap();
         let text = joined(&chunks);
 
-        // Terminated, kept both copies (the hoisted run is still there), body text intact.
+        // THE point of the test: the comparison budget is what stopped this, not some other
+        // guard. The body holds only "Series: S" paragraphs, so the full sequence occurs exactly
+        // once — delete the budget and this document resolves cleanly rather than turning
+        // ambiguous, which is why this assertion fails if the budget is ever removed.
+        assert_eq!(dedup_outcome_for(&buf), DedupOutcome::BudgetExhausted);
+
+        // And the consequences: terminated, both copies kept, body text intact.
         assert!(
             text.contains("Series: Z"),
             "the hoisted chart text should have been kept when the budget ran out, got:\n{text}"
+        );
+        assert!(text.contains("glossa sample"), "{text}");
+    }
+
+    /// The other half of the pair. This document is tiny, so the comparison budget cannot be the
+    /// thing that stops it — what stops it is the run count: the body carries a verbatim second
+    /// copy of the chart's two lines, so two runs exist for one drawing and the pass cannot say
+    /// which is the hoisted one. Delete the count rule and "first match wins" would resolve this
+    /// document, so the assertion fails; exactly as the budget test fails if the budget goes.
+    #[test]
+    fn a_docx_whose_body_repeats_a_chart_line_run_is_ambiguous_not_budget_bound() {
+        let chart = series_only_chart(&["A", "B"]);
+        let (open, drawing) = anchored_chart_drawing();
+        let body = format!(
+            "{open}<w:body>\
+             <w:p><w:r><w:t>glossa sample document used as a neutral test fixture.</w:t></w:r></w:p>\
+             <w:p><w:r>{drawing}</w:r></w:p>\
+             <w:p><w:r><w:t>Series: A</w:t></w:r></w:p>\
+             <w:p><w:r><w:t>Series: B</w:t></w:r></w:p>\
+             <w:sectPr/></w:body></w:document>"
+        );
+
+        let buf = anchored_fixture_with("word/document.xml", body.as_bytes());
+        let buf = repack_with(&buf, "word/charts/chart1.xml", chart.as_bytes());
+
+        assert_eq!(dedup_outcome_for(&buf), DedupOutcome::Ambiguous);
+
+        // Both copies kept, so the duplicated body run is still there — twice.
+        let chunks = OfficeExtractor
+            .extract(Path::new("ambiguous_chart.docx"), &buf)
+            .unwrap();
+        let text = joined(&chunks);
+        assert_eq!(
+            text.matches("Series: B").count(),
+            2,
+            "neither run may be removed when the pass cannot tell them apart, got:\n{text}"
         );
         assert!(text.contains("glossa sample"), "{text}");
     }
