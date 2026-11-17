@@ -103,15 +103,21 @@ const MAX_DOCUMENT_RELS_BYTES: u64 = 4 * 1024 * 1024;
 /// looking for a `<c:chart r:id="…"/>`'s text. Empty (so the whole docx pass is skipped) for a
 /// document that references no chart at all, which is the common case and the cheap one: it costs
 /// one small zip entry and no second parse of the document.
-fn docx_chart_parts_by_rel_id(bytes: &[u8]) -> HashMap<String, String> {
+fn docx_chart_parts_by_rel_id(path: &Path, bytes: &[u8]) -> HashMap<String, String> {
     use quick_xml::events::Event;
 
     use std::io::Read as _;
 
     let mut out = HashMap::new();
     let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(bytes)) else {
+        tracing::warn!(
+            "docx {}: the package would not open as a zip for the relationship read — keeping both copies of every chart's text",
+            path.display()
+        );
         return out;
     };
+    // A document part with no relationships at all is normal (it is what `sample.docx` looks
+    // like) and is not worth a warning: it simply means there is no chart to de-duplicate.
     let Ok(rels) = zip.by_name("word/_rels/document.xml.rels") else {
         return out;
     };
@@ -124,6 +130,10 @@ fn docx_chart_parts_by_rel_id(bytes: &[u8]) -> HashMap<String, String> {
         .read_to_string(&mut xml)
         .is_err()
     {
+        tracing::warn!(
+            "docx {}: word/_rels/document.xml.rels could not be read to its end (unreadable, or past the {MAX_DOCUMENT_RELS_BYTES}-byte bound) — keeping both copies of every chart's text",
+            path.display()
+        );
         return out;
     }
 
@@ -241,31 +251,29 @@ fn collect_docx_chart_drawings<'a>(
                                         }
                                     }
                                 }
-                                // A text box's body is ordinary block content and can hold a
-                                // chart of its own; `convert_docx` hoists from there too.
-                                RunContent::TextBox(inner) => {
-                                    collect_docx_chart_drawings(inner, out, total)
-                                }
                                 _ => {}
                             }
                         }
                     }
                 }
             }
-            BlockElement::Table(t) => {
-                for row in &t.rows {
-                    for cell in &row.cells {
-                        collect_docx_chart_drawings(&cell.content, out, total);
-                    }
-                }
-            }
+            // DELIBERATELY NOT RECURSED INTO — do not "fix" this back. A chart inside a table
+            // cell or a text box is real, but `convert_docx` hoists its lines into THAT
+            // container's own content (`TableCell.content`, `Element::TextBox.content`), never
+            // into the section's top-level `elements` that the matcher below scans. Collecting
+            // such a drawing could therefore only ever produce a miss, and a miss costs a warning
+            // and keeps both copies — so the honest thing is not to claim it as a candidate at
+            // all. Nested charts simply keep both copies, silently and by construction.
+            BlockElement::Table(_) => {}
         }
     }
 }
 
-/// The text of an IR element that is exactly the shape `collect_paragraph_chart_text` emits: a
-/// paragraph holding one plain text span and nothing else. Anything richer — a styled run, a
-/// heading, two spans — is a body paragraph and is never a candidate.
+/// The text of an IR element shaped the way `collect_paragraph_chart_text` emits one: a paragraph
+/// holding a single plain text span. This is a weak filter, and deliberately named as one — an
+/// ordinary one-run body paragraph has exactly this shape too, so the ONLY thing separating a
+/// hoisted chart line from body prose is the text itself. That is why the matcher below never
+/// trusts a single text match: see `hoisted_chart_run_occurrences`.
 fn hoisted_line_text(e: &office_oxide::ir::Element) -> Option<&str> {
     use office_oxide::ir::{Element, InlineContent};
 
@@ -278,34 +286,64 @@ fn hoisted_line_text(e: &office_oxide::ir::Element) -> Option<&str> {
     }
 }
 
-/// Where in the IR a chart's hoisted lines sit: the first contiguous run of plain paragraphs, at
-/// or after `from`, whose texts equal `lines` in order. Searching forward from the previous
-/// chart's run keeps two charts with identical text from both resolving to the first one.
-fn find_hoisted_chart_run(
+/// REJECTION bound on how many of a chart's lines are matched against the body flow. The line
+/// count comes out of the chart part and the body's element count is not capped at all, so the
+/// window scan below is a product of two numbers the file controls. A chart whose recovered text
+/// runs longer than this is not one a reader cites; past it the drawing is left alone and both
+/// copies are kept.
+const MAX_MATCHED_CHART_LINES: usize = 256;
+
+/// Every place in the IR where this chart's hoisted lines appear as a contiguous run of plain
+/// paragraphs, in document order and never overlapping, stopping once more than `want` have been
+/// found (the caller only needs to know whether the count is exactly `want`).
+///
+/// Occurrences rather than "the first match": the predicate is text equality and nothing else
+/// (see `hoisted_line_text`), so a body paragraph that happens to repeat a chart's lines AHEAD of
+/// the chart would otherwise be the paragraph removed — its words would still reach the index
+/// through our `Chart:` chunk, but its position and heading context would not. Counting instead
+/// of taking the first match makes that case visible: when the number of runs does not equal the
+/// number of drawings carrying these exact lines, the caller cannot say which run belongs to
+/// which drawing, and keeps both copies. When the counts DO agree, the k-th run is the k-th such
+/// drawing's, because the converter emits them in the same document order this walk reads them.
+fn hoisted_chart_run_occurrences(
     ir: &office_oxide::ir::DocumentIR,
-    from: (usize, usize),
     lines: &[String],
-) -> Option<(usize, usize)> {
-    if lines.is_empty() {
-        return None;
+    want: usize,
+) -> Vec<(usize, usize)> {
+    let mut found = Vec::new();
+    if lines.is_empty() || lines.len() > MAX_MATCHED_CHART_LINES {
+        return found;
     }
-    for (s, section) in ir.sections.iter().enumerate().skip(from.0) {
+    let (first, last) = (lines[0].as_str(), lines[lines.len() - 1].as_str());
+    for (s, section) in ir.sections.iter().enumerate() {
         let els = &section.elements;
         if els.len() < lines.len() {
             continue;
         }
-        let start = if s == from.0 { from.1 } else { 0 };
-        for (at, window) in els.windows(lines.len()).enumerate().skip(start) {
-            if window
-                .iter()
-                .zip(lines)
-                .all(|(e, line)| hoisted_line_text(e) == Some(line.as_str()))
-            {
-                return Some((s, at));
+        let mut at = 0usize;
+        while at + lines.len() <= els.len() {
+            // Two single-element probes before the full comparison. Without them a chart whose
+            // lines are mostly identical turns every window into a long scan that only fails at
+            // the end, which is the amplification a crafted file would buy.
+            let window = &els[at..at + lines.len()];
+            let hit = hoisted_line_text(&window[0]) == Some(first)
+                && hoisted_line_text(&window[lines.len() - 1]) == Some(last)
+                && window
+                    .iter()
+                    .zip(lines)
+                    .all(|(e, line)| hoisted_line_text(e) == Some(line.as_str()));
+            if hit {
+                found.push((s, at));
+                if found.len() > want {
+                    return found;
+                }
+                at += lines.len();
+            } else {
+                at += 1;
             }
         }
     }
-    None
+    found
 }
 
 /// Drop the copy of a chart's text that `office_oxide` 0.1.17 hoists into the docx body flow —
@@ -317,11 +355,15 @@ fn find_hoisted_chart_run(
 /// recognise, because the lines are unmarked paragraphs sitting in the middle of the body. The
 /// identification is therefore made with `office_oxide`'s own public docx parser rather than by a
 /// text heuristic: `DrawingInfo::chart_rel_id` says which relationship a drawing points at and
-/// `DrawingInfo::chart_text` gives the exact lines the converter will emit for it, so the IR
-/// paragraphs are matched by that value, in document order, and nothing else is ever a candidate.
+/// `DrawingInfo::chart_text` gives the exact lines the converter will emit for it. Matching those
+/// lines in the IR is still text equality, so it is only trusted when it is unambiguous: the runs
+/// of each line sequence are COUNTED, and a sequence is resolved only when the document flow
+/// holds exactly as many runs as there are drawings carrying it (see
+/// `hoisted_chart_run_occurrences`). Nested charts — inside a table cell or a text box — are not
+/// candidates at all; `collect_docx_chart_drawings` says why.
 ///
 /// When identification fails — the relationship does not resolve, our pass did not cover the
-/// part (a chart with no series, say), or the lines are not where they should be — BOTH copies
+/// part (a chart with no series, say), or the run count is ambiguous — BOTH copies
 /// are kept and a warning names the file and the chart. Losing a chart to tidy the index is the
 /// worse failure, and it is doubly so for SmartArt, whose text rides the same converter path with
 /// no chart chunk of ours to replace it; `collect_docx_chart_drawings` never collects it.
@@ -331,10 +373,15 @@ fn drop_hoisted_docx_chart_text(
     ir: &mut office_oxide::ir::DocumentIR,
     covered_chart_parts: &[String],
 ) {
-    let parts_by_rel_id = docx_chart_parts_by_rel_id(bytes);
+    let parts_by_rel_id = docx_chart_parts_by_rel_id(path, bytes);
     if parts_by_rel_id.is_empty() {
         return;
     }
+    // The price of identifying charts without a library change, paid only by documents that
+    // actually declare one: `bytes.to_vec()` is a second full copy of the package, this is a
+    // second parse of the document part, and `docx_chart_parts_by_rel_id` already opened a
+    // `ZipArchive` over the same bytes — a third. Worth revisiting if `office_oxide` ever marks
+    // the hoisted paragraphs in the IR, which would make all of it unnecessary.
     let doc = match office_oxide::docx::DocxDocument::from_reader(Cursor::new(bytes.to_vec())) {
         Ok(doc) => doc,
         Err(e) => {
@@ -360,39 +407,68 @@ fn drop_hoisted_docx_chart_text(
         return;
     }
     let covered: HashSet<&str> = covered_chart_parts.iter().map(String::as_str).collect();
+
+    // Drawings that recovered the SAME lines are resolved together: the body flow cannot say
+    // which run belongs to which of them, only how many runs there are, so the question is
+    // answerable for the group or for none of it. Linear grouping — there are at most
+    // `MAX_DEDUPED_CHART_DRAWINGS_PER_FILE` of them.
+    let mut groups: Vec<(&[String], Vec<&str>)> = Vec::new();
+    for (rel_id, lines) in &drawings {
+        match groups.iter_mut().find(|(l, _)| *l == &lines[..]) {
+            Some((_, ids)) => ids.push(*rel_id),
+            None => groups.push((&lines[..], vec![*rel_id])),
+        }
+    }
+
     // Resolve every chart to its range FIRST, then rebuild each section in one pass. Removing as
-    // we went would shift every later element once per chart, and the cursor only ever moves
-    // forward, so one chart's run is never claimed by another and the whole scan stays linear in
-    // the number of elements however many charts there are.
+    // we go would shift every later element once per chart. A group that cannot be resolved only
+    // costs itself: the others are found independently, so one unmatchable chart never disables
+    // the de-duplication for the rest of the document.
     let mut to_remove: Vec<(usize, usize, usize)> = Vec::new();
-    let mut cursor = (0usize, 0usize);
-    for (i, (rel_id, lines)) in drawings.iter().enumerate() {
-        let part = parts_by_rel_id.get(*rel_id);
-        let Some((section, at)) = find_hoisted_chart_run(ir, cursor, lines) else {
-            // Our model of where the converter puts chart text no longer matches this document,
-            // and the charts after this one are found by walking on from here — so stop rather
-            // than rescan the same tail for each of them, and leave the rest of the flow alone.
+    for (lines, rel_ids) in &groups {
+        let occurrences = hoisted_chart_run_occurrences(ir, lines, rel_ids.len());
+        if occurrences.len() != rel_ids.len() {
             tracing::warn!(
-                "docx {}: chart relationship {rel_id} named {} line(s) of text that are not in the document flow where the converter puts them — keeping both copies from here on, {} chart(s) left untouched",
+                "docx {}: {} drawing(s) ({}) recovered {} line(s) of chart text, but the document flow holds {} run(s) of exactly those lines — cannot say which run is the hoisted copy, so keeping both copies for all of them",
                 path.display(),
+                rel_ids.len(),
+                rel_ids.join(", "),
                 lines.len(),
-                drawings.len() - i
+                occurrences.len()
             );
-            break;
-        };
-        cursor = (section, at + lines.len());
-        match part {
-            Some(part) if covered.contains(part.as_str()) => {
-                to_remove.push((section, at, lines.len()));
-            }
-            _ => {
-                tracing::warn!(
-                    "docx {}: chart relationship {rel_id} resolves to {}, which our chart pass did not cover — keeping office_oxide's copy of its text rather than risk losing the chart",
-                    path.display(),
-                    part.map(String::as_str).unwrap_or("no readable chart part")
-                );
+            continue;
+        }
+        for (rel_id, (section, at)) in rel_ids.iter().zip(&occurrences) {
+            let part = parts_by_rel_id.get(*rel_id);
+            match part {
+                Some(part) if covered.contains(part.as_str()) => {
+                    to_remove.push((*section, *at, lines.len()));
+                }
+                _ => {
+                    tracing::warn!(
+                        "docx {}: chart relationship {rel_id} resolves to {}, which our chart pass did not cover — keeping office_oxide's copy of its text rather than risk losing the chart",
+                        path.display(),
+                        part.map(String::as_str).unwrap_or("no readable chart part")
+                    );
+                }
             }
         }
+    }
+
+    // Runs found for two different line sequences can in principle overlap (one sequence ending
+    // where another begins is enough). Removing an overlapping pair would take out more than
+    // either chart's text, so the whole file falls back to keeping both copies instead.
+    let mut spans: Vec<(usize, usize, usize)> = to_remove.clone();
+    spans.sort_unstable();
+    if spans
+        .windows(2)
+        .any(|w| w[0].0 == w[1].0 && w[0].1 + w[0].2 > w[1].1)
+    {
+        tracing::warn!(
+            "docx {}: two charts' hoisted text resolved to overlapping runs in the document flow — keeping both copies of every chart's text rather than remove the wrong paragraphs",
+            path.display()
+        );
+        return;
     }
     let mut by_section: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
     for (section, at, len) in to_remove {
@@ -684,6 +760,27 @@ mod tests {
         buf
     }
 
+    /// The anchored fixture's own `<w:drawing>` for the chart (the first one in its body), and
+    /// the `<w:document>` opening tag that declares every namespace it uses. Together they let a
+    /// test rebuild `word/document.xml` around the real chart reference instead of hand-copying
+    /// the drawing XML into each test.
+    fn anchored_chart_drawing() -> (String, String) {
+        use std::io::Read as _;
+        let mut zr = zip::ZipArchive::new(Cursor::new(
+            include_bytes!("../../tests/fixtures/sample_chart_anchored.docx").to_vec(),
+        ))
+        .unwrap();
+        let mut doc = String::new();
+        zr.by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut doc)
+            .unwrap();
+        let open = doc[doc.find("<w:document").unwrap()..doc.find("<w:body>").unwrap()].to_string();
+        let start = doc.find("<w:drawing>").unwrap();
+        let end = doc.find("</w:drawing>").unwrap() + "</w:drawing>".len();
+        (open, doc[start..end].to_string())
+    }
+
     fn joined(chunks: &[Chunk]) -> String {
         chunks
             .iter()
@@ -810,24 +907,10 @@ mod tests {
     /// fixture's own chart drawing rather than by committing a second fixture.
     #[test]
     fn a_docx_declaring_absurdly_many_chart_drawings_still_extracts() {
-        let drawing = {
-            let mut zr = zip::ZipArchive::new(Cursor::new(
-                include_bytes!("../../tests/fixtures/sample_chart_anchored.docx").to_vec(),
-            ))
-            .unwrap();
-            use std::io::Read as _;
-            let mut doc = String::new();
-            zr.by_name("word/document.xml")
-                .unwrap()
-                .read_to_string(&mut doc)
-                .unwrap();
-            let start = doc.find("<w:drawing>").unwrap();
-            let end = doc.find("</w:drawing>").unwrap() + "</w:drawing>".len();
-            doc[start..end].to_string()
-        };
-        let mut body = String::from(
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"><w:body><w:p><w:r><w:t>glossa sample document used as a neutral test fixture.</w:t></w:r></w:p>"#,
+        let (open, drawing) = anchored_chart_drawing();
+        let mut body = format!(
+            "{open}<w:body><w:p><w:r><w:t>glossa sample document used as a neutral test \
+             fixture.</w:t></w:r></w:p>"
         );
         for _ in 0..(MAX_DEDUPED_CHART_DRAWINGS_PER_FILE * 8) {
             body.push_str("<w:p><w:r>");
@@ -845,6 +928,51 @@ mod tests {
             text.contains("glossa sample document used as a neutral test fixture."),
             "the bound must skip the de-duplication, not the extraction, got:\n{text}"
         );
+    }
+
+    /// A chart inside a table cell is not a candidate: `convert_docx` hoists its lines into the
+    /// cell's own content, not into the section's top-level elements, so it can never be matched
+    /// there. What this pins is that the nested chart costs nothing to the ones that CAN be
+    /// matched — the body chart after it still de-duplicates. Before the matcher was made
+    /// group-wise, the nested chart's miss stopped the pass and silently disabled de-duplication
+    /// for every later chart in the document.
+    #[test]
+    fn a_chart_in_a_table_does_not_disable_the_dedup_for_later_body_charts() {
+        let (open, drawing) = anchored_chart_drawing();
+        let body = format!(
+            "{open}<w:body>\
+             <w:p><w:r><w:t>glossa sample document used as a neutral test fixture.</w:t></w:r></w:p>\
+             <w:tbl><w:tblGrid><w:gridCol w:w=\"5000\"/></w:tblGrid>\
+             <w:tr><w:tc><w:p><w:r>{drawing}</w:r></w:p></w:tc></w:tr></w:tbl>\
+             <w:p><w:r>{drawing}</w:r></w:p>\
+             <w:p><w:r><w:t>Body text that follows the chart.</w:t></w:r></w:p>\
+             <w:sectPr/></w:body></w:document>"
+        );
+
+        let buf = anchored_fixture_with("word/document.xml", body.as_bytes());
+        let chunks = OfficeExtractor
+            .extract(Path::new("chart_in_table.docx"), &buf)
+            .unwrap();
+        let text = joined(&chunks);
+
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.text.starts_with("Chart: Sales by quarter")),
+            "expected our structured chart chunk, got: {chunks:?}"
+        );
+        // Two drawings hoist the same flat line: one into the table cell (kept, by design) and
+        // one into the body flow (removed). At most one may remain. Before the matcher was made
+        // group-wise this was two, because the nested chart's miss stopped the pass.
+        assert!(
+            text.matches("Series 2: 2.4, 4.4, 3.5").count() <= 1,
+            "the body chart's hoisted copy should have been removed, got:\n{text}"
+        );
+        assert!(
+            text.contains("Body text that follows the chart."),
+            "the body text did not survive, got:\n{text}"
+        );
+        assert!(text.contains("glossa sample"), "{text}");
     }
 
     /// The data-loss guard: when our own pass does not cover the chart part a drawing points at

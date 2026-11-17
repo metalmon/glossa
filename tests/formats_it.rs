@@ -28,18 +28,14 @@ fn collects_ooxml_chart_chunks() {
         "no OOXML chart data-table chunk collected"
     );
 
-    let docx_chart_chunks = chunks
-        .iter()
-        .filter(|c| c.file_type == "docx" && c.text.starts_with("Chart:"))
-        .count();
-    // One each from sample_chart.docx (chart part present but unreferenced) and
-    // sample_chart_anchored.docx (the same chart, referenced through a w:drawing); sample.docx
-    // and sample_table.docx have none. Two, not three: the anchored fixture's chart text also
-    // reaches the IR as body paragraphs, and `drop_hoisted_docx_chart_text` takes that copy out
-    // rather than letting it become a second chunk.
-    assert_eq!(
-        docx_chart_chunks, 2,
-        "expected exactly one docx chart chunk per chart-bearing docx fixture"
+    // Only that the docx path produces one at all. A count here would be a census of how many
+    // chart-bearing docx fixtures happen to be committed, not a statement about the extractor —
+    // what each fixture chunks to is pinned by `office_golden_it.rs` instead.
+    assert!(
+        chunks
+            .iter()
+            .any(|c| c.file_type == "docx" && c.text.starts_with("Chart:")),
+        "no docx chart chunk collected"
     );
 }
 
