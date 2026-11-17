@@ -228,43 +228,37 @@ fn collect_docx_chart_drawings<'a>(
     use office_oxide::docx::{BlockElement, ParagraphContent, Run, RunContent};
 
     for block in blocks {
-        match block {
-            BlockElement::Paragraph(p) => {
-                for pc in &p.content {
-                    let runs: &[Run] = match pc {
-                        ParagraphContent::Run(r) => std::slice::from_ref(r),
-                        ParagraphContent::Hyperlink(hl) => &hl.runs,
+        // Top-level paragraphs ONLY. A `BlockElement::Table` is skipped, and `RunContent::TextBox`
+        // below is not descended into either — DELIBERATELY, do not "fix" this back. A chart
+        // inside a table cell or a text box is real, but `convert_docx` hoists its lines into
+        // THAT container's own content (`TableCell.content`, `Element::TextBox.content`), never
+        // into the section's top-level `elements` that the matcher scans. Collecting such a
+        // drawing could therefore only ever produce a miss, and a miss costs a warning and keeps
+        // both copies — so the honest thing is not to claim it as a candidate at all. Nested
+        // charts simply keep both copies, silently and by construction.
+        let BlockElement::Paragraph(p) = block else {
+            continue;
+        };
+        for pc in &p.content {
+            let runs: &[Run] = match pc {
+                ParagraphContent::Run(r) => std::slice::from_ref(r),
+                ParagraphContent::Hyperlink(hl) => &hl.runs,
+            };
+            for run in runs {
+                for rc in &run.content {
+                    let RunContent::Drawing(d) = rc else {
+                        continue;
                     };
-                    for run in runs {
-                        for rc in &run.content {
-                            match rc {
-                                RunContent::Drawing(d) => {
-                                    if let Some(rid) = d.chart_rel_id.as_deref() {
-                                        if !d.chart_text.is_empty() {
-                                            *total += 1;
-                                            if out.len() < MAX_DEDUPED_CHART_DRAWINGS_PER_FILE {
-                                                out.push((
-                                                    rid,
-                                                    std::sync::Arc::clone(&d.chart_text),
-                                                ));
-                                            }
-                                        }
-                                    }
-                                }
-                                _ => {}
+                    if let Some(rid) = d.chart_rel_id.as_deref() {
+                        if !d.chart_text.is_empty() {
+                            *total += 1;
+                            if out.len() < MAX_DEDUPED_CHART_DRAWINGS_PER_FILE {
+                                out.push((rid, std::sync::Arc::clone(&d.chart_text)));
                             }
                         }
                     }
                 }
             }
-            // DELIBERATELY NOT RECURSED INTO — do not "fix" this back. A chart inside a table
-            // cell or a text box is real, but `convert_docx` hoists its lines into THAT
-            // container's own content (`TableCell.content`, `Element::TextBox.content`), never
-            // into the section's top-level `elements` that the matcher below scans. Collecting
-            // such a drawing could therefore only ever produce a miss, and a miss costs a warning
-            // and keeps both copies — so the honest thing is not to claim it as a candidate at
-            // all. Nested charts simply keep both copies, silently and by construction.
-            BlockElement::Table(_) => {}
         }
     }
 }
