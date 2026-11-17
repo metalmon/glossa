@@ -286,16 +286,25 @@ fn hoisted_line_text(e: &office_oxide::ir::Element) -> Option<&str> {
     }
 }
 
-/// REJECTION bound on how many of a chart's lines are matched against the body flow. The line
-/// count comes out of the chart part and the body's element count is not capped at all, so the
-/// window scan below is a product of two numbers the file controls. A chart whose recovered text
-/// runs longer than this is not one a reader cites; past it the drawing is left alone and both
-/// copies are kept.
-const MAX_MATCHED_CHART_LINES: usize = 256;
+/// REJECTION bound on how large a body this pass will match a chart against. It also bounds the
+/// comparison budget below, which is derived from the element count — without it an enormous body
+/// would buy an enormous budget. A document with this many elements is not one anyone is citing a
+/// chart's position in.
+const MAX_DEDUP_SECTION_ELEMENTS: usize = 100_000;
+
+/// How many element comparisons the whole de-duplication may spend, per element in the document.
+/// Honest input needs far less than one pass: a chart's lines are found where the converter put
+/// them, and a miss fails on the first element of the window. Bounding each factor separately —
+/// the line count, the drawing count, a cheap pre-check — does NOT bound their product, and a
+/// crafted document picks whichever factor is left; one budget spent across every group does,
+/// whatever shape the amplification takes.
+const CHART_MATCH_COMPARISONS_PER_ELEMENT: usize = 8;
 
 /// Every place in the IR where this chart's hoisted lines appear as a contiguous run of plain
 /// paragraphs, in document order and never overlapping, stopping once more than `want` have been
-/// found (the caller only needs to know whether the count is exactly `want`).
+/// found (the caller only needs to know whether the count is exactly `want`). `None` means the
+/// shared `budget` ran out mid-scan and the answer is unknown — the caller then keeps both copies
+/// for everything, which is what every other failure here does.
 ///
 /// Occurrences rather than "the first match": the predicate is text equality and nothing else
 /// (see `hoisted_line_text`), so a body paragraph that happens to repeat a chart's lines AHEAD of
@@ -309,12 +318,12 @@ fn hoisted_chart_run_occurrences(
     ir: &office_oxide::ir::DocumentIR,
     lines: &[String],
     want: usize,
-) -> Vec<(usize, usize)> {
+    budget: &mut usize,
+) -> Option<Vec<(usize, usize)>> {
     let mut found = Vec::new();
-    if lines.is_empty() || lines.len() > MAX_MATCHED_CHART_LINES {
-        return found;
+    if lines.is_empty() {
+        return Some(found);
     }
-    let (first, last) = (lines[0].as_str(), lines[lines.len() - 1].as_str());
     for (s, section) in ir.sections.iter().enumerate() {
         let els = &section.elements;
         if els.len() < lines.len() {
@@ -322,20 +331,24 @@ fn hoisted_chart_run_occurrences(
         }
         let mut at = 0usize;
         while at + lines.len() <= els.len() {
-            // Two single-element probes before the full comparison. Without them a chart whose
-            // lines are mostly identical turns every window into a long scan that only fails at
-            // the end, which is the amplification a crafted file would buy.
-            let window = &els[at..at + lines.len()];
-            let hit = hoisted_line_text(&window[0]) == Some(first)
-                && hoisted_line_text(&window[lines.len() - 1]) == Some(last)
-                && window
-                    .iter()
-                    .zip(lines)
-                    .all(|(e, line)| hoisted_line_text(e) == Some(line.as_str()));
-            if hit {
+            let mut matched = 0usize;
+            while matched < lines.len() {
+                // Charged per comparison actually performed, so no shape of input — however
+                // many lines, however deep the partial matches run — can spend more than the
+                // one budget the caller set from the document's own size.
+                if *budget == 0 {
+                    return None;
+                }
+                *budget -= 1;
+                if hoisted_line_text(&els[at + matched]) != Some(lines[matched].as_str()) {
+                    break;
+                }
+                matched += 1;
+            }
+            if matched == lines.len() {
                 found.push((s, at));
                 if found.len() > want {
-                    return found;
+                    return Some(found);
                 }
                 at += lines.len();
             } else {
@@ -343,7 +356,7 @@ fn hoisted_chart_run_occurrences(
             }
         }
     }
-    found
+    Some(found)
 }
 
 /// Drop the copy of a chart's text that `office_oxide` 0.1.17 hoists into the docx body flow —
@@ -420,13 +433,36 @@ fn drop_hoisted_docx_chart_text(
         }
     }
 
+    let elements: usize = ir.sections.iter().map(|s| s.elements.len()).sum();
+    if elements > MAX_DEDUP_SECTION_ELEMENTS {
+        tracing::warn!(
+            "docx {}: {elements} body elements is past the bound of {MAX_DEDUP_SECTION_ELEMENTS} — skipping the chart de-duplication and keeping both copies of every chart's text",
+            path.display()
+        );
+        return;
+    }
+    // ONE budget for the whole call, spent across every group. Bounding the line count, the
+    // drawing count, or the cost of any single window each bound a factor; only this bounds
+    // their product, which is what a crafted document actually inflates.
+    let total_budget = elements * CHART_MATCH_COMPARISONS_PER_ELEMENT + 1024;
+    let mut budget = total_budget;
+
     // Resolve every chart to its range FIRST, then rebuild each section in one pass. Removing as
     // we go would shift every later element once per chart. A group that cannot be resolved only
     // costs itself: the others are found independently, so one unmatchable chart never disables
     // the de-duplication for the rest of the document.
     let mut to_remove: Vec<(usize, usize, usize)> = Vec::new();
-    for (lines, rel_ids) in &groups {
-        let occurrences = hoisted_chart_run_occurrences(ir, lines, rel_ids.len());
+    for (i, (lines, rel_ids)) in groups.iter().enumerate() {
+        let Some(occurrences) =
+            hoisted_chart_run_occurrences(ir, lines, rel_ids.len(), &mut budget)
+        else {
+            tracing::warn!(
+                "docx {}: matching chart text against the body flow spent its whole comparison budget ({total_budget} for {elements} element(s)) — keeping both copies of every chart's text; {} group(s) of drawings went unprocessed",
+                path.display(),
+                groups.len() - i
+            );
+            return;
+        };
         if occurrences.len() != rel_ids.len() {
             tracing::warn!(
                 "docx {}: {} drawing(s) ({}) recovered {} line(s) of chart text, but the document flow holds {} run(s) of exactly those lines — cannot say which run is the hoisted copy, so keeping both copies for all of them",
@@ -730,11 +766,17 @@ mod tests {
     /// Repack `sample_chart_anchored.docx` with one part swapped. Used to build the
     /// identification-failure cases without committing a second near-identical fixture.
     fn anchored_fixture_with(part: &str, replacement: &[u8]) -> Vec<u8> {
+        repack_with(
+            include_bytes!("../../tests/fixtures/sample_chart_anchored.docx"),
+            part,
+            replacement,
+        )
+    }
+
+    /// Rewrite one part of a zip package, leaving every other entry byte-identical.
+    fn repack_with(package: &[u8], part: &str, replacement: &[u8]) -> Vec<u8> {
         use std::io::{Read as _, Write as _};
-        let mut zr = zip::ZipArchive::new(Cursor::new(
-            include_bytes!("../../tests/fixtures/sample_chart_anchored.docx").to_vec(),
-        ))
-        .unwrap();
+        let mut zr = zip::ZipArchive::new(Cursor::new(package.to_vec())).unwrap();
         let names: Vec<String> = zr
             .file_names()
             .filter(|n| !n.ends_with('/'))
@@ -928,6 +970,52 @@ mod tests {
             text.contains("glossa sample document used as a neutral test fixture."),
             "the bound must skip the de-duplication, not the extraction, got:\n{text}"
         );
+    }
+
+    /// The complexity guard, pinned on input built to defeat the cheap ones. Bounding the line
+    /// count, the drawing count or the cost of one window each bound a FACTOR; this document
+    /// inflates their product instead: a chart whose recovered lines are all identical but the
+    /// last, against a body of paragraphs equal to that line, so every window matches deeply and
+    /// fails only at the end. The shared comparison budget stops it, and stopping means keeping
+    /// both copies — the hoisted lines are still in the flow afterwards.
+    #[test]
+    fn a_docx_built_to_defeat_the_cheap_match_guards_still_terminates() {
+        // No `<c:title>` and no values, so `chart_text_lines` yields exactly one "Series: <name>"
+        // line per `<c:ser>`, in order: 19 identical, then one that differs.
+        let mut chart = String::from(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea><c:barChart>"#,
+        );
+        for i in 0..20 {
+            let name = if i == 19 { "Z" } else { "S" };
+            chart.push_str(&format!("<c:ser><c:tx><c:v>{name}</c:v></c:tx></c:ser>"));
+        }
+        chart.push_str("</c:barChart></c:plotArea></c:chart></c:chartSpace>");
+
+        let (open, drawing) = anchored_chart_drawing();
+        let mut body = format!(
+            "{open}<w:body><w:p><w:r><w:t>glossa sample document used as a neutral test \
+             fixture.</w:t></w:r></w:p><w:p><w:r>{drawing}</w:r></w:p>"
+        );
+        for _ in 0..400 {
+            body.push_str("<w:p><w:r><w:t>Series: S</w:t></w:r></w:p>");
+        }
+        body.push_str("<w:sectPr/></w:body></w:document>");
+
+        let buf = anchored_fixture_with("word/document.xml", body.as_bytes());
+        let buf = repack_with(&buf, "word/charts/chart1.xml", chart.as_bytes());
+
+        let chunks = OfficeExtractor
+            .extract(Path::new("adversarial_chart.docx"), &buf)
+            .unwrap();
+        let text = joined(&chunks);
+
+        // Terminated, kept both copies (the hoisted run is still there), body text intact.
+        assert!(
+            text.contains("Series: Z"),
+            "the hoisted chart text should have been kept when the budget ran out, got:\n{text}"
+        );
+        assert!(text.contains("glossa sample"), "{text}");
     }
 
     /// A chart inside a table cell is not a candidate: `convert_docx` hoists its lines into the
