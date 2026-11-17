@@ -30,7 +30,7 @@ fn collects_ooxml_chart_chunks() {
 
     // Only that the docx path produces one at all. A count here would be a census of how many
     // chart-bearing docx fixtures happen to be committed, not a statement about the extractor —
-    // what each fixture chunks to is pinned by `office_golden_it.rs` instead.
+    // what each fixture chunks to is pinned by `extract_golden_it.rs` instead.
     assert!(
         chunks
             .iter()

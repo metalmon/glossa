@@ -23,7 +23,7 @@ globset = "0.4"
 # and unblocked `.xlsb`, which office_oxide has read since 0.1.12.
 #
 # EXACT, not caret: every release in this range changes what `to_ir()` yields, and that output is
-# what we index. `tests/office_golden_it.rs` pins the current output, so a bump is a deliberate act
+# what we index. `tests/extract_golden_it.rs` pins the current output, so a bump is a deliberate act
 # — read that test's diff, decide the new output is an improvement, then move this pin. A caret
 # bound would let `cargo update` walk onto an untested 0.1.18+ with no such decision.
 #
