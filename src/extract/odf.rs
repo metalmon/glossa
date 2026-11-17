@@ -1,4 +1,5 @@
-use crate::extract::office_chunk::chunk_ir;
+use crate::extract::chart_splice::{splice_charts_at_anchors, ChartAnchor};
+use crate::extract::office_chunk::chunk_ir_with_spans;
 use crate::extract::office_table::expand_merged_tables;
 use crate::extract::Extractor;
 use crate::model::Chunk;
@@ -27,6 +28,38 @@ const MAX_REPEAT: usize = 4096;
 /// bounds the PRODUCT across many rows, so an adversarial/malformed file can't
 /// combine many largish-but-under-cap repeats into an unbounded allocation.
 const MAX_TABLE_CELLS: usize = 1_000_000;
+
+/// The whole budget for interleaving charts: how many `<draw:object>` positions one file's
+/// `content.xml` may contribute.
+///
+/// This is the only count a file controls on the placement path, and bounding it bounds the lot —
+/// the map, the keys held pending inside a block, and the per-chart span lookup
+/// `chart_splice::splice_charts_at_anchors` performs. Real documents embed a handful; a file past
+/// this cap gets its remaining charts appended at the end, as every chart was before placement
+/// existed, with one warning. The container map next to it is deliberately left alone: capping it
+/// would drop a chart's parent and so change its `Location`.
+const MAX_ANCHORED_OBJECTS: usize = 4096;
+
+/// Does an ODF frame's `text:anchor-type` put the frame in the body flow, so that "the block
+/// containing it" is a real position?
+///
+/// The handled values are named rather than defaulted. ODF's flow anchors are `as-char` (the
+/// frame sits in the text like a character), `char` (bound to a character in a block) and
+/// `paragraph` (bound to the block itself) — the design's "as-char and as-paragraph" naming this
+/// vocabulary. `page` and `frame` bind to a coordinate instead, so there is no containing block to
+/// speak of, and an unrecognised value is a producer we have not read: both append at the end, as
+/// today. Guessing a position would yield a citation that reads as precise and is false.
+///
+/// A presentation frame carries no text anchor at all — it is placed on a slide, not in a text
+/// flow — and the slide's own element order is the position, so `odp` needs no attribute.
+fn anchored_in_the_flow(ext: &str, anchor_type: Option<&str>) -> bool {
+    match ext {
+        "odp" => true,
+        "odt" => matches!(anchor_type, Some("as-char" | "char" | "paragraph")),
+        // ods is Task 7's: a spreadsheet chart's position is its sheet, not a block.
+        _ => false,
+    }
+}
 
 /// Parse a `number-*` repeat/span attribute, defaulting to 1 and clamping to
 /// `MAX_REPEAT`. Clamping is logged (never silent) so a truncated expansion is
@@ -152,7 +185,8 @@ fn row_is_empty(cells: &[TableCell]) -> bool {
 #[cfg(test)]
 fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
     let mut object_containers = HashMap::new();
-    parse_to_ir_with_objects(xml, ext, &mut object_containers)
+    let mut object_anchors = HashMap::new();
+    parse_to_ir_with_objects(xml, ext, &mut object_containers, &mut object_anchors)
 }
 
 /// Parse `content.xml` into the shared IR, and fill `object_containers` with
@@ -161,10 +195,15 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
 /// `./` and/or a trailing `/` stripped (different producers spell it differently: Office writes
 /// `"Object 1/"`, hand-built/LibreOffice-style files write `"./Object 1"`), matching the key
 /// `odf_chart.rs::extract_odf_charts` derives from the zip part name (`"Object 1/content.xml"`).
+///
+/// `object_anchors` is filled under the same key with each object's `(section, element)` position,
+/// for the formats whose body flow gives it one (odt and odp — see [`anchored_in_the_flow`]).
+/// An object absent from it has no recoverable position and its chart appends at the end.
 fn parse_to_ir_with_objects(
     xml: &str,
     ext: &str,
     object_containers: &mut HashMap<String, String>,
+    object_anchors: &mut HashMap<String, ChartAnchor>,
 ) -> anyhow::Result<DocumentIR> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
@@ -201,7 +240,35 @@ fn parse_to_ir_with_objects(
                                               // (office_table.rs) fills those grid slots purely from the origin cell's
                                               // row_span; padding a phantom blank cell here would widen the whole table.
     let mut row_has_cell = false;
+    // Inside a body-level <text:p>/<text:h>, i.e. a block whose element index is not settled yet.
+    let mut in_block = false;
+    // The innermost <draw:frame>'s text:anchor-type, live only between that frame's tags.
+    let mut frame_anchor_type: Option<String> = None;
+    // Object keys seen inside the block currently open, resolved when that block closes. A block
+    // element enters `elements` at its CLOSING tag and an empty one never enters at all, so the
+    // index is only knowable then: `elements.len()` at the moment the object arm fires is the
+    // index PRECEDING the containing block, and anchoring there puts the chart before its own
+    // text.
+    let mut pending_objects: Vec<String> = Vec::new();
+    // One warning per file when `MAX_ANCHORED_OBJECTS` is reached.
+    let mut anchor_budget_warned = false;
     let mut ev = Vec::new();
+
+    // Bind every object key held for the block that just closed to the index that block ended up
+    // occupying — `elements.len() - 1`, which is the previous block when this one rendered empty
+    // and so was never pushed. With nothing flushed in this section there is no block to sit
+    // after, and the keys are dropped so those charts append rather than claim a later block.
+    macro_rules! resolve_pending_objects {
+        () => {
+            if let Some(at) = elements.len().checked_sub(1) {
+                let section = sections.len();
+                for key in pending_objects.drain(..) {
+                    object_anchors.insert(key, (section, at));
+                }
+            }
+            pending_objects.clear();
+        };
+    }
 
     loop {
         match reader.read_event_into(&mut ev) {
@@ -228,12 +295,18 @@ fn parse_to_ir_with_objects(
                         }
                     } else {
                         buf.clear();
+                        in_block = true;
                     }
                     pending_heading = Some(
                         attr(&e, b"outline-level")
                             .and_then(|v| v.parse().ok())
                             .unwrap_or(1),
                     );
+                }
+                b"frame" => {
+                    // <draw:frame text:anchor-type="…"> wraps the embedded object; the anchor type
+                    // is the frame's attribute, not the object's.
+                    frame_anchor_type = attr(&e, b"anchor-type");
                 }
                 b"p" => {
                     if in_table {
@@ -245,6 +318,7 @@ fn parse_to_ir_with_objects(
                         }
                     } else {
                         buf.clear();
+                        in_block = true;
                     }
                     pending_heading = attr(&e, b"style-name")
                         .as_deref()
@@ -256,6 +330,7 @@ fn parse_to_ir_with_objects(
                     // keyed on the whole slide rather than just one table).
                     current_slide = attr(&e, b"name");
                     elements.clear(); // start this slide's element list fresh
+                    pending_objects.clear(); // and no anchor survives into it
                 }
                 b"tab" | b"line-break" => buf.push(' '),
                 b"s" => {
@@ -324,6 +399,27 @@ fn parse_to_ir_with_objects(
                             _ => None,
                         };
                         if !key.is_empty() {
+                            if anchored_in_the_flow(ext, frame_anchor_type.as_deref()) {
+                                if object_anchors.len() + pending_objects.len()
+                                    >= MAX_ANCHORED_OBJECTS
+                                {
+                                    if !anchor_budget_warned {
+                                        tracing::warn!(
+                                            "odf .{ext}: more than {MAX_ANCHORED_OBJECTS} anchored \
+                                             embedded objects, appending the rest at the end"
+                                        );
+                                        anchor_budget_warned = true;
+                                    }
+                                } else {
+                                    pending_objects.push(key.clone());
+                                    // A sibling frame (the usual odp shape) is not inside any
+                                    // block, so the block it follows is already flushed and the
+                                    // index is knowable now.
+                                    if !in_block {
+                                        resolve_pending_objects!();
+                                    }
+                                }
+                            }
                             if let Some(container) = container {
                                 object_containers.insert(key, container);
                             }
@@ -368,8 +464,11 @@ fn parse_to_ir_with_objects(
                         } else {
                             pending_heading = None;
                         }
+                        in_block = false;
+                        resolve_pending_objects!();
                     }
                 }
+                b"frame" => frame_anchor_type = None,
                 b"table-cell" => {
                     let text = buf.trim().to_string();
                     buf.clear();
@@ -478,6 +577,9 @@ fn parse_to_ir_with_objects(
                 b"page" if ext == "odp" => {
                     // Slide close: emit everything accumulated for this slide
                     // (headings/paragraphs/tables) as one titled Section.
+                    // An object still pending here sat in a block that never closed; its index is
+                    // unknowable, so drop it and let that chart append.
+                    pending_objects.clear();
                     sections.push(Section {
                         title: current_slide.take(),
                         elements: std::mem::take(&mut elements),
@@ -569,15 +671,28 @@ impl Extractor for OdfExtractor {
             .to_lowercase();
         let xml = read_content_xml(bytes, path)?;
         let mut object_containers = HashMap::new();
-        let mut ir = parse_to_ir_with_objects(&xml, &ext, &mut object_containers)?;
+        let mut object_anchors = HashMap::new();
+        let mut ir =
+            parse_to_ir_with_objects(&xml, &ext, &mut object_containers, &mut object_anchors)?;
+        // Expansion rewrites tables in place and never adds or drops an element, so the anchors
+        // recorded during the walk still address the same elements afterwards.
         expand_merged_tables(&mut ir);
-        let mut chunks = chunk_ir(path, &ir, &ext);
-        chunks.extend(crate::extract::odf_chart::extract_odf_charts(
-            path,
-            bytes,
-            &ext,
-            &object_containers,
-        ));
+        let (chunks, spans) = chunk_ir_with_spans(path, &ir, &ext);
+        // The chart chunks themselves are built exactly as before — same title, same text, same
+        // `Location`. Only where they land in the vector is new, and only for an object whose
+        // position the body walk could recover.
+        let mut anchored: Vec<(ChartAnchor, Chunk)> = Vec::new();
+        let mut unanchored: Vec<Chunk> = Vec::new();
+        for (key, chart) in
+            crate::extract::odf_chart::extract_odf_charts(path, bytes, &ext, &object_containers)
+        {
+            match object_anchors.get(&key) {
+                Some(&anchor) => anchored.push((anchor, chart)),
+                None => unanchored.push(chart),
+            }
+        }
+        let mut chunks = splice_charts_at_anchors(chunks, &spans, anchored);
+        chunks.extend(unanchored);
         if chunks.is_empty() {
             return Err(anyhow!("odf produced no chunks for {}", path.display()));
         }
@@ -1408,7 +1523,7 @@ mod tests {
 </office:document-content>"#;
 
         let mut object_containers = HashMap::new();
-        parse_to_ir_with_objects(xml, "ods", &mut object_containers).unwrap();
+        parse_to_ir_with_objects(xml, "ods", &mut object_containers, &mut HashMap::new()).unwrap();
 
         assert_eq!(
             object_containers.get("Object 1").map(String::as_str),
@@ -1436,7 +1551,13 @@ mod tests {
 </office:presentation></office:body>
 </office:document-content>"#;
         let mut odp_object_containers = HashMap::new();
-        parse_to_ir_with_objects(odp_xml, "odp", &mut odp_object_containers).unwrap();
+        parse_to_ir_with_objects(
+            odp_xml,
+            "odp",
+            &mut odp_object_containers,
+            &mut HashMap::new(),
+        )
+        .unwrap();
 
         assert_eq!(
             odp_object_containers.get("Object 1").map(String::as_str),
@@ -1551,5 +1672,199 @@ mod tests {
             text.contains("truncated slide text"),
             "unterminated slide text lost: {text:?}"
         );
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Where the chart chunk lands (`chart_splice.rs`)
+    // -------------------------------------------------------------------------------------
+
+    /// A minimal chart sub-document, with a title and a value unique enough to find in the output.
+    const PLACED_CHART_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content
+ xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+ xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0"
+ xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+ xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
+<office:body><office:chart>
+<chart:chart chart:class="chart:bar">
+<chart:title><text:p>Placed chart</text:p></chart:title>
+<table:table table:name="local-table">
+<table:table-row>
+ <table:table-cell><text:p></text:p></table:table-cell>
+ <table:table-cell><text:p>Series 1</text:p></table:table-cell>
+</table:table-row>
+<table:table-row>
+ <table:table-cell><text:p>Q1</text:p></table:table-cell>
+ <table:table-cell><text:p>77.7</text:p></table:table-cell>
+</table:table-row>
+</table:table>
+</chart:chart>
+</office:chart></office:body></office:document-content>"#;
+
+    /// `make_odf_zip` plus an `Object 1/content.xml` chart part, so the body's
+    /// `<draw:object xlink:href="./Object 1"/>` has something to resolve to.
+    fn make_odf_zip_with_chart(content_xml: &str) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut buf = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut buf);
+            let mut zw = zip::ZipWriter::new(cursor);
+            let opts = zip::write::SimpleFileOptions::default();
+            zw.start_file("content.xml", opts).unwrap();
+            zw.write_all(content_xml.as_bytes()).unwrap();
+            zw.start_file("Object 1/content.xml", opts).unwrap();
+            zw.write_all(PLACED_CHART_XML.as_bytes()).unwrap();
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    /// The index of the single chunk whose text contains `needle`.
+    fn only_chunk_with(chunks: &[Chunk], needle: &str) -> usize {
+        let hits: Vec<usize> = chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.text.contains(needle))
+            .map(|(i, _)| i)
+            .collect();
+        let joined = chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+        assert_eq!(
+            hits.len(),
+            1,
+            "{needle:?} must appear in exactly one chunk, found {hits:?} in:\n{joined}"
+        );
+        hits[0]
+    }
+
+    /// An odt body with one chart anchored inside its first paragraph, at `anchor_type`.
+    ///
+    /// Two headings, because a chart lands after the CHUNK containing its block and chunk
+    /// boundaries come only from a heading or an over-threshold blank: a flat short body is one
+    /// chunk, where "placed" and "appended" are the same index and nothing can be witnessed.
+    fn odt_with_anchored_chart(anchor_type: &str) -> Vec<u8> {
+        make_odf_zip_with_chart(&format!(
+            r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:xlink="http://www.w3.org/1999/xlink">
+<office:body><office:text>
+<text:h text:outline-level="1">First Section</text:h>
+<text:p>The chart belongs after this.<draw:frame text:anchor-type="{anchor_type}"><draw:object xlink:href="./Object 1"/></draw:frame></text:p>
+<text:h text:outline-level="1">Second Section</text:h>
+<text:p>glossa sample tail text.</text:p>
+</office:text></office:body></office:document-content>"#
+        ))
+    }
+
+    /// An embedded chart takes the ordinal slot right after the chunk holding the paragraph it is
+    /// anchored in — not the slot after all the body text, which is where it used to go.
+    ///
+    /// Both bounds are asserted: the chart follows its own paragraph AND precedes the section
+    /// after it. Appending (the pre-change behaviour, and still the fallback) puts the chart past
+    /// "Second Section", so this fails if the placement is reverted or never applied.
+    #[test]
+    fn an_odt_chart_lands_after_the_paragraph_that_contains_it() {
+        let chunks = extract(&odt_with_anchored_chart("as-char"), "placed.odt");
+        let body = only_chunk_with(&chunks, "The chart belongs after this.");
+        let chart = only_chunk_with(&chunks, "Placed chart");
+        let tail = only_chunk_with(&chunks, "glossa sample tail text.");
+        assert_eq!(chart, body + 1, "chart not right after its own paragraph");
+        assert_eq!(tail, chart + 1, "chart appended past the following section");
+        assert!(
+            chunks[chart].text.contains("77.7"),
+            "the chart's data table is not the one that moved: {:?}",
+            chunks[chart].text
+        );
+    }
+
+    /// The anchor-type ruling: `as-char`, `char` and `paragraph` bind the frame into the body
+    /// flow and get a position; `page` and `frame` bind it to a coordinate and keep today's
+    /// append, as does any value we do not recognise.
+    ///
+    /// The flow cases are asserted alongside the append cases in one test deliberately — on its
+    /// own, "the chart is last" is also what a missing feature produces. The pair is what fails
+    /// if the arm defaults instead of naming what it handles: treat `page` as a flow anchor and
+    /// the second loop breaks; drop the arm entirely and the first does.
+    #[test]
+    fn a_page_anchored_odt_chart_is_appended_not_placed() {
+        for flow in ["as-char", "char", "paragraph"] {
+            let chunks = extract(&odt_with_anchored_chart(flow), "flow.odt");
+            let chart = only_chunk_with(&chunks, "Placed chart");
+            assert_eq!(
+                chart,
+                only_chunk_with(&chunks, "The chart belongs after this.") + 1,
+                "{flow:?} is a flow anchor and must be placed"
+            );
+        }
+        for off_flow in ["page", "frame", "as-giraffe"] {
+            let chunks = extract(&odt_with_anchored_chart(off_flow), "appended.odt");
+            let chart = only_chunk_with(&chunks, "Placed chart");
+            assert_eq!(
+                chart,
+                chunks.len() - 1,
+                "{off_flow:?} has no flow position and must be appended, not guessed at"
+            );
+            assert!(
+                chart > only_chunk_with(&chunks, "glossa sample tail text."),
+                "{off_flow:?} chart must sit after the whole body"
+            );
+        }
+    }
+
+    /// A presentation frame carries no `text:anchor-type` — it is placed on a slide rather than
+    /// in a text flow — so the slide's own element order is the position. The chart is anchored
+    /// on the FIRST of two slides and must land between the two slides' chunks.
+    ///
+    /// Appending puts it after the second slide, so this fails if the placement is reverted.
+    #[test]
+    fn an_odp_chart_lands_in_its_own_slide_after_the_containing_block() {
+        let odp = make_odf_zip_with_chart(
+            r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:xlink="http://www.w3.org/1999/xlink">
+<office:body><office:presentation>
+<draw:page draw:name="Slide1">
+<draw:frame><draw:text-box><text:h text:outline-level="1">First Slide</text:h><text:p>The chart belongs after this.</text:p></draw:text-box></draw:frame>
+<draw:frame><draw:object xlink:href="./Object 1"/></draw:frame>
+</draw:page>
+<draw:page draw:name="Slide2">
+<draw:frame><draw:text-box><text:h text:outline-level="1">Second Slide</text:h><text:p>glossa sample tail text.</text:p></draw:text-box></draw:frame>
+</draw:page>
+</office:presentation></office:body></office:document-content>"#,
+        );
+        let chunks = extract(&odp, "placed.odp");
+        let slide_one = only_chunk_with(&chunks, "The chart belongs after this.");
+        let chart = only_chunk_with(&chunks, "Placed chart");
+        let slide_two = only_chunk_with(&chunks, "glossa sample tail text.");
+        assert_eq!(chart, slide_one + 1, "chart not inside its own slide");
+        assert_eq!(slide_two, chart + 1, "chart appended past the next slide");
+    }
+
+    /// The guarantee for the overwhelming majority of files: a document with no embedded object
+    /// gets the chunk sequence it always got, `Location` and all.
+    ///
+    /// "As before" is recomputed rather than pinned as literals — the pre-change path was
+    /// `parse_to_ir` + `expand_merged_tables` + `chunk_ir`, and `chunk_ir`'s signature never
+    /// moved, so the right-hand side below IS the old code path rather than a restatement of the
+    /// new one.
+    #[test]
+    fn chartless_odt_and_odp_chunk_exactly_as_before() {
+        for (bytes, name, ext) in [(ODT, "plain.odt", "odt"), (ODP, "plain.odp", "odp")] {
+            let path = Path::new(name);
+            let xml = read_content_xml(bytes, path).unwrap();
+            let mut ir = parse_to_ir(&xml, ext).unwrap();
+            expand_merged_tables(&mut ir);
+            let before = crate::extract::office_chunk::chunk_ir(path, &ir, ext);
+            assert!(
+                before.len() > 1,
+                "{name} needs more than one chunk to be worth comparing: {before:?}"
+            );
+            assert_eq!(
+                OdfExtractor.extract(path, bytes).unwrap(),
+                before,
+                "{name} chunked differently than the pre-change path"
+            );
+        }
     }
 }

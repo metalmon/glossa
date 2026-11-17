@@ -722,12 +722,18 @@ fn load_sheet_grid(zip: &mut zip::ZipArchive<Cursor<&[u8]>>, path: &Path) -> She
 /// each into a searchable chunk (title + GFM data table). Infallible by
 /// design: any problem (bad zip, unreadable part, no local data table) skips
 /// that chart with a warning rather than failing the whole file's extraction.
+///
+/// Each chunk is returned with its object key — the zip part name less
+/// `"/content.xml"`, the same key `object_containers` is looked up by. The
+/// caller needs it to find where in the body that object was anchored, and it
+/// cannot be recovered from the output order: a non-chart `Object N` is
+/// skipped, so the Nth chunk is not in general the Nth object.
 pub fn extract_odf_charts(
     path: &Path,
     bytes: &[u8],
     ext: &str,
     object_containers: &HashMap<String, String>,
-) -> Vec<Chunk> {
+) -> Vec<(String, Chunk)> {
     if !odf_ext(ext) {
         return Vec::new();
     }
@@ -819,22 +825,18 @@ pub fn extract_odf_charts(
         // a note for whoever meets one rather than a partial `%20`-only fix that would look
         // handled while `%2F` and the rest still miss.
         let object_key = name.strip_suffix("/content.xml").unwrap_or(name.as_str());
-        match object_containers.get(object_key) {
-            Some(container) => out.push(Chunk::nested(
+        let chunk = match object_containers.get(object_key) {
+            Some(container) => Chunk::nested(
                 path.to_path_buf(),
                 ext.to_string(),
                 vec![container.clone(), title],
                 text,
-            )),
+            ),
             // No anchor known (every pre-existing fixture): keep today's label-only shape — no
             // parent claimed.
-            None => out.push(Chunk::labelled(
-                path.to_path_buf(),
-                ext.to_string(),
-                title,
-                text,
-            )),
-        }
+            None => Chunk::labelled(path.to_path_buf(), ext.to_string(), title, text),
+        };
+        out.push((object_key.to_string(), chunk));
     }
     out
 }
@@ -914,7 +916,16 @@ mod tests {
             .join(fixture);
         let bytes = std::fs::read(&path).unwrap();
         let ext = fixture.rsplit('.').next().unwrap();
-        super::extract_odf_charts(&path, &bytes, ext, &HashMap::new())
+        chart_chunks(&path, &bytes, ext)
+    }
+
+    /// `extract_odf_charts` with the object keys dropped. `odf.rs` needs the keys to look an
+    /// object's body position up; these tests are about what each chart chunk contains.
+    fn chart_chunks(path: &Path, bytes: &[u8], ext: &str) -> Vec<Chunk> {
+        super::extract_odf_charts(path, bytes, ext, &HashMap::new())
+            .into_iter()
+            .map(|(_, chunk)| chunk)
+            .collect()
     }
 
     #[test]
@@ -1057,7 +1068,7 @@ mod tests {
                 .unwrap();
             zw.finish().unwrap();
         }
-        let cs = extract_odf_charts(Path::new("garbage.ods"), &buf, "ods", &HashMap::new());
+        let cs = chart_chunks(Path::new("garbage.ods"), &buf, "ods");
         assert!(
             cs.is_empty(),
             "garbage chart part should yield no chunks, got: {cs:?}"
@@ -1109,7 +1120,7 @@ mod tests {
             .unwrap();
             zw.finish().unwrap();
         }
-        let cs = extract_odf_charts(Path::new("mixed.ods"), &buf, "ods", &HashMap::new());
+        let cs = chart_chunks(Path::new("mixed.ods"), &buf, "ods");
         assert_eq!(cs.len(), 1, "expected exactly one chart chunk, got: {cs:?}");
         assert_eq!(
             cs[0].location.display(),
@@ -1121,12 +1132,7 @@ mod tests {
     /// A truncated/malformed zip entirely must not panic either.
     #[test]
     fn not_a_zip_no_panic() {
-        let cs = extract_odf_charts(
-            Path::new("junk.ods"),
-            b"not a zip at all",
-            "ods",
-            &HashMap::new(),
-        );
+        let cs = chart_chunks(Path::new("junk.ods"), b"not a zip at all", "ods");
         assert!(cs.is_empty());
     }
 
@@ -1137,7 +1143,7 @@ mod tests {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_chart.ods"),
         )
         .unwrap();
-        let cs = extract_odf_charts(Path::new("x.docx"), &bytes, "docx", &HashMap::new());
+        let cs = chart_chunks(Path::new("x.docx"), &bytes, "docx");
         assert!(cs.is_empty());
     }
 
@@ -1361,7 +1367,7 @@ mod tests {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_chart_ref.ods");
         let bytes = std::fs::read(&path).unwrap();
-        let cs = extract_odf_charts(&path, &bytes, "ods", &HashMap::new());
+        let cs = chart_chunks(&path, &bytes, "ods");
         assert!(!cs.is_empty(), "expected a resolved ref-only chart chunk");
         let t = cs
             .iter()
@@ -1474,7 +1480,7 @@ mod tests {
 
             zw.finish().unwrap();
         }
-        let cs = extract_odf_charts(Path::new("mixed_ref.ods"), &buf, "ods", &HashMap::new());
+        let cs = chart_chunks(Path::new("mixed_ref.ods"), &buf, "ods");
         assert_eq!(
             cs.len(),
             1,
@@ -1529,7 +1535,7 @@ mod tests {
             .unwrap();
             zw.finish().unwrap();
         }
-        let cs = extract_odf_charts(Path::new("bad_range.ods"), &buf, "ods", &HashMap::new());
+        let cs = chart_chunks(Path::new("bad_range.ods"), &buf, "ods");
         assert!(
             cs.is_empty(),
             "bad series range must skip the chart, not panic: {cs:?}"
@@ -1615,7 +1621,7 @@ mod tests {
         }
         // The only hard requirement is "returns promptly without panicking";
         // whether it resolves (truncated) or gives up cleanly is secondary.
-        let cs = extract_odf_charts(Path::new("adversarial.ods"), &buf, "ods", &HashMap::new());
+        let cs = chart_chunks(Path::new("adversarial.ods"), &buf, "ods");
         if let Some(chart) = cs.first() {
             assert!(chart.text.starts_with("Chart:"), "{}", chart.text);
         }

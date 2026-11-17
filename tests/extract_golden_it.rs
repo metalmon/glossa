@@ -122,6 +122,14 @@ const EXPECTED: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // Caveat on what this row can witness: **it cannot witness chart placement, and the
+        // trailing chart chunk here is not evidence that placement is broken.** This fixture's
+        // `content.xml` contains no `<draw:object>` at all — the `Object 1/content.xml` chart
+        // part is in the zip but nothing in the body references it — so the chart has no anchor
+        // to recover and takes the honest end-of-document fallback. The tests that demonstrate
+        // the odt placement are in `src/extract/odf.rs`
+        // (`an_odt_chart_lands_after_the_paragraph_that_contains_it` and
+        // `a_page_anchored_odt_chart_is_appended_not_placed`), on bodies that carry one.
         "sample_chart.odt",
         &[
             "glossa sample document.",
@@ -180,6 +188,10 @@ const EXPECTED: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // Same caveat as `sample_chart.odt`, for the same reason: no `<draw:object>` anywhere in
+        // this fixture's `content.xml`, so its chart is an orphan and appends. The test that
+        // demonstrates the odp placement is
+        // `src/extract/odf.rs::an_odp_chart_lands_in_its_own_slide_after_the_containing_block`.
         "sample_chart.odp",
         &[
             "# glossa sample slide\n\nFirst slide body text.",
