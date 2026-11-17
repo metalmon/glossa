@@ -14,6 +14,7 @@ pub trait Extractor {
     }
 }
 
+pub mod chart_splice;
 pub mod chunk;
 pub mod csv_tsv;
 pub mod html;
