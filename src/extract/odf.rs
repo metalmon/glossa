@@ -252,6 +252,11 @@ fn parse_to_ir_with_objects(
     let mut pending_objects: Vec<String> = Vec::new();
     // One warning per file when `MAX_ANCHORED_OBJECTS` is reached.
     let mut anchor_budget_warned = false;
+    // Objects that preceded every block of their section, totalled for ONE line after the walk.
+    // Warning per occurrence would be a per-section cost, and the number of sections is the
+    // document's to choose: a file of many such slides would buy a log-write storm. The count is
+    // also the more useful half — how widespread it is, rather than where it first happened.
+    let mut objects_before_any_block: usize = 0;
     let mut ev = Vec::new();
 
     // Bind every object key held for the block that just closed to the index that block ended up
@@ -263,8 +268,9 @@ fn parse_to_ir_with_objects(
     // ordinary files, not only malformed ones: a slide's `<draw:frame>` children are in Z-ORDER,
     // not reading order, so a chart frame authored behind its text frames is walked first, with
     // `elements` still empty. Appending is the right answer there — `elements.len()` read as an
-    // index would place the chart after a block that follows it — but it is said out loud, since
-    // a chart quietly losing its position looks identical to one that never had one.
+    // index would place the chart after a block that follows it — but it is counted and said out
+    // loud once after the walk, since a chart quietly losing its position looks identical to one
+    // that never had one.
     macro_rules! resolve_pending_objects {
         () => {
             if let Some(at) = elements.len().checked_sub(1) {
@@ -272,13 +278,8 @@ fn parse_to_ir_with_objects(
                 for key in pending_objects.drain(..) {
                     object_anchors.insert(key, (section, at));
                 }
-            } else if !pending_objects.is_empty() {
-                tracing::warn!(
-                    "odf .{ext}: {} embedded object(s) precede every block of their section \
-                     (frames are in Z-order, not reading order) — appending those charts at the \
-                     end rather than guessing a position",
-                    pending_objects.len()
-                );
+            } else {
+                objects_before_any_block += pending_objects.len();
                 pending_objects.clear();
             }
         };
@@ -676,6 +677,14 @@ fn parse_to_ir_with_objects(
             elements,
             ..Default::default()
         });
+    }
+    // One line per file, however many sections did it — see `objects_before_any_block`.
+    if objects_before_any_block > 0 {
+        tracing::warn!(
+            "odf .{ext}: {objects_before_any_block} embedded object(s) precede every block of \
+             their section (frames are in Z-order, not reading order) — appending those charts \
+             at the end rather than guessing a position"
+        );
     }
     Ok(DocumentIR {
         sections,
@@ -1919,6 +1928,11 @@ mod tests {
     /// This pins the honest outcome against the plausible wrong one: reading `elements.len()` as
     /// an insert index instead of `len() - 1` would resolve to 0 here and place the chart after
     /// the slide-one text it actually precedes, so the first assertion is what rejects that.
+    ///
+    /// It also pins the warning's BOUND. Both slides are shaped this way, and the number of
+    /// slides is the document's to choose, so a line per occurrence would let a file buy a
+    /// log-write storm. One line per file carrying the total is what passes here; the per-section
+    /// version emits two and fails.
     #[test]
     fn an_odp_chart_frame_written_before_its_text_is_appended() {
         let captured = CapturedLogs::default();
@@ -1944,6 +1958,7 @@ mod tests {
 <draw:frame><draw:text-box><text:h text:outline-level="1">First Slide</text:h><text:p>Text authored in front of the chart.</text:p></draw:text-box></draw:frame>
 </draw:page>
 <draw:page draw:name="Slide2">
+<draw:frame><draw:object xlink:href="./Object 1"/></draw:frame>
 <draw:frame><draw:text-box><text:h text:outline-level="1">Second Slide</text:h><text:p>glossa sample tail text.</text:p></draw:text-box></draw:frame>
 </draw:page>
 </office:presentation></office:body></office:document-content>"#,
@@ -1968,11 +1983,12 @@ mod tests {
         assert_eq!(
             warned.len(),
             1,
-            "losing a chart's position must not be silent, got:\n{logs}"
+            "one line per FILE, not per section — losing a chart's position must be neither \
+             silent nor unbounded. Got:\n{logs}"
         );
         assert!(
-            warned[0].contains("1 embedded object(s)"),
-            "the warning must say how many: {}",
+            warned[0].contains("2 embedded object(s)"),
+            "the one line must carry the total across both slides: {}",
             warned[0]
         );
     }
