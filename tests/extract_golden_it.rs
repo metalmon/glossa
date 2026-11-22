@@ -108,12 +108,13 @@ const EXPECTED: &[(&str, &[&str])] = &[
             "Chart: Chart 1\n\n|  | Apples | Pears | Plums |\n| --- | --- | --- | --- |\n| Qtr1 | 20.4 | 30.6 | 45.9 |\n| Qtr2 | 27.4 | 38.6 | 46.9 |\n| Qtr3 | 90 | 34.6 | 45 |\n| Qtr4 | 20.4 | 31.6 | 43.9 |",
         ],
     ),
-    // The odf rows below show every chart at the end of its document, and that is the CORRECT
-    // post-change output, not a pre-change snapshot: odt/odp chart placement landed without
-    // moving a single row here, because neither `sample_chart.odt` nor `sample_chart.odp`
-    // contains a `<draw:object>` for its chart part to be anchored by, and the ods rows are the
-    // ods path's, which Task 7 owns. The two chart rows each say so individually. If a future
-    // change DOES move one of these, that is a real finding — read the diff before updating it.
+    // Every odf row below is POST-change, not a pre-change snapshot. Most of them still show the
+    // chart at the end of the document and that is correct: a fixture whose `content.xml` holds
+    // no `<draw:object>` has no anchor to recover, so its chart takes the honest end-of-document
+    // fallback. The exceptions are the two ods fixtures that DO reference their chart part
+    // (`sample_chart_anchored.ods` and `sample_chart_multi_sheet.ods`), whose charts now sit
+    // inside their own sheet's slot. Each row says which case it is. If a future change moves one
+    // of these, that is a real finding — read the diff before updating it.
     (
         // The chartless control for odt: `sample_chart.odt`'s first three chunks must stay
         // byte-identical to these.
@@ -150,6 +151,10 @@ const EXPECTED: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // An orphan, like the odt and odp chart fixtures: the `Object 1/` part is in the zip but
+        // nothing in the body references it, so there is no anchor and the chart appends. Its
+        // first two chunks are the control for `sample_chart_anchored.ods` below, which is the
+        // same document plus the `<draw:frame>` that references the object.
         "sample_chart.ods",
         &[
             "| glossa sample |  |\n| --- | --- |\n| a | b |\n| 1 | 2 |",
@@ -158,6 +163,12 @@ const EXPECTED: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        // MOVED by ods chart placement: the chart chunk used to be third, after both sheets, and
+        // now sits between them, because its `<draw:object>` is anchored in `Sheet1` and a
+        // spreadsheet chart's position is its sheet. The chunk itself is unchanged — same text,
+        // same `Chunk::nested` location — only its index moved. Swap the second and third strings
+        // back and this row is the pre-placement output.
+        //
         // Same lineage as `sample_chart.ods`, and `Sheet1` differs by one empty row: the
         // `<draw:frame>` that anchors the chart sits in its own `<table:table-row>`, so the sheet
         // renders a blank `|  |  |` line the unanchored fixture does not have. That is today's
@@ -165,18 +176,34 @@ const EXPECTED: &[(&str, &[&str])] = &[
         "sample_chart_anchored.ods",
         &[
             "| glossa sample |  |\n| --- | --- |\n|  |  |\n| a | b |\n| 1 | 2 |",
-            "| x | dup | dup | dup | y |\n| --- | --- | --- | --- | --- |",
             "Chart: Sales by quarter (bar)\n\n|  | Series 1 | Series 2 |\n| --- | --- | --- |\n| Q1 | 4.3 | 2.4 |\n| Q2 | 2.5 | 4.4 |\n| Q3 | 3.5 | 3.5 |",
+            "| x | dup | dup | dup | y |\n| --- | --- | --- | --- | --- |",
+        ],
+    ),
+    (
+        // NEW with ods chart placement, and the only fixture in the repo with charts on two
+        // different sheets — including the last one, where "placed" and "appended" would
+        // otherwise coincide. Each chart sits in its own sheet's slot, and `Middle` (no chart)
+        // between them is what shows the first chart was not simply left at the end.
+        "sample_chart_multi_sheet.ods",
+        &[
+            "| glossa sample first sheet |\n| --- |",
+            "Chart: First sheet chart (bar)\n\n|  | Series 1 |\n| --- | --- |\n| Q1 | 11.1 |\n| Q2 | 22.2 |",
+            "| middle sheet with no chart |\n| --- |",
+            "| last sheet row |\n| --- |",
+            "Chart: Last sheet chart (bar)\n\n|  | Series 1 |\n| --- | --- |\n| Q1 | 33.3 |\n| Q2 | 44.4 |",
         ],
     ),
     (
         // The ref-only chart: its values came from resolving the cell ranges against `Sheet1`,
         // which is why the chart table repeats the sheet's own numbers.
         //
-        // Same caveat as the rtf row: this fixture has a single sheet, so its body is ONE chunk
-        // and "after the chunk containing the anchor" coincides with "appended at the end".
-        // When the ods anchoring lands, this row will not witness it — a multi-sheet fixture
-        // (`sample.ods`'s two sheets, or `sample_chart_anchored.ods`) is what can.
+        // Same caveat as the rtf row, and it still holds now that ods placement has landed: this
+        // fixture has a single sheet, so its body is ONE chunk and "after the sheet the chart is
+        // anchored in" is the same index as "appended at the end". **This row witnesses nothing
+        // about placement either way** — the rows that do are `sample_chart_anchored.ods` and
+        // `sample_chart_multi_sheet.ods` above. (This fixture's body carries no `<draw:object>`
+        // either, so its chart is an orphan and appends — but even anchored it would land here.)
         "sample_chart_ref.ods",
         &[
             "| Cat | Series 1 |\n| --- | --- |\n| Q1 | 4.3 |\n| Q2 | 2.5 |\n| Q3 | 3.5 |",

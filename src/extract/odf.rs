@@ -40,10 +40,26 @@ const MAX_TABLE_CELLS: usize = 1_000_000;
 /// would drop a chart's parent and so change its `Location`.
 const MAX_ANCHORED_OBJECTS: usize = 4096;
 
-/// Does an ODF frame's `text:anchor-type` put the frame in the body flow, so that "the block
-/// containing it" is a real position?
+/// Where an ODF embedded object's position comes from. The formats differ in kind, not just in
+/// degree, so the two cases are named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnchorSource {
+    /// The SHEET is the position (ods). Our reader emits one `Section` per `<table:table>` holding
+    /// that table as its only element, so an object inside a table anchors at that section's
+    /// element 0 — settled the moment the scan knows which table it is in, with no attribute to
+    /// read and nothing to wait for.
+    ///
+    /// Cell-exact placement is deliberately out of scope: it would mean splitting a sheet's table
+    /// into chunks, a different and larger change with its own address-space cost.
+    Sheet,
+    /// The containing BLOCK is the position (odt, odp), knowable only once that block closes.
+    Block,
+}
+
+/// Which kind of position this `<draw:object>` has, or `None` when it has none — then its chart
+/// appends at the end, which is where every chart went before placement existed.
 ///
-/// The handled values are named rather than defaulted. ODF's flow anchors are `as-char` (the
+/// The handled odt values are named rather than defaulted. ODF's flow anchors are `as-char` (the
 /// frame sits in the text like a character), `char` (bound to a character in a block) and
 /// `paragraph` (bound to the block itself) — the design's "as-char and as-paragraph" naming this
 /// vocabulary. `page` and `frame` bind to a coordinate instead, so there is no containing block to
@@ -52,12 +68,26 @@ const MAX_ANCHORED_OBJECTS: usize = 4096;
 ///
 /// A presentation frame carries no text anchor at all — it is placed on a slide, not in a text
 /// flow — and the slide's own element order is the position, so `odp` needs no attribute.
-fn anchored_in_the_flow(ext: &str, anchor_type: Option<&str>) -> bool {
+///
+/// `in_table` means opposite things to the two sources, which is why it is read here rather than
+/// at the call site. For a spreadsheet the table IS the sheet's whole content, so being inside one
+/// is what gives the object a position, and an object outside every table belongs to no sheet and
+/// gets none. For a text document it takes the position away: the table enters `elements` only at
+/// `</table:table>` and `<text:p>` opens no block while inside one, so the only index resolvable
+/// at the object is the element PRECEDING the table — which `chunk_ir` can put in an earlier chunk
+/// than the table itself (a table arriving on a buffer already past the character threshold, whose
+/// previous element is also a table, starts a new chunk: `office_chunk.rs`'s soft split). The
+/// chart would then be cited before the table it lives in, which is worse than the honest
+/// end-of-document append it gets instead. Placing a chart WITHIN a table is a separate question,
+/// and not this one.
+fn anchor_source(ext: &str, in_table: bool, anchor_type: Option<&str>) -> Option<AnchorSource> {
     match ext {
-        "odp" => true,
-        "odt" => matches!(anchor_type, Some("as-char" | "char" | "paragraph")),
-        // ods is Task 7's: a spreadsheet chart's position is its sheet, not a block.
-        _ => false,
+        "ods" => in_table.then_some(AnchorSource::Sheet),
+        _ if in_table => None,
+        "odp" => Some(AnchorSource::Block),
+        "odt" => matches!(anchor_type, Some("as-char" | "char" | "paragraph"))
+            .then_some(AnchorSource::Block),
+        _ => None,
     }
 }
 
@@ -197,8 +227,9 @@ fn parse_to_ir(xml: &str, ext: &str) -> anyhow::Result<DocumentIR> {
 /// `odf_chart.rs::extract_odf_charts` derives from the zip part name (`"Object 1/content.xml"`).
 ///
 /// `object_anchors` is filled under the same key with each object's `(section, element)` position,
-/// for the formats whose body flow gives it one (odt and odp — see [`anchored_in_the_flow`]).
-/// An object absent from it has no recoverable position and its chart appends at the end.
+/// for the objects that have one — the sheet's table for ods, the containing block for odt and odp
+/// (see [`anchor_source`]). An object absent from it has no recoverable position and its chart
+/// appends at the end.
 fn parse_to_ir_with_objects(
     xml: &str,
     ext: &str,
@@ -414,20 +445,12 @@ fn parse_to_ir_with_objects(
                             _ => None,
                         };
                         if !key.is_empty() {
-                            // A chart inside a table cell gets NO position. The table enters
-                            // `elements` only at `</table:table>`, and `<text:p>` does not open a
-                            // block while `in_table`, so the index resolvable here is the element
-                            // PRECEDING the table — which `chunk_ir` can put in an earlier chunk
-                            // than the table itself (a table arriving on a buffer already past
-                            // the character threshold, whose previous element is also a table,
-                            // starts a new chunk: `office_chunk.rs`'s soft split). The chart
-                            // would then be cited before the table it lives in, which is worse
-                            // than the honest end-of-document append it gets instead. Placing a
-                            // chart WITHIN a table is a separate question, and not this one.
-                            if !in_table && anchored_in_the_flow(ext, frame_anchor_type.as_deref())
-                            {
-                                if object_anchors.len() + pending_objects.len()
-                                    >= MAX_ANCHORED_OBJECTS
+                            // One budget covers both sources — the map, the keys held pending
+                            // inside a block, and the per-chart lookup the splice performs.
+                            match anchor_source(ext, in_table, frame_anchor_type.as_deref()) {
+                                Some(_)
+                                    if object_anchors.len() + pending_objects.len()
+                                        >= MAX_ANCHORED_OBJECTS =>
                                 {
                                     if !anchor_budget_warned {
                                         tracing::warn!(
@@ -436,7 +459,14 @@ fn parse_to_ir_with_objects(
                                         );
                                         anchor_budget_warned = true;
                                     }
-                                } else {
+                                }
+                                Some(AnchorSource::Sheet) => {
+                                    // The sheet in progress pushes its `Section` at
+                                    // `</table:table>`, so it will occupy `sections.len()`, and
+                                    // the table is that section's only element.
+                                    object_anchors.insert(key.clone(), (sections.len(), 0));
+                                }
+                                Some(AnchorSource::Block) => {
                                     pending_objects.push(key.clone());
                                     // A sibling frame (the usual odp shape) is not inside any
                                     // block, so the block it follows is already flushed and the
@@ -445,6 +475,7 @@ fn parse_to_ir_with_objects(
                                         resolve_pending_objects!();
                                     }
                                 }
+                                None => {}
                             }
                             if let Some(container) = container {
                                 object_containers.insert(key, container);
@@ -2019,6 +2050,95 @@ mod tests {
         let slide_two = only_chunk_with(&chunks, "glossa sample tail text.");
         assert_eq!(chart, slide_one + 1, "chart not inside its own slide");
         assert_eq!(slide_two, chart + 1, "chart appended past the next slide");
+    }
+
+    const ODS_ANCHORED: &[u8] = include_bytes!("../../tests/fixtures/sample_chart_anchored.ods");
+    const ODS_MULTI_SHEET: &[u8] =
+        include_bytes!("../../tests/fixtures/sample_chart_multi_sheet.ods");
+
+    /// A spreadsheet chart lands inside the section of the sheet it is anchored in — right after
+    /// that sheet's table — rather than after every sheet in the file.
+    ///
+    /// `sample_chart_anchored.ods` has two sheets (`Sheet1`, then `Data`) and its one
+    /// `<draw:object>` sits in `Sheet1`, so placement and appending are genuinely different
+    /// sequences here. Both bounds are asserted: appending puts the chart after `Data`, so the
+    /// second assertion fails if the splice is removed.
+    #[test]
+    fn an_ods_chart_lands_after_its_own_sheet() {
+        let chunks = extract(ODS_ANCHORED, "sample_chart_anchored.ods");
+        let sheet_one = only_chunk_with(&chunks, "glossa sample");
+        let chart = only_chunk_with(&chunks, "Chart: Sales by quarter");
+        let data = only_chunk_with(&chunks, "dup");
+        assert_eq!(chart, sheet_one + 1, "chart not right after its own sheet");
+        assert_eq!(data, chart + 1, "chart appended past the following sheet");
+    }
+
+    /// The multi-sheet case, and the reason a span carries its section index: every ODS sheet's
+    /// table is element 0 of its own section, so element indices repeat across sheets while chunk
+    /// indices do not. A lookup that matched on the element index alone would resolve both charts
+    /// below to the first sheet's chunk.
+    ///
+    /// One chart is on the LAST sheet deliberately — that is where "placed after its own sheet"
+    /// and "appended at the end" would otherwise coincide and a bug could hide. With two charts
+    /// they do not coincide: appending yields `… Middle, Last, First chart, Last chart`, so the
+    /// last chart's own assertion fails too.
+    #[test]
+    fn charts_on_two_different_sheets_each_land_after_their_own() {
+        let chunks = extract(ODS_MULTI_SHEET, "sample_chart_multi_sheet.ods");
+        let sheet_one = only_chunk_with(&chunks, "glossa sample first sheet");
+        let first_chart = only_chunk_with(&chunks, "Chart: First sheet chart");
+        let middle = only_chunk_with(&chunks, "middle sheet with no chart");
+        let last = only_chunk_with(&chunks, "last sheet row");
+        let last_chart = only_chunk_with(&chunks, "Chart: Last sheet chart");
+
+        assert_eq!(
+            first_chart,
+            sheet_one + 1,
+            "the first sheet's chart is not inside its own sheet's slot: {:?}",
+            chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            middle,
+            first_chart + 1,
+            "the first sheet's chart was pushed past the sheets that follow it"
+        );
+        assert_eq!(
+            last_chart,
+            last + 1,
+            "the last sheet's chart is not inside its own sheet's slot"
+        );
+        // And each chart kept its own data, so a swapped pair of anchors cannot pass.
+        assert!(
+            chunks[first_chart].text.contains("11.1"),
+            "wrong chart placed on the first sheet: {:?}",
+            chunks[first_chart].text
+        );
+        assert!(
+            chunks[last_chart].text.contains("33.3"),
+            "wrong chart placed on the last sheet: {:?}",
+            chunks[last_chart].text
+        );
+    }
+
+    /// The ods half of the chartless guarantee, recomputed rather than pinned as literals for the
+    /// same reason as `chartless_odt_and_odp_chunk_exactly_as_before`: the right-hand side below
+    /// IS the pre-change path, since `chunk_ir`'s signature never moved.
+    #[test]
+    fn a_chartless_ods_chunks_exactly_as_before() {
+        let path = Path::new("plain.ods");
+        let xml = read_content_xml(ODS, path).unwrap();
+        let mut ir = parse_to_ir(&xml, "ods").unwrap();
+        expand_merged_tables(&mut ir);
+        let before = crate::extract::office_chunk::chunk_ir(path, &ir, "ods");
+        assert!(
+            before.len() > 1,
+            "sample.ods needs more than one chunk to be worth comparing: {before:?}"
+        );
+        assert_eq!(
+            OdfExtractor.extract(path, ODS).unwrap(),
+            before,
+            "sample.ods chunked differently than the pre-change path"
+        );
     }
 
     /// The guarantee for the overwhelming majority of files: a document with no embedded object

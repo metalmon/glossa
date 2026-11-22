@@ -59,7 +59,17 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
   (an orphan chunk, `Chunk::labelled`), while this one is anchored, so its chart chunk's location
   resolves to the sheet it's anchored in and renders as `Sheet1 > Sales by quarter`
   (`Chunk::nested`) instead of a bare label. Exercises the hand-built-style href spelling
-  (leading `./`, no trailing slash) as opposed to Office's own `"Object 1/"` spelling.
+  (leading `./`, no trailing slash) as opposed to Office's own `"Object 1/"` spelling. Its chart
+  being anchored in the FIRST of two sheets is also what lets it witness chart placement: the
+  chart chunk lands between the two sheets' chunks rather than after both.
+- `sample_chart_multi_sheet.ods` — hand-built ODS with three sheets (`Sheet1`, `Middle`, `Last`)
+  and a chart anchored in two DIFFERENT ones, `Sheet1` (`Object 1/`, "First sheet chart") and
+  `Last` (`Object 2/`, "Last sheet chart"). The only fixture with charts on more than one sheet,
+  which is the case that catches a chunk-span lookup ignoring the section index: every sheet's
+  table is element 0 of its own section, so ODS element indices repeat across sheets while chunk
+  indices do not. The chart on the LAST sheet is deliberate — that is where "placed after its own
+  sheet" and "appended at the end" would otherwise coincide. Pure ASCII, built by an untracked
+  scratchpad script, never Office-generated.
 - `sample_chart.xlsx` — hand-built xlsx: one sheet (`Sheet1`, carrying the `glossa sample`
   marker plus a small Q1-Q3 data table) and a chart part at `xl/charts/chart1.xml`, with the
   conventional rels chain to it (`xl/worksheets/_rels/sheet1.xml.rels` ->
