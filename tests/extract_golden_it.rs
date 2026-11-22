@@ -108,9 +108,12 @@ const EXPECTED: &[(&str, &[&str])] = &[
             "Chart: Chart 1\n\n|  | Apples | Pears | Plums |\n| --- | --- | --- | --- |\n| Qtr1 | 20.4 | 30.6 | 45.9 |\n| Qtr2 | 27.4 | 38.6 | 46.9 |\n| Qtr3 | 90 | 34.6 | 45 |\n| Qtr4 | 20.4 | 31.6 | 43.9 |",
         ],
     ),
-    // The odf rows below are PRE-CHANGE: odf charts still append at the end of the document.
-    // Tasks 6 and 7 of the chart-ordinals plan move them to their anchors, which will red these
-    // rows on purpose — update them there deliberately.
+    // The odf rows below show every chart at the end of its document, and that is the CORRECT
+    // post-change output, not a pre-change snapshot: odt/odp chart placement landed without
+    // moving a single row here, because neither `sample_chart.odt` nor `sample_chart.odp`
+    // contains a `<draw:object>` for its chart part to be anchored by, and the ods rows are the
+    // ods path's, which Task 7 owns. The two chart rows each say so individually. If a future
+    // change DOES move one of these, that is a real finding — read the diff before updating it.
     (
         // The chartless control for odt: `sample_chart.odt`'s first three chunks must stay
         // byte-identical to these.

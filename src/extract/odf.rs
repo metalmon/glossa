@@ -256,8 +256,15 @@ fn parse_to_ir_with_objects(
 
     // Bind every object key held for the block that just closed to the index that block ended up
     // occupying — `elements.len() - 1`, which is the previous block when this one rendered empty
-    // and so was never pushed. With nothing flushed in this section there is no block to sit
-    // after, and the keys are dropped so those charts append rather than claim a later block.
+    // and so was never pushed.
+    //
+    // With nothing flushed in this section yet there is no block to sit after, and the keys are
+    // dropped so those charts append rather than claim a later block. That is reachable through
+    // ordinary files, not only malformed ones: a slide's `<draw:frame>` children are in Z-ORDER,
+    // not reading order, so a chart frame authored behind its text frames is walked first, with
+    // `elements` still empty. Appending is the right answer there — `elements.len()` read as an
+    // index would place the chart after a block that follows it — but it is said out loud, since
+    // a chart quietly losing its position looks identical to one that never had one.
     macro_rules! resolve_pending_objects {
         () => {
             if let Some(at) = elements.len().checked_sub(1) {
@@ -265,8 +272,15 @@ fn parse_to_ir_with_objects(
                 for key in pending_objects.drain(..) {
                     object_anchors.insert(key, (section, at));
                 }
+            } else if !pending_objects.is_empty() {
+                tracing::warn!(
+                    "odf .{ext}: {} embedded object(s) precede every block of their section \
+                     (frames are in Z-order, not reading order) — appending those charts at the \
+                     end rather than guessing a position",
+                    pending_objects.len()
+                );
+                pending_objects.clear();
             }
-            pending_objects.clear();
         };
     }
 
@@ -399,7 +413,18 @@ fn parse_to_ir_with_objects(
                             _ => None,
                         };
                         if !key.is_empty() {
-                            if anchored_in_the_flow(ext, frame_anchor_type.as_deref()) {
+                            // A chart inside a table cell gets NO position. The table enters
+                            // `elements` only at `</table:table>`, and `<text:p>` does not open a
+                            // block while `in_table`, so the index resolvable here is the element
+                            // PRECEDING the table — which `chunk_ir` can put in an earlier chunk
+                            // than the table itself (a table arriving on a buffer already past
+                            // the character threshold, whose previous element is also a table,
+                            // starts a new chunk: `office_chunk.rs`'s soft split). The chart
+                            // would then be cited before the table it lives in, which is worse
+                            // than the honest end-of-document append it gets instead. Placing a
+                            // chart WITHIN a table is a separate question, and not this one.
+                            if !in_table && anchored_in_the_flow(ext, frame_anchor_type.as_deref())
+                            {
                                 if object_anchors.len() + pending_objects.len()
                                     >= MAX_ANCHORED_OBJECTS
                                 {
@@ -1811,6 +1836,145 @@ mod tests {
                 "{off_flow:?} chart must sit after the whole body"
             );
         }
+    }
+
+    /// An odt whose chart sits in a TABLE CELL, in a body long enough that the table it lives in
+    /// starts its own chunk.
+    ///
+    /// The filler paragraph pushes the buffer past `CHUNK_CHAR_THRESHOLD`; `Table A` is then glued
+    /// on as a caption (its predecessor is a text block), but `Table B`'s predecessor is a table,
+    /// so `office_chunk.rs`'s soft split flushes and `Table B` opens a new chunk. That is what
+    /// makes the element before the table land in a DIFFERENT chunk from the table — without it,
+    /// an anchor resolved to the preceding element would land in the right chunk by accident and
+    /// witness nothing.
+    fn odt_with_a_chart_in_a_table_cell() -> Vec<u8> {
+        let filler = "glossa sample filler words. ".repeat(200);
+        make_odf_zip_with_chart(&format!(
+            r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:xlink="http://www.w3.org/1999/xlink">
+<office:body><office:text>
+<text:h text:outline-level="1">Section One</text:h>
+<text:p>{filler}</text:p>
+<table:table table:name="A"><table:table-row><table:table-cell><text:p>Table A marker</text:p></table:table-cell></table:table-row></table:table>
+<table:table table:name="B"><table:table-row><table:table-cell><text:p>Table B marker<draw:frame text:anchor-type="as-char"><draw:object xlink:href="./Object 1"/></draw:frame></text:p></table:table-cell></table:table-row></table:table>
+<text:p>glossa sample tail text.</text:p>
+</office:text></office:body></office:document-content>"#
+        ))
+    }
+
+    /// A chart anchored inside a table cell gets NO position: it appends at the end, exactly as
+    /// it did before this placement existed.
+    ///
+    /// The table enters `elements` only at its closing tag and `<text:p>` opens no block while
+    /// inside one, so the only index resolvable at the object is the element BEFORE the table —
+    /// which this fixture deliberately puts in an earlier chunk. Anchoring there cites the chart
+    /// before the table it lives in: precise-looking and false, and strictly worse than
+    /// appending. Drop the `!in_table` guard and both assertions below break.
+    #[test]
+    fn an_odt_chart_in_a_table_cell_is_appended_not_placed() {
+        let chunks = extract(&odt_with_a_chart_in_a_table_cell(), "in_table.odt");
+        let chart = only_chunk_with(&chunks, "Placed chart");
+        assert_eq!(
+            chart,
+            chunks.len() - 1,
+            "a chart in a table cell has no flow position and must be appended"
+        );
+        assert!(
+            chart > only_chunk_with(&chunks, "Table B marker"),
+            "the chart must never be cited before the table that holds it"
+        );
+        // And the guard ate no real content on the way.
+        for marker in [
+            "Section One",
+            "Table A marker",
+            "Table B marker",
+            "glossa sample tail text.",
+        ] {
+            assert!(
+                chunks.iter().any(|c| c.text.contains(marker)),
+                "body text {marker:?} lost"
+            );
+        }
+    }
+
+    /// A `tracing` writer that keeps formatted log lines, so a warning can be counted rather than
+    /// taken on trust. Same shape as `rtf.rs`'s.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A slide's `<draw:frame>` children are in Z-ORDER, not reading order, so a chart frame
+    /// authored behind its text frames is walked BEFORE them, with the slide's element list still
+    /// empty. There is no block for it to sit after, so it appends — and says so.
+    ///
+    /// This pins the honest outcome against the plausible wrong one: reading `elements.len()` as
+    /// an insert index instead of `len() - 1` would resolve to 0 here and place the chart after
+    /// the slide-one text it actually precedes, so the first assertion is what rejects that.
+    #[test]
+    fn an_odp_chart_frame_written_before_its_text_is_appended() {
+        let captured = CapturedLogs::default();
+        let make_writer = {
+            let captured = captured.clone();
+            move || captured.clone()
+        };
+        let _log_guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(make_writer)
+                .with_max_level(tracing::Level::WARN)
+                .without_time()
+                .with_target(false)
+                .finish(),
+        );
+
+        let odp = make_odf_zip_with_chart(
+            r#"<?xml version='1.0' encoding='UTF-8'?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:xlink="http://www.w3.org/1999/xlink">
+<office:body><office:presentation>
+<draw:page draw:name="Slide1">
+<draw:frame><draw:object xlink:href="./Object 1"/></draw:frame>
+<draw:frame><draw:text-box><text:h text:outline-level="1">First Slide</text:h><text:p>Text authored in front of the chart.</text:p></draw:text-box></draw:frame>
+</draw:page>
+<draw:page draw:name="Slide2">
+<draw:frame><draw:text-box><text:h text:outline-level="1">Second Slide</text:h><text:p>glossa sample tail text.</text:p></draw:text-box></draw:frame>
+</draw:page>
+</office:presentation></office:body></office:document-content>"#,
+        );
+        let chunks = extract(&odp, "zorder.odp");
+        let chart = only_chunk_with(&chunks, "Placed chart");
+        assert_eq!(
+            chart,
+            chunks.len() - 1,
+            "a chart preceding every block of its slide must append, not claim a later block"
+        );
+        assert!(
+            chart > only_chunk_with(&chunks, "Text authored in front of the chart."),
+            "the chart must not be placed after text it is authored in front of"
+        );
+
+        let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let warned: Vec<&str> = logs
+            .lines()
+            .filter(|l| l.contains("precede every block"))
+            .collect();
+        assert_eq!(
+            warned.len(),
+            1,
+            "losing a chart's position must not be silent, got:\n{logs}"
+        );
+        assert!(
+            warned[0].contains("1 embedded object(s)"),
+            "the warning must say how many: {}",
+            warned[0]
+        );
     }
 
     /// A presentation frame carries no `text:anchor-type` — it is placed on a slide rather than
