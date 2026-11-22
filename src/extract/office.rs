@@ -1,4 +1,4 @@
-use crate::extract::chart_splice::{splice_charts_at_anchors, ChartAnchor};
+use crate::extract::chart_splice::{containing_chunk, splice_charts_at_anchors, ChartAnchor};
 use crate::extract::office_chunk::chunk_ir_with_spans;
 use crate::extract::office_table::expand_merged_tables;
 use crate::extract::Extractor;
@@ -533,9 +533,21 @@ fn drop_hoisted_docx_chart_text(
     }
 
     // Where each removed chart's own chunk belongs, for the caller to splice it at: the element
-    // immediately BEFORE the run of hoisted lines. That element is the paragraph the drawing
-    // itself sits in — `collect_paragraph_chart_text` is called after the paragraph has been
-    // pushed, so a chart-only paragraph is in the IR as an empty one right ahead of its lines.
+    // immediately BEFORE the run of hoisted lines. `collect_paragraph_chart_text` runs last of
+    // the collectors for a paragraph, so that element came out of the SAME source paragraph as
+    // the chart — but it is not always the paragraph itself. In `convert_docx.rs` (0.1.17) the
+    // paragraph's own slot may be an `Element::Paragraph` (empty, for a chart-only paragraph), a
+    // `ThematicBreak` (an empty paragraph with a bottom border), or an `Element::Heading`; and
+    // three collectors run in between, so a paragraph that also carries a float, an inline image
+    // or a text box puts THAT hoisted element last before the run instead.
+    //
+    // Any of them is a correct anchor, because they are siblings in one element flow and
+    // `chunk_ir` puts siblings in one chunk — with one case worth naming: a heading OPENS a chunk
+    // (`office_chunk.rs`), so a chart anchored in a heading paragraph follows the whole chunk that
+    // heading starts rather than sitting at its head. That is still "after the chunk containing
+    // the paragraph", which is all this feature promises; the spec's granularity caveat says the
+    // same about short flat documents.
+    //
     // Indices are into the IR the body chunks are built from, i.e. AFTER the removals below, so
     // each run's start is shifted back by everything already removed from its section. The runs
     // are sorted and non-overlapping, so that sum never exceeds the run's own start.
@@ -657,10 +669,16 @@ impl Extractor for OfficeExtractor {
         // `Location`. Only where they land is new, and only for a chart whose paragraphs the
         // de-duplication positively identified.
         //
-        // `extract_charts_with_coverage` pushes a chunk and its part name together, so entry i of
-        // each describes the same chart. Equal lengths is what makes that binding true; were it
-        // ever to stop holding, nothing is paired rather than paired wrongly — a chart at the
-        // wrong position reads as a precise citation and is false.
+        // Entry i of `chart_chunks` and entry i of `covered_chart_parts` describe the same chart.
+        // What makes that true is the shape of `extract_charts_with_coverage`: both vectors are
+        // built in ONE iteration of ONE loop over one `parts` vector, and both of that loop's
+        // `continue`s sit ahead of either push, so neither vector can gain an entry the other
+        // skipped. **That invariant is load-bearing here** — anyone splitting those pushes apart,
+        // or adding a path that pushes one without the other, silently moves charts to other
+        // charts' positions, and a chart at the wrong position reads as a precise citation and is
+        // false. The length check below cannot catch that in general (it is unreachable today,
+        // precisely because the invariant holds); it is kept only as a cheap backstop, and pairing
+        // nothing is the honest answer when it ever trips.
         let parts: &[String] = if chart_chunks.len() == covered_chart_parts.len() {
             &covered_chart_parts
         } else {
@@ -673,6 +691,26 @@ impl Extractor for OfficeExtractor {
                 Some(&anchor) => anchored.push((anchor, chart)),
                 None => unanchored.push(chart),
             }
+        }
+        // An anchor can be recovered and still resolve to no chunk: `chunk_ir`'s mapping has gaps
+        // — an empty paragraph past the 4000-character threshold flushes and enters no buffer, and
+        // a run of elements that renders to nothing emits no chunk at all. A chart whose paragraph
+        // lands in one appends, which is the honest answer, but on a long document it happens with
+        // nothing in the log to say the position was lost.
+        //
+        // ONE line per file, carrying the count — never one per chart. Both the chart count and
+        // the chunk count come out of the document, so a line each would let a crafted file write
+        // the log; `odf.rs`'s Z-order summary is the same shape for the same reason.
+        let unplaceable = anchored
+            .iter()
+            .filter(|(anchor, _)| containing_chunk(&spans, *anchor).is_none())
+            .count();
+        if unplaceable > 0 {
+            tracing::warn!(
+                "docx {}: {unplaceable} of {} chart(s) with a recovered anchor have no containing chunk (their paragraph fell on a chunk boundary, or its run produced no chunk) — those append at the end of the document instead of taking their own position",
+                path.display(),
+                anchored.len()
+            );
         }
         let mut chunks = splice_charts_at_anchors(chunks, &spans, anchored);
         chunks.extend(unanchored);

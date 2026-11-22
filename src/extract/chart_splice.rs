@@ -63,13 +63,21 @@ pub fn splice_charts_at_anchors(
 
 /// The index of the chunk whose span contains `anchor`, or `None` when none does.
 ///
+/// `pub(crate)` so a caller can ask the same question this function answers without splicing —
+/// `office.rs` counts the anchors that resolve to nothing so it can say so once per file. A
+/// second answer for the same anchor is one binary search, and the chart count is already bounded
+/// per file by whatever recovered the anchors.
+///
 /// Binary search, not a scan: both the number of charts and the number of chunks come out of the
 /// document, so a scan per anchor would let a crafted file buy their product. This needs no
 /// skip-and-warn budget instead, because spans arrive sorted — `chunk_ir` walks sections in order
 /// and flushes within a section in element order, so spans ascend by `(section, elements.start)`
 /// and never overlap. The containment test below is still exact, so were that invariant ever
 /// broken the worst outcome is a missed anchor, which appends: honest, not wrong.
-fn containing_chunk(spans: &[ChunkSpan], (section, element): ChartAnchor) -> Option<usize> {
+pub(crate) fn containing_chunk(
+    spans: &[ChunkSpan],
+    (section, element): ChartAnchor,
+) -> Option<usize> {
     let i = spans
         .partition_point(|s| (s.section, s.elements.start) <= (section, element))
         .checked_sub(1)?;
