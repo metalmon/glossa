@@ -31,7 +31,21 @@ use tantivy::{doc, Index, IndexReader, TantivyDocument, TantivyError};
 //    rendering: `["Chapter 2","Limits"]` for a path, `"rows 12-40"` for a label. Every stored
 //    location changes shape, and an index written at 6 holds a bare joined string that would
 //    now read back as an empty label (see `stored_location`), so a stale index must rebuild.
-pub const INDEX_SCHEMA_VERSION: u32 = 7;
+// 8: two independent changes, either of which would owe a bump on its own.
+//    (a) office_oxide 0.1.11 → =0.1.17 changes what `to_ir()` yields again, and this time the
+//    headline is recall: `.xls` shared strings cut at a CONTINUE record boundary were misparsed,
+//    so any workbook with more than roughly 8 KB of unique strings lost most of its text cells
+//    (upstream reports 80 such files reading at 2-58% against other extractors). Also: `.doc`
+//    gains tables, docx rows inside `w:ins`/`w:moveTo`/`w:customXml` are no longer dropped,
+//    merged cells in xlsx/xlsb densify, PPTX SmartArt text is read, and `.xlsb` is extracted at
+//    all. As at 5, `file_sig` is mtime+size, so an extractor upgrade never makes a file look
+//    stale — without this bump a quiescent corpus keeps serving the under-extracted text
+//    indefinitely, which is why the bump is not optional.
+//    (b) an embedded chart's chunk now takes its own ordinal position where the chart occurs
+//    (rtf/odt/odp/ods/docx) instead of being appended last, so every chunk address after a chart
+//    moved. `path#N` is the canonical chunk address (`ord = i + 1`), so a stale index resolves
+//    those addresses to the wrong chunks.
+pub const INDEX_SCHEMA_VERSION: u32 = 8;
 
 /// True when `manifest` records a previously-populated index written at an older schema than
 /// `INDEX_SCHEMA_VERSION`. Every read path (search, `location_for_ord`, grep) opens whatever

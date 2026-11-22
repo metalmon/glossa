@@ -27,9 +27,8 @@ globset = "0.4"
 # — read that test's diff, decide the new output is an improvement, then move this pin. A caret
 # bound would let `cargo update` walk onto an untested 0.1.18+ with no such decision.
 #
-# The INDEX_SCHEMA_VERSION bump this upgrade owes is NOT missing: it is owned by Task 9 of
-# `docs/superpowers/plans/2026-11-16-chart-ordinals-phase-a.md`, which bumps 7 -> 8 once for the
-# whole plan. The version stays at 7 on this branch on purpose.
+# The INDEX_SCHEMA_VERSION bump this upgrade owes is paid: schema 8 covers it, see the version
+# notes above the constant in `src/index/store.rs`.
 office_oxide = "=0.1.17"
 pdf_oxide = { version = "0.3.78", default-features = false, features = ["rendering", "legacy-crypto", "parallel"] }
 rdocx = "0.1"
