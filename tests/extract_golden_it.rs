@@ -64,6 +64,15 @@ const EXPECTED: &[(&str, &[&str])] = &[
         // "Series 2: ..." line, the de-duplication stopped firing and the chart is indexed
         // twice. The SmartArt lines ("Diagram node ...") belong in the body and must stay:
         // nothing of ours re-emits them.
+        //
+        // Caveat on what this row can witness, and it is the same one the odt rows carry: **it
+        // cannot witness chart placement, and the trailing chart chunk is not evidence that
+        // placement is broken.** This fixture has no heading and is far under the 4000-character
+        // threshold, so its whole body is ONE chunk — and "after the chunk containing the chart"
+        // and "at the end" are then the same position. The tests that demonstrate docx placement
+        // build a multi-chunk body over this fixture; they are in `src/extract/office.rs`
+        // (`a_docx_chart_lands_after_the_paragraph_that_contains_it` and
+        // `two_charts_in_one_docx_both_land_correctly`).
         "sample_chart_anchored.docx",
         &[
             "Sample\n\nglossa sample document used as a neutral test fixture.\n\nBody text that follows the chart.\n\nDiagram node alpha\n\nDiagram node beta\n\nBody text that follows the diagram.",

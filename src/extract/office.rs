@@ -1,4 +1,5 @@
-use crate::extract::office_chunk::chunk_ir;
+use crate::extract::chart_splice::{splice_charts_at_anchors, ChartAnchor};
+use crate::extract::office_chunk::chunk_ir_with_spans;
 use crate::extract::office_table::expand_merged_tables;
 use crate::extract::Extractor;
 use crate::model::Chunk;
@@ -375,10 +376,11 @@ fn hoisted_chart_run_occurrences(
 /// worse failure, and it is doubly so for SmartArt, whose text rides the same converter path with
 /// no chart chunk of ours to replace it; `collect_docx_chart_drawings` never collects it.
 ///
-/// Returns WHICH of those endings happened. Production ignores it, but naming the outcome is what
-/// makes each bound testable on its own: without it a test can only observe "both copies were
-/// kept", which every guard here produces, so a test meant to pin the comparison budget would go
-/// on passing if the budget were deleted and some other guard took over.
+/// Returns WHICH of those endings happened, and fills `anchors` with the position each removed
+/// chart's chunk should take — see the comment on the anchor pass below. The outcome is what makes
+/// each bound testable on its own: without it a test can only observe "both copies were kept",
+/// which every guard here produces, so a test meant to pin the comparison budget would go on
+/// passing if the budget were deleted and some other guard took over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DedupOutcome {
     /// `document.xml.rels` declares no chart relationship we could resolve.
@@ -406,6 +408,7 @@ fn drop_hoisted_docx_chart_text(
     bytes: &[u8],
     ir: &mut office_oxide::ir::DocumentIR,
     covered_chart_parts: &[String],
+    anchors: &mut HashMap<String, ChartAnchor>,
 ) -> DedupOutcome {
     let parts_by_rel_id = docx_chart_parts_by_rel_id(path, bytes);
     if parts_by_rel_id.is_empty() {
@@ -472,7 +475,7 @@ fn drop_hoisted_docx_chart_text(
     // we go would shift every later element once per chart. A group that cannot be resolved only
     // costs itself: the others are found independently, so one unmatchable chart never disables
     // the de-duplication for the rest of the document.
-    let mut to_remove: Vec<(usize, usize, usize)> = Vec::new();
+    let mut to_remove: Vec<(usize, usize, usize, String)> = Vec::new();
     let mut any_ambiguous = false;
     for (i, (lines, rel_ids)) in groups.iter().enumerate() {
         let Some(occurrences) =
@@ -501,7 +504,7 @@ fn drop_hoisted_docx_chart_text(
             let part = parts_by_rel_id.get(*rel_id);
             match part {
                 Some(part) if covered.contains(part.as_str()) => {
-                    to_remove.push((*section, *at, lines.len()));
+                    to_remove.push((*section, *at, lines.len(), part.clone()));
                 }
                 _ => {
                     tracing::warn!(
@@ -517,9 +520,8 @@ fn drop_hoisted_docx_chart_text(
     // Runs found for two different line sequences can in principle overlap (one sequence ending
     // where another begins is enough). Removing an overlapping pair would take out more than
     // either chart's text, so the whole file falls back to keeping both copies instead.
-    let mut spans: Vec<(usize, usize, usize)> = to_remove.clone();
-    spans.sort_unstable();
-    if spans
+    to_remove.sort_unstable_by_key(|&(section, at, ..)| (section, at));
+    if to_remove
         .windows(2)
         .any(|w| w[0].0 == w[1].0 && w[0].1 + w[0].2 > w[1].1)
     {
@@ -529,8 +531,45 @@ fn drop_hoisted_docx_chart_text(
         );
         return DedupOutcome::OverlappingRuns;
     }
+
+    // Where each removed chart's own chunk belongs, for the caller to splice it at: the element
+    // immediately BEFORE the run of hoisted lines. That element is the paragraph the drawing
+    // itself sits in — `collect_paragraph_chart_text` is called after the paragraph has been
+    // pushed, so a chart-only paragraph is in the IR as an empty one right ahead of its lines.
+    // Indices are into the IR the body chunks are built from, i.e. AFTER the removals below, so
+    // each run's start is shifted back by everything already removed from its section. The runs
+    // are sorted and non-overlapping, so that sum never exceeds the run's own start.
+    //
+    // Only charts identified HERE get an anchor; everything else — an unresolved relationship, a
+    // part our pass did not cover, an ambiguous run count, any of the bounds above — reaches the
+    // caller with none and appends at the end, as it did before interleaving existed. Two drawings
+    // naming one part also yield no anchor: one chunk cannot occupy two positions, and choosing
+    // one of them is the plausible-but-wrong placement this design refuses. So does a run with
+    // nothing in front of it, whose containing paragraph is not in the IR to point at.
+    let mut candidates: HashMap<String, Option<ChartAnchor>> = HashMap::new();
+    let mut run_section = usize::MAX;
+    let mut removed_before = 0usize;
+    for (section, at, len, part) in &to_remove {
+        let (section, at, len) = (*section, *at, *len);
+        if section != run_section {
+            run_section = section;
+            removed_before = 0;
+        }
+        let anchor = (at - removed_before).checked_sub(1).map(|el| (section, el));
+        candidates
+            .entry(part.clone())
+            .and_modify(|a| *a = None)
+            .or_insert(anchor);
+        removed_before += len;
+    }
+    anchors.extend(
+        candidates
+            .into_iter()
+            .filter_map(|(part, anchor)| anchor.map(|a| (part, a))),
+    );
+
     let mut by_section: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
-    for (section, at, len) in to_remove {
+    for (section, at, len, _) in to_remove {
         by_section.entry(section).or_default().push((at, len));
     }
     for (section, ranges) in by_section {
@@ -598,13 +637,45 @@ impl Extractor for OfficeExtractor {
                 }
             }
         }
+        // Where each chart part's own chunk belongs in the body flow. Filled for docx only: it is
+        // the one format whose charts we can locate (see `drop_hoisted_docx_chart_text`), and an
+        // empty map means every chart appends, which is what xlsx and pptx keep doing.
+        let mut chart_anchors: HashMap<String, ChartAnchor> = HashMap::new();
         if ext == "docx" {
             // The outcome is for the tests, which need to tell the guards apart; the warnings
             // inside already say everything a reader of the log needs.
-            drop_hoisted_docx_chart_text(path, bytes, &mut ir, &covered_chart_parts);
+            drop_hoisted_docx_chart_text(
+                path,
+                bytes,
+                &mut ir,
+                &covered_chart_parts,
+                &mut chart_anchors,
+            );
         }
-        let mut chunks = chunk_ir(path, &ir, &ext);
-        chunks.extend(chart_chunks);
+        let (chunks, spans) = chunk_ir_with_spans(path, &ir, &ext);
+        // The chart chunks themselves are built exactly as before — same title, same text, same
+        // `Location`. Only where they land is new, and only for a chart whose paragraphs the
+        // de-duplication positively identified.
+        //
+        // `extract_charts_with_coverage` pushes a chunk and its part name together, so entry i of
+        // each describes the same chart. Equal lengths is what makes that binding true; were it
+        // ever to stop holding, nothing is paired rather than paired wrongly — a chart at the
+        // wrong position reads as a precise citation and is false.
+        let parts: &[String] = if chart_chunks.len() == covered_chart_parts.len() {
+            &covered_chart_parts
+        } else {
+            &[]
+        };
+        let mut anchored: Vec<(ChartAnchor, Chunk)> = Vec::new();
+        let mut unanchored: Vec<Chunk> = Vec::new();
+        for (i, chart) in chart_chunks.into_iter().enumerate() {
+            match parts.get(i).and_then(|part| chart_anchors.get(part)) {
+                Some(&anchor) => anchored.push((anchor, chart)),
+                None => unanchored.push(chart),
+            }
+        }
+        let mut chunks = splice_charts_at_anchors(chunks, &spans, anchored);
+        chunks.extend(unanchored);
         if chunks.is_empty() {
             // "Parsed fine, produced nothing" is the failure that hides. An error is listed in the
             // run summary and retried on the next pass; `Ok(vec![])` enters the manifest as
@@ -805,6 +876,13 @@ mod tests {
 
     /// Rewrite one part of a zip package, leaving every other entry byte-identical.
     fn repack_with(package: &[u8], part: &str, replacement: &[u8]) -> Vec<u8> {
+        repack_parts(package, &[(part, replacement)])
+    }
+
+    /// Rewrite — or add — several parts of a zip package at once, leaving every other entry
+    /// byte-identical. Adding is what the two-chart test needs: a second chart part and a second
+    /// relationship pointing at it, over the committed one-chart fixture.
+    fn repack_parts(package: &[u8], parts: &[(&str, &[u8])]) -> Vec<u8> {
         use std::io::{Read as _, Write as _};
         let mut zr = zip::ZipArchive::new(Cursor::new(package.to_vec())).unwrap();
         let names: Vec<String> = zr
@@ -816,16 +894,22 @@ mod tests {
         {
             let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
             let opts = zip::write::SimpleFileOptions::default();
-            for name in names {
+            for name in &names {
                 let mut bytes = Vec::new();
-                zr.by_name(&name).unwrap().read_to_end(&mut bytes).unwrap();
-                zw.start_file(&name, opts).unwrap();
-                zw.write_all(if name == part {
-                    replacement
-                } else {
-                    bytes.as_slice()
-                })
-                .unwrap();
+                zr.by_name(name).unwrap().read_to_end(&mut bytes).unwrap();
+                zw.start_file(name, opts).unwrap();
+                let replacement = parts
+                    .iter()
+                    .find(|(p, _)| *p == name.as_str())
+                    .map(|(_, b)| *b);
+                zw.write_all(replacement.unwrap_or(bytes.as_slice()))
+                    .unwrap();
+            }
+            for (part, bytes) in parts {
+                if !names.iter().any(|n| n.as_str() == *part) {
+                    zw.start_file(*part, opts).unwrap();
+                    zw.write_all(bytes).unwrap();
+                }
             }
             zw.finish().unwrap();
         }
@@ -863,7 +947,7 @@ mod tests {
         expand_merged_tables(&mut ir);
         let (_, covered) =
             crate::extract::ooxml_chart::extract_charts_with_coverage(path, bytes, "docx");
-        drop_hoisted_docx_chart_text(path, bytes, &mut ir, &covered)
+        drop_hoisted_docx_chart_text(path, bytes, &mut ir, &covered, &mut HashMap::new())
     }
 
     /// A chart part whose recovered text is exactly one `Series: <name>` line per name, in order:
@@ -977,6 +1061,190 @@ mod tests {
                 "Chart: Sales by quarter (barChart)\n\n|  | Series 1 | Series 2 |\n| --- | --- | --- |\n| Q1 | 4.3 | 2.4 |\n| Q2 | 2.5 | 4.4 |\n| Q3 | 3.5 | 3.5 |",
             ],
         );
+    }
+
+    /// A level-1 heading paragraph, which is what forces `chunk_ir` to start a new chunk. The
+    /// outline level is given directly rather than through a `Heading1` style, because
+    /// `office_oxide` resolves a style id against `word/styles.xml` and these test packages have
+    /// none — a bare `w:pStyle` would silently produce an ordinary paragraph and a one-chunk
+    /// document, which is exactly the test that cannot fail.
+    fn heading(text: &str) -> String {
+        format!(
+            "<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/><w:outlineLvl w:val=\"0\"/></w:pPr>\
+             <w:r><w:t>{text}</w:t></w:r></w:p>"
+        )
+    }
+
+    /// The index of the one chunk whose text contains `needle`.
+    fn chunk_holding(chunks: &[Chunk], needle: &str) -> usize {
+        let hits: Vec<usize> = chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.text.contains(needle))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "expected exactly one chunk containing {needle:?}, got {hits:?} in {:?}",
+            chunks.iter().map(|c| &c.text).collect::<Vec<_>>()
+        );
+        hits[0]
+    }
+
+    /// A chart chunk takes its own ordinal position, after the chunk holding the paragraph the
+    /// chart is anchored in, instead of being appended after all the body text.
+    ///
+    /// **Why this test rebuilds the fixture's body.** Chunk boundaries come only from a heading or
+    /// an empty paragraph past the 4000-character threshold, so `sample_chart_anchored.docx` as
+    /// committed is ONE chunk — and in a one-chunk document "after the containing chunk" and "at
+    /// the end" are the same position, which makes such a test green whether this feature works or
+    /// not. The heading below is what gives the document a chunk AFTER the chart, and the two
+    /// assertions pin both bounds: the chart follows the body chunk, and the tail chunk follows the
+    /// chart. Revert the splice and the chart lands last, which fails the first assertion.
+    #[test]
+    fn a_docx_chart_lands_after_the_paragraph_that_contains_it() {
+        let (open, drawing) = anchored_chart_drawing();
+        let body = format!(
+            "{open}<w:body>\
+             <w:p><w:r><w:t>glossa sample document used as a neutral test fixture.</w:t></w:r></w:p>\
+             <w:p><w:r>{drawing}</w:r></w:p>\
+             <w:p><w:r><w:t>Body text that follows the chart.</w:t></w:r></w:p>\
+             {}\
+             <w:p><w:r><w:t>Tail text after the heading.</w:t></w:r></w:p>\
+             <w:sectPr/></w:body></w:document>",
+            heading("Later section")
+        );
+
+        let buf = anchored_fixture_with("word/document.xml", body.as_bytes());
+        let chunks = OfficeExtractor
+            .extract(Path::new("anchored.docx"), &buf)
+            .unwrap();
+        let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(
+            chunks.len(),
+            3,
+            "expected body, chart, tail — got {texts:?}"
+        );
+
+        let body_at = chunk_holding(&chunks, "Body text that follows the chart.");
+        let chart_at = chunk_holding(&chunks, "Chart: Sales by quarter");
+        let tail_at = chunk_holding(&chunks, "Tail text after the heading.");
+        assert_eq!(body_at, 0, "{texts:?}");
+        assert_eq!(
+            chart_at,
+            body_at + 1,
+            "the chart must follow its own body chunk, not the document: {texts:?}"
+        );
+        assert_eq!(
+            tail_at,
+            chart_at + 1,
+            "the chart must come BEFORE the later chunk: {texts:?}"
+        );
+    }
+
+    /// A second chart in a second chunk, which is where a splice that resolves as it goes fails:
+    /// inserting the first chart shifts every later chunk index by one, so the second lands a
+    /// chunk early. Built over the committed fixture with a second chart part and a second
+    /// relationship added, rather than as a second near-identical fixture.
+    ///
+    /// Same revert bar as the test above, twice over: each chart is pinned both to the chunk it
+    /// follows and to the chunk that follows it, so appending either one fails.
+    #[test]
+    fn two_charts_in_one_docx_both_land_correctly() {
+        const COSTS_CHART: &[u8] = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>Costs by quarter</a:t></a:r></a:p></c:rich></c:tx></c:title>
+<c:plotArea><c:lineChart>
+<c:ser><c:tx><c:v>Series 9</c:v></c:tx>
+<c:cat><c:strRef><c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt></c:strCache></c:strRef></c:cat>
+<c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>7.7</c:v></c:pt></c:numCache></c:numRef></c:val>
+</c:ser></c:lineChart></c:plotArea></c:chart></c:chartSpace>"#;
+        const RELS: &[u8] = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId10" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="charts/chart1.xml"/><Relationship Id="rId12" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="charts/chart2.xml"/></Relationships>"#;
+        // The second chart part has to be declared too, or the package is not a valid docx.
+        const TYPES: &[u8] = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/><Override PartName="/word/charts/chart2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>"#;
+
+        let (open, drawing) = anchored_chart_drawing();
+        let second = drawing.replace("rId10", "rId12");
+        let body = format!(
+            "{open}<w:body>\
+             <w:p><w:r><w:t>glossa sample document used as a neutral test fixture.</w:t></w:r></w:p>\
+             <w:p><w:r>{drawing}</w:r></w:p>\
+             {}\
+             <w:p><w:r><w:t>Middle body text.</w:t></w:r></w:p>\
+             <w:p><w:r>{second}</w:r></w:p>\
+             {}\
+             <w:p><w:r><w:t>Tail body text.</w:t></w:r></w:p>\
+             <w:sectPr/></w:body></w:document>",
+            heading("Second section"),
+            heading("Third section")
+        );
+
+        let buf = repack_parts(
+            include_bytes!("../../tests/fixtures/sample_chart_anchored.docx"),
+            &[
+                ("word/document.xml", body.as_bytes()),
+                ("word/_rels/document.xml.rels", RELS),
+                ("word/charts/chart2.xml", COSTS_CHART),
+                ("[Content_Types].xml", TYPES),
+            ],
+        );
+        let chunks = OfficeExtractor
+            .extract(Path::new("two_charts.docx"), &buf)
+            .unwrap();
+        let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(
+            chunks.len(),
+            5,
+            "expected three body chunks and two charts — got {texts:?}"
+        );
+
+        let first_body = chunk_holding(&chunks, "glossa sample document");
+        let sales = chunk_holding(&chunks, "Chart: Sales by quarter");
+        let middle = chunk_holding(&chunks, "Middle body text.");
+        let costs = chunk_holding(&chunks, "Costs by quarter");
+        let tail = chunk_holding(&chunks, "Tail body text.");
+        assert_eq!(sales, first_body + 1, "{texts:?}");
+        assert_eq!(middle, sales + 1, "{texts:?}");
+        assert_eq!(costs, middle + 1, "{texts:?}");
+        assert_eq!(tail, costs + 1, "{texts:?}");
+    }
+
+    /// The guarantee for the overwhelming majority of files: a document with no chart anchor gets
+    /// the chunk sequence it got before interleaving existed, byte for byte. `sample_chart.docx`
+    /// is the sharper of the three — it HAS a chart part, so a chart chunk is built, but nothing
+    /// in its body points at one, so there is no anchor and the chart appends exactly as before.
+    #[test]
+    fn a_chartless_docx_chunks_exactly_as_before() {
+        for (name, bytes, expected) in [
+            (
+                "sample.docx",
+                include_bytes!("../../tests/fixtures/sample.docx").as_slice(),
+                vec!["Sample\n\nglossa sample document used as a neutral test fixture."],
+            ),
+            (
+                "sample_table.docx",
+                include_bytes!("../../tests/fixtures/sample_table.docx").as_slice(),
+                vec!["| H1 | H2 |\n| --- | --- |\n| R1 | R2 |"],
+            ),
+            (
+                "sample_chart.docx",
+                include_bytes!("../../tests/fixtures/sample_chart.docx").as_slice(),
+                vec![
+                    "Sample\n\nglossa sample document used as a neutral test fixture.",
+                    "Chart: Sales by quarter (barChart)\n\n|  | Series 1 | Series 2 |\n| --- | --- | --- |\n| Q1 | 4.3 | 2.4 |\n| Q2 | 2.5 | 4.4 |\n| Q3 | 3.5 | 3.5 |",
+                ],
+            ),
+        ] {
+            let chunks = OfficeExtractor.extract(Path::new(name), bytes).unwrap();
+            assert_eq!(
+                chunks.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+                expected,
+                "{name} chunked differently than before interleaving"
+            );
+        }
     }
 
     /// The worse failure mode, pinned. 0.1.17 routes a SmartArt diagram's text through the same
