@@ -95,38 +95,33 @@ const EXPECTED: &[(&str, &[&str])] = &[
         &["| glossa sample xlsb |  |\n| --- | --- |\n| Sensor | Limit |\n| inlet pressure | 42 |\n| outlet pressure | 97 |"],
     ),
     (
-        // PRE-FIX STATE, pinned deliberately. This row records the **pptx chart duplication
-        // defect**, not desired output: the chart's title and its cached values ("Deck chart
-        // title", 77.7 / 88.8 / 99.9) appear TWICE below — once as `office_oxide`'s flat hoisted
-        // lines inside the slide's body chunk (`convert_pptx.rs:538`, `GraphicContent::Text`) and
-        // once in our own structured `Chart:` chunk (`ooxml_chart`, whose `chart_names_for`
-        // covers pptx). The de-duplication in `src/extract/office.rs::extract` is gated
-        // `ext == "xlsx"` and `ext == "docx"`, so pptx gets none.
+        // ONE chunk, deliberately: pptx charts are left to `office_oxide`'s flat hoisted copy.
+        // `convert_pptx.rs:538` (`GraphicContent::Text`) already lifts a referenced chart's whole
+        // content into the slide's own flow — the `Title: …` / `Categories: …` / `Readings: …`
+        // lines below carry the title, every category and every cached value — so our own
+        // `ooxml_chart` pass over pptx only indexed the same numbers a second time. It no longer
+        // runs for pptx (`chart_names_for` = `docx | xlsx`), which cost this row the structured
+        // `Chart: Deck chart title (barChart)` chunk it used to carry alongside this one. No data
+        // went with it, only the markdown table and a separately-citable chunk address; the
+        // alternative was a dependency patch to tell a chart's hoisted text from a SmartArt
+        // diagram's, and that table in one of six formats did not earn it.
         //
-        // Task 10 of the chart-ordinals plan established this and deliberately stopped there; the
-        // fix is a separate decision (see that plan's "Still open"). Whoever fixes it should
-        // expect this row to move, and should read the move as the point of the change rather
-        // than as a regression.
+        // So the flat form is the format's ceiling here: no table structure, and no chart chunk of
+        // ours to take the slide position the `p:graphicFrame` gives it.
         //
-        // The hoisted copy also shows what this format cannot do yet: it is a flat
-        // `Title: …` / `Readings: …` blob with no table structure, and the chart chunk appends at
-        // the end (its location is the bare label `Deck chart title`) rather than taking the
-        // slide position the `p:graphicFrame` gives it.
-        //
-        // Caveat on the ORDER of the first chunk, and it is a property of the fixture, not of the
+        // Caveat on the ORDER of this chunk, and it is a property of the fixture, not of the
         // format: all three of its body text shapes carry the same `<a:off y="365125">`, so the
         // converter groups them ahead of both graphics. **This row therefore says nothing about
         // where hoisted chart text lands relative to the body**, and "…follows the chart." sitting
         // before `Title: …` is not evidence that the position was lost. A later task that wants to
         // witness pptx placement needs distinct y offsets on those shapes first.
         //
-        // What the row DOES witness: no text is lost (all six body strings and both SmartArt
-        // nodes are present — the diagram's words have no chunk of ours to replace them), and the
-        // chart's numbers appear twice.
+        // What the row DOES witness: no text was lost with the duplicate — all six body strings
+        // and both SmartArt nodes are still here, and the diagram's words matter most, since they
+        // ride the same converter path and have no chunk of ours to replace them.
         "sample_chart.pptx",
         &[
             "glossa sample slide\n\nSlide body text that precedes the chart.\n\nSlide body text that follows the chart.\n\nSlide body text that follows the diagram.\n\nTitle: Deck chart title\n\nCategories: Left, Middle, Right\n\nReadings: 77.7, 88.8, 99.9\n\nDeck diagram node one\n\nDeck diagram node two",
-            "Chart: Deck chart title (barChart)\n\n|  | Readings |\n| --- | --- |\n| Left | 77.7 |\n| Middle | 88.8 |\n| Right | 99.9 |",
         ],
     ),
     ("sample_legacy.doc", &["# glossa sample legacy doc"]),

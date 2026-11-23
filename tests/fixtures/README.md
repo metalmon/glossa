@@ -90,13 +90,15 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
   is why the diagram is here: it is the guard any de-duplication must not eat, since a diagram has
   no chart chunk of ours to replace it. The chart's title ("Deck chart title"), its series name
   ("Readings") and its values (77.7 / 88.8 / 99.9) appear nowhere in the slide's body text, so a
-  test can count how many times the chart's data reached the index. It reaches it **twice today**
-  — the pptx duplication defect that `src/extract/office.rs`'s xlsx- and docx-gated
-  de-duplication does not cover. Pure ASCII, built by an untracked scratchpad script.
+  test can count how many times the chart's data reached the index. It reaches it **exactly once**
+  — the hoisted copy. Our own `ooxml_chart` pass used to index it a second time; it no longer runs
+  for pptx (`chart_names_for` = `docx | xlsx`), which is what this fixture now guards
+  (`pptx_chart_text_is_indexed_exactly_once`). Pure ASCII, built by an untracked scratchpad script.
   One limit to know before reusing it: its three body text shapes all carry the same
   `<a:off y="365125">`, so the converter groups them ahead of both graphics and the emitted chunk
-  does **not** read in slide order. That is fine for counting duplication, which is what this
-  fixture exists for, but a task that wants to witness pptx chart *placement* must give those
+  does **not** read in slide order. That is fine for counting how often the chart's data reaches
+  the index, which is what this fixture exists for, but a task that wants to witness pptx chart
+  *placement* must give those
   shapes distinct y offsets first.
 - `sample_chart_legacy.rtf` — hand-built RTF (pure ASCII, 6.4 KB) carrying an OLE1-embedded
   legacy `MSGraph.Chart.8` object: `{\*\objdata <hex>}` → OLE1 native header → compound file →

@@ -183,8 +183,24 @@ pub(crate) fn chart_to_table(cd: &ChartData) -> Table {
     }
 }
 
+/// Which OOXML formats get our own chart pass. The gate at the top of
+/// [`extract_charts_with_coverage`] is its only use.
+///
+/// **`pptx` is deliberately absent — do not add it back.** `office_oxide`'s
+/// `convert_pptx.rs` already hoists a referenced chart's full text into the slide's own flow:
+/// the title, the categories and every cached value, as flat `Title: …` / `Categories: …` /
+/// `Readings: …` lines. Running our pass over pptx as well therefore indexed the same chart's
+/// data twice — once flat in the slide's body chunk, once as our structured `Chart:` chunk.
+///
+/// Both copies carry the whole content, so dropping ours loses no data: only the markdown-table
+/// presentation and the separate chunk address. Keeping ours instead would mean de-duplicating
+/// the hoisted copy, which pptx cannot do — `GraphicContent::Text` is one variant over chart,
+/// SmartArt and unknown, so a consumer cannot tell a chart's hoisted text from a diagram's, and
+/// matching on values would eat the diagram's words. The remaining route was a dependency patch
+/// to tell them apart, and the owner judged a table in one of six formats not worth carrying it.
+/// `pptx_chart_text_is_indexed_exactly_once` in `office.rs` is the guard.
 fn chart_names_for(ext: &str) -> bool {
-    matches!(ext, "docx" | "xlsx" | "pptx")
+    matches!(ext, "docx" | "xlsx")
 }
 
 /// Scan the OOXML zip for `*/charts/chart*.xml` parts and render each into a

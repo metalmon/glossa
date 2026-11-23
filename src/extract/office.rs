@@ -651,7 +651,8 @@ impl Extractor for OfficeExtractor {
         }
         // Where each chart part's own chunk belongs in the body flow. Filled for docx only: it is
         // the one format whose charts we can locate (see `drop_hoisted_docx_chart_text`), and an
-        // empty map means every chart appends, which is what xlsx and pptx keep doing.
+        // empty map means every chart appends, which is what xlsx keeps doing. pptx has no chart
+        // chunk of ours to place at all (see `ooxml_chart::chart_names_for`).
         let mut chart_anchors: HashMap<String, ChartAnchor> = HashMap::new();
         if ext == "docx" {
             // The outcome is for the tests, which need to tell the guards apart; the warnings
@@ -1601,34 +1602,29 @@ mod tests {
         assert!(joined.contains("glossa sample"), "got:\n{joined}");
     }
 
-    /// PINNED DEFECT, not desired behaviour: **pptx chart text is indexed twice today.**
+    /// The guard against the pptx chart duplication coming back: **a pptx chart's data reaches
+    /// the index exactly once.**
     ///
-    /// pptx has the same shape as the two formats above with neither of their de-duplications:
-    /// `office_oxide` 0.1.17 hoists a referenced chart's text into the slide flow
-    /// (`convert_pptx.rs:538`, `GraphicContent::Text`), our `ooxml_chart` pass also covers pptx
-    /// (`chart_names_for` = `docx | xlsx | pptx`), and the de-duplication in `extract` is gated
-    /// `ext == "xlsx"` / `ext == "docx"` — so nothing drops either copy.
-    ///
-    /// Measured on CI run 45159886445 (the red run this assertion was harvested from), where the
-    /// same assertion written as `== 1` failed with `left: 2, right: 1`. The two copies are:
-    ///
-    /// 1. the slide's body chunk, which ends `… Title: Deck chart title` / `Categories: Left,
-    ///    Middle, Right` / `Readings: 77.7, 88.8, 99.9` — `office_oxide`'s flat hoisted form; and
-    /// 2. our own `Chart: Deck chart title (barChart)` chunk, which carries the same numbers as
-    ///    a GFM table.
+    /// pptx needs no de-duplication of ours because it runs no chart pass of ours:
+    /// `office_oxide` 0.1.17 already hoists a referenced chart's full text into the slide flow
+    /// (`convert_pptx.rs:538`, `GraphicContent::Text`), so `chart_names_for` in `ooxml_chart.rs`
+    /// covers only `docx | xlsx` and the comment there says why. Before that, both paths ran and
+    /// the chart's numbers were indexed twice.
     ///
     /// "77.7" is a cached value of this fixture's only chart series and appears nowhere in the
     /// slide's body text, so each occurrence is one path that put the chart's numbers in the
-    /// index. It is asserted as `2` rather than `#[ignore]`d on purpose: an ignored test says
-    /// nothing, while this one keeps reporting the defect and reds the moment the duplication
-    /// stops — including by accident.
+    /// index. The two shapes it has ever appeared in, so a future reader can tell which one
+    /// regressed:
     ///
-    /// **The task that fixes pptx de-duplication owns inverting this to `1` and renaming it.**
-    /// Task 10 of the chart-ordinals plan established the defect and deliberately stopped there;
-    /// whether the fix is consumer-side or needs a library change is recorded in that plan's
-    /// "Still open" section.
+    /// 1. `… Title: Deck chart title` / `Categories: Left, Middle, Right` / `Readings: 77.7,
+    ///    88.8, 99.9` inside the slide's body chunk — `office_oxide`'s flat hoisted form, the
+    ///    one copy we keep. If the count drops to `0`, this is what went missing, and that is
+    ///    lost content rather than lost presentation.
+    /// 2. `Chart: Deck chart title (barChart)` plus a GFM table — our own structured chunk. If
+    ///    the count rises to `2`, `"pptx"` is back in `chart_names_for` and the duplication with
+    ///    it; read that function's comment before deciding it belongs there.
     #[test]
-    fn pptx_chart_text_is_duplicated_today() {
+    fn pptx_chart_text_is_indexed_exactly_once() {
         let bytes = include_bytes!("../../tests/fixtures/sample_chart.pptx");
         let chunks = OfficeExtractor
             .extract(Path::new("sample_chart.pptx"), bytes)
@@ -1636,31 +1632,31 @@ mod tests {
         let text = joined(&chunks);
         assert_eq!(
             text.matches("77.7").count(),
-            2,
-            "the pptx chart duplication changed shape — read the chunks before updating this \
-             count, and if the duplication is gone, invert this test rather than retuning it; \
-             chunks were:\n{chunks:#?}"
+            1,
+            "a pptx chart's data must reach the index exactly once — read the chunks before \
+             retuning this count; chunks were:\n{chunks:#?}"
         );
-        // Both shapes, named: the flat hoisted copy inside the body chunk, and ours.
+        // The copy we keep, named: office_oxide's flat hoisted lines in the slide's body chunk.
         assert!(
             chunks
                 .iter()
                 .any(|c| c.text.contains("Readings: 77.7, 88.8, 99.9")),
             "expected office_oxide's flat hoisted chart line, got: {chunks:#?}"
         );
+        // And no chart chunk of ours alongside it.
         assert!(
-            chunks
+            !chunks
                 .iter()
                 .any(|c| c.text.starts_with("Chart: Deck chart title")),
-            "expected our own structured chart chunk, got: {chunks:#?}"
+            "our own pptx chart pass is back, and with it the duplication: {chunks:#?}"
         );
     }
 
-    /// The guard that outranks the de-duplication, and the reason a value-matching fix is
+    /// The guard that outranks the de-duplication, and the reason a value-matching fix was
     /// forbidden: the slide's own body text and the SmartArt diagram's node text ride the same
     /// converter path as the chart's text, and nothing of ours re-emits them. A fix that ate
-    /// them would lose text outright, which is worse than duplicating it. True today; it must
-    /// stay true after any fix.
+    /// them would lose text outright, which is worse than duplicating it. This is what says the
+    /// fix dropped a duplicate and not content, and it must stay true.
     #[test]
     fn pptx_body_and_diagram_text_reach_the_index() {
         let bytes = include_bytes!("../../tests/fixtures/sample_chart.pptx");
