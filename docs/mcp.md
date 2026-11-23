@@ -35,8 +35,8 @@ Original-file delivery (`get_source_file`) is likewise **off by default** and op
 | `search` | ✓ | ✓ | ✓ | BM25 keyword search; returns `[#n] path · snippet` |
 | `grep` | ✓ | ✓ | ✓ | Regex/literal over extracted text |
 | `glob` | ✓ | ✓ | ✓ | List documents by path glob |
-| `read` | ✓ | ✓ | ✓ | Read chunk `#n`, graph node evidence, or a notebook note (path from `ls`). Image output is off unless the server was started with `--vision`; then `page_image: true` returns PDF page `n` as a 200 DPI JPEG for vision models, and embedded/`<img>` images are returned alongside the text (all as JPEG). Without `--vision`, the image params are removed from the schema and responses are text only |
-| `get_source_file` | ✓† | ✓† | ✓† | Deliver the original source file behind a citation (`path`, PDF page `n`) as an embedded resource blob for the client to preview/download — for source attribution, not reading. Whole file when ≤ cap (default 10 MB); a larger PDF returns just the cited page as its own PDF. **† Off by default; opt in with `--source-file`** |
+| `read` | ✓ | ✓ | ✓ | Read chunk `#n`, graph node evidence, or a notebook note (path from `ls`). Image output is off unless the server was started with `--vision`; then `page_image: true` returns PDF page `n` as a 200 DPI JPEG for vision models, and embedded/`<img>` images are returned alongside the text (all as JPEG). Without `--vision`, the image params are removed from the schema and responses are text only. A `page_image` call on a PDF page that will not render answers with **`isError: true`** — and carries the chunk's text in that same response, since the text comes from the index rather than the file (see [Failures vs non-applicable](#failures-vs-non-applicable)) |
+| `get_source_file` | ✓† | ✓† | ✓† | Deliver the original source file behind a citation (`path`, PDF page `n`) as an embedded resource blob for the client to preview/download — for source attribution, not reading. Whole file when ≤ cap (default 10 MB); a larger PDF returns just the cited page as its own PDF. A file the index has and the disk cannot produce answers with **`isError: true`** (see [Failures vs non-applicable](#failures-vs-non-applicable)). **† Off by default; opt in with `--source-file`** |
 | `glossary` | ✓ | ✓ | ✓ | Resolve concept → reasoning chain + anchors. Pass `query` (the full question) to rank the composed neighborhood by what the question actually needs |
 | `reach` | ✓ | ✓ | ✓ | Cross-document reasoning bridge — walk a relation from a node (discovery), or add a candidate to verify the connection. Replaces the old `path` tool (`bridge: false` = in-document connectivity only) |
 | `sql` | ✓ | ✓ | ✓ | Read-only SQL SELECT over the reasoning graph — for a ranking or extreme ('which / earliest / largest / first'). Call with an empty query to get the schema and this graph's real edge/node vocabulary |
@@ -62,6 +62,37 @@ Original-file delivery (`get_source_file`) is likewise **off by default** and op
 Source of truth: [`src/mcp.rs`](../src/mcp.rs).
 
 \* Only available when built with `cargo build --features constraint`. Without it, these tools are absent from the tool list.
+
+## Failures vs non-applicable
+
+A tool that **failed** answers with `isError: true`; a tool that simply **does not apply** answers
+normally. The distinction matters because a failure returned as ordinary content is
+indistinguishable from an answer, and a weak reader will relay the note to the user as one.
+
+`isError: true` — the file or the index could not produce what was asked for, and rephrasing the
+call will not help:
+
+- `read(page_image: true)` on a PDF page that will not render (the file moved, was truncated, or
+  the renderer cannot draw it). **The response also carries the chunk's text**, because the text
+  comes from the index rather than from the file: the agent still gets what it asked to read and
+  knows the image did not come. For a document the renderer can never draw, every page errors on
+  every call — the text is what keeps it readable.
+- `get_source_file` on a file the index has and the disk will not read. No fallback here: the file
+  *is* the output, so the response is the error note alone.
+- A tantivy search or chunk-range lookup that returns an error.
+
+Ordinary (successful) content — the tool does not apply, or the call can be corrected:
+
+- `page_image` on a non-PDF or on a graph node: there is no page image to give.
+- An out-of-range chunk number: `read` clamps to the valid range and says so in the response.
+- A path that does not resolve: the reply carries did-you-mean hints.
+- A reasoning node passed to `get_source_file`: it backs evidence in several documents, not one
+  file, and the reply says to pass a document path instead.
+- An over-cap file: the reply asks for a specific PDF page.
+- A corpus started without `--source-file`: the tool is absent from the advertised list, so no
+  call reaches it at all.
+
+The message text of each case is stable; `isError` is the part that tells failure from value.
 
 ## Typical agent workflow
 

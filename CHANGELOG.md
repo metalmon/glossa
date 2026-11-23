@@ -4,6 +4,31 @@ All notable changes to glossa are documented here. Release tags ship **`kb`**, *
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **A file-backed tool failure now reports as a tool error, not as content.** `read(page_image:
+  true)` and `get_source_file` used to answer an unreachable or unrenderable file with an ordinary
+  content string (`page_image: failed to render <path>#<n>`, `source file for <path> is not
+  readable on disk …`). An agent cannot tell that apart from an answer, and a weak reader relays
+  the note to the user as if it were one. Both now set `isError` on the response. An index read
+  that fails (a tantivy search or range lookup returning an error) is classified the same way.
+
+  **The message text is unchanged**, so a client matching on it still matches. What changed is the
+  `isError` flag on responses that previously said `false`.
+
+  A `page_image` failure carries the chunk's text alongside the error: the body comes from the
+  index, not from the file that would not render, so the agent still gets what it asked to read
+  and knows the image did not come. `get_source_file` has no fallback — the file *is* its output —
+  so it errors with the note alone.
+
+  What deliberately stays successful content, because each case tells the agent how to ask again
+  and succeed: `page_image` on a non-PDF or a graph node (the tool does not apply), an out-of-range
+  chunk number (it clamps), a mangled path (did-you-mean hints), a reasoning node passed to
+  `get_source_file`, and an over-cap file that wants a specific page. A corpus started without
+  `--source-file` continues to signal "not applicable" by withholding the tool entirely.
+
 ## [0.5.9] — 2026-11-11
 
 ### Added

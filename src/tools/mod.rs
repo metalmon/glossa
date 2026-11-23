@@ -373,9 +373,21 @@ fn resolve_node_handle(
 /// An index failure while collecting a node's evidence is reported, not absorbed — see the comment
 /// in [`gather_mentions`] for why a thin-but-confident evidence set is the worst outcome.
 fn evidence_error(e: anyhow::Error) -> ReadOut {
+    read_failure(format!("read error: {e}"))
+}
+
+/// A read the INDEX could not perform — a tantivy search or range lookup that returned `Err`.
+///
+/// Broken, by the same line `get_source_file` draws: the guidance arms tell the agent how to ask
+/// again and succeed (a clamped ordinal, a mangled path with did-you-mean hints), while this one
+/// says the store itself failed and no rephrasing helps. Returned as content it reads exactly like
+/// an answer — the failure mode [`gather_mentions`] already names, where a thin-but-confident
+/// result is the worst of the three outcomes. The text is unchanged; only the flag is new.
+fn read_failure(text: String) -> ReadOut {
     ReadOut {
-        text: format!("read error: {e}"),
-        ..Default::default()
+        text,
+        images: Vec::new(),
+        error: true,
     }
 }
 
@@ -642,18 +654,12 @@ pub fn read(
                 }
             },
             Err(e) => {
-                return ReadOut {
-                    text: format!("no chunk #{n} in {path} (range lookup failed: {e})"),
-                    ..Default::default()
-                }
+                return read_failure(format!(
+                    "no chunk #{n} in {path} (range lookup failed: {e})"
+                ))
             }
         },
-        Err(e) => {
-            return ReadOut {
-                text: format!("read error: {e}"),
-                ..Default::default()
-            }
-        }
+        Err(e) => return read_failure(format!("read error: {e}")),
     };
     let path = path.as_str();
     trace.log("read", json!({"path": path, "n": n}), json!({"path": path}));
@@ -677,6 +683,12 @@ pub fn read(
         // The ext check above has already answered "no page image applies here". Reaching this
         // point means the document IS a PDF and its page still would not render — the file moved,
         // was truncated, or the renderer choked. That is a failure, and it goes back as one.
+        //
+        // For some PDFs this is a STANDING state, not a one-off: `render_pdf_page` folds a
+        // `render_page` Err into `Ok(None)`, so a document whose text extracts fine but whose
+        // content stream the renderer cannot draw errors on every page, on every call, for as long
+        // as it is indexed. That is the honest answer — the image genuinely never comes — and the
+        // chunk text below is what keeps such a document readable rather than merely broken.
         //
         // It carries the chunk text anyway: the body comes from the index, not from the missing
         // file, so we HAVE what the agent asked to read and dropping it bought nothing. The agent
@@ -2488,6 +2500,44 @@ mod tests {
         assert!(out.file.is_none());
         assert!(out.error, "an unreachable source file is a tool error");
         assert!(out.text.contains("not readable on disk"), "{}", out.text);
+    }
+
+    /// An index read that failed is broken, not a value — the same classification the file-backed
+    /// failures get. `evidence_error` is the node-evidence site (`gather_mentions` returning Err);
+    /// `read_failure` is the classifier the two in-line index arms of `read` return through (a
+    /// range lookup and a chunk read that came back Err), neither of which can be staged portably
+    /// without corrupting a live tantivy index.
+    #[test]
+    fn an_index_read_failure_is_a_tool_error_not_an_answer() {
+        let out = evidence_error(anyhow::anyhow!("searcher unavailable"));
+        assert!(out.error, "{}", out.text);
+        assert_eq!(out.text, "read error: searcher unavailable");
+        assert!(out.images.is_empty());
+
+        let out = read_failure("no chunk #3 in a.pdf (range lookup failed: io)".into());
+        assert!(out.error, "{}", out.text);
+        assert_eq!(out.text, "no chunk #3 in a.pdf (range lookup failed: io)");
+    }
+
+    /// The tolerant arms are NOT failures: an out-of-range ordinal clamps and a mangled path gets
+    /// did-you-mean hints, both deliberately recoverable in-band. Erroring there is what makes a
+    /// small model loop, so the new flag must not leak onto them.
+    #[test]
+    fn the_tolerant_read_arms_stay_content_not_errors() {
+        let (d, i) = pdf_corpus();
+        let t = TraceLog::disabled();
+
+        let clamped = read(d.path(), &i, None, "sample.pdf", 99, false, &t);
+        assert!(clamped.text.contains("out of range"), "{}", clamped.text);
+        assert!(!clamped.error, "a clamp is a value, not a failure");
+
+        let unknown = read(d.path(), &i, None, "nope.pdf", 1, false, &t);
+        assert!(
+            unknown.text.contains("no document indexed"),
+            "{}",
+            unknown.text
+        );
+        assert!(!unknown.error, "a wrong path is guidance, not a failure");
     }
 
     /// The guidance arms stay successful content: each one tells the agent how to ask again.
