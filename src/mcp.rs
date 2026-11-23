@@ -1501,6 +1501,11 @@ fn read_common(
 ) -> CallToolResult {
     let mut out = crate::tools::read(root, idx, g, path, n, page_image, trace);
     out.text = wrap_text(out.text);
+    // A file-backed failure (a PDF page that would not render) goes back with `isError`, never as
+    // plain content: content is indistinguishable from an answer, and a weak reader quotes the
+    // failure note to the user as one. The chunk text rides along inside that error — see
+    // `tools::ReadOut`.
+    let is_error = out.error;
     let mut content = Vec::new();
     // Images ride out as JPEG: base64-PNG is what overflows the stdio JSON-RPC frame on
     // figure-heavy pages, and JPEG is far smaller. `to_jpeg` passes real JPEGs through untouched.
@@ -1523,7 +1528,11 @@ fn read_common(
             }
         }
     }
-    CallToolResult::success(content)
+    if is_error {
+        CallToolResult::error(content)
+    } else {
+        CallToolResult::success(content)
+    }
 }
 
 /// Project a gate outcome into the JSON the `verify` tool returns, by serving profile. Reader gets a
@@ -1670,6 +1679,7 @@ impl GlossaServer {
             max,
             a.raw.unwrap_or(false),
         );
+        let is_error = out.error;
         let mut content = vec![Content::text(out.text)];
         if let Some(f) = out.file {
             let b64 = base64::engine::general_purpose::STANDARD.encode(&f.bytes);
@@ -1677,7 +1687,14 @@ impl GlossaServer {
                 ResourceContents::blob(b64, f.filename).with_mime_type(f.mime),
             ));
         }
-        Ok(CallToolResult::success(content))
+        // An unreachable or unrenderable file is a failure, not a one-line value the reader can
+        // cite. The guidance arms (wrong path, reasoning node, over cap) stay successful content —
+        // see `tools::SourceFileOut`.
+        Ok(if is_error {
+            CallToolResult::error(content)
+        } else {
+            CallToolResult::success(content)
+        })
     }
 
     // keep in sync with registry::DESC_GLOSSARY (see search's comment above for why this is a literal).
@@ -3330,6 +3347,39 @@ mod tests {
         fs4::FileExt::unlock(&held).unwrap();
     }
 
+    /// The contract the ledger's finding is about: a file-backed failure reaches the agent as
+    /// `isError`, not as a content string it cannot tell apart from an answer.
+    #[test]
+    fn read_page_image_failure_answers_with_is_error_and_the_chunk_text() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("sample.pdf"),
+            include_bytes!("../tests/fixtures/sample.pdf"),
+        )
+        .unwrap();
+        index_dir(dir.path(), true).unwrap();
+        let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
+        // Indexed, then gone from disk: the chunk text survives, the render cannot.
+        std::fs::remove_file(dir.path().join("sample.pdf")).unwrap();
+
+        let out = read_common(
+            dir.path(),
+            &idx,
+            None,
+            "sample.pdf",
+            1,
+            true,
+            false,
+            &crate::trace::TraceLog::disabled(),
+            |t| t,
+        );
+
+        assert_eq!(out.is_error, Some(true), "{out:?}");
+        let rendered = format!("{:?}", out.content);
+        assert!(rendered.contains("failed to render"), "{rendered}");
+        assert!(rendered.contains("glossa sample"), "{rendered}");
+    }
+
     #[tokio::test]
     async fn read_picks_up_an_in_place_edit() {
         let dir = tempfile::tempdir().unwrap();
@@ -4241,6 +4291,9 @@ mod tests {
         );
     }
 
+    // This withholding IS how "the tool does not apply here" is signalled for a corpus started
+    // without `--source-file`: the tool is absent from the advertised set, so no call can be made
+    // and nothing has to be reported as a failure.
     #[test]
     fn source_file_flag_gates_get_source_file() {
         let root = std::path::PathBuf::from(".");

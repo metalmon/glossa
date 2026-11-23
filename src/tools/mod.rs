@@ -292,9 +292,19 @@ pub fn grep(
 }
 
 /// A read result: the chunk text (with prev/next footer) plus the file's images for vision models.
+///
+/// `error` says the call FAILED rather than returned a value, so the MCP layer can set `isError`.
+/// It is reserved for a file the index promises and the disk cannot produce (today: a PDF page that
+/// will not render) — a failure returned as plain content is indistinguishable from an answer, and a
+/// weak reader relays it as one. A tool that simply does not apply (`page_image` on a non-PDF or on
+/// a reasoning node) is NOT an error: the call is answered, just not with an image. Nor are the
+/// tolerant arms — an out-of-range chunk clamps, a mangled path gets did-you-mean hints — which are
+/// deliberately recoverable in-band (erroring there is what makes a small model loop).
+#[derive(Default)]
 pub struct ReadOut {
     pub text: String,
     pub images: Vec<crate::read::DocImage>,
+    pub error: bool,
 }
 
 /// Collect `(attribution, path, ord)` for every section node `nid` MENTIONS, de-duplicated via `seen`.
@@ -365,7 +375,7 @@ fn resolve_node_handle(
 fn evidence_error(e: anyhow::Error) -> ReadOut {
     ReadOut {
         text: format!("read error: {e}"),
-        images: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -457,7 +467,11 @@ fn read_node(
             crate::read::extract_images(&idx.doc_file(p), *ord, usize::MAX).unwrap_or_default(),
         );
     }
-    ReadOut { text, images }
+    ReadOut {
+        text,
+        images,
+        error: false,
+    }
 }
 
 /// Split a copy-ready `path#<digits>` chunk reference into its document path and chunk ordinal.
@@ -527,7 +541,7 @@ pub fn read(
         if page_image {
             return ReadOut {
                 text: format!("page_image is only supported for PDF (got {path})"),
-                images: Vec::new(),
+                ..Default::default()
             };
         }
         if let Ok((rel, body)) = crate::notebook::read_note(root, idx, path) {
@@ -538,7 +552,7 @@ pub fn read(
             );
             return ReadOut {
                 text: format!("{rel}\n{body}"),
-                images: Vec::new(),
+                ..Default::default()
             };
         }
     }
@@ -551,7 +565,7 @@ pub fn read(
                 if page_image {
                     return ReadOut {
                         text: format!("page_image is only supported for PDF (got {path})"),
-                        images: Vec::new(),
+                        ..Default::default()
                     };
                 }
                 trace.log("read", json!({ "node": path }), json!({ "node": path }));
@@ -572,7 +586,7 @@ pub fn read(
                         if page_image {
                             return ReadOut {
                                 text: format!("page_image is only supported for PDF (got {path})"),
-                                images: Vec::new(),
+                                ..Default::default()
                             };
                         }
                         trace.log(
@@ -601,7 +615,7 @@ pub fn read(
                     Ok(Some(c)) => (path.to_string(), c, ord),
                     _ => return ReadOut {
                         text: format!("no chunk #{n} in {path} — this document has {max} chunks (read #1..#{max})"),
-                        images: Vec::new(),
+                        ..Default::default()
                     },
                 }
             }
@@ -616,28 +630,28 @@ pub fn read(
                         };
                         return ReadOut {
                             text,
-                            images: Vec::new(),
+                            ..Default::default()
                         };
                     }
                 },
                 None => {
                     return ReadOut {
                         text: path_not_found(idx, path),
-                        images: Vec::new(),
+                        ..Default::default()
                     }
                 }
             },
             Err(e) => {
                 return ReadOut {
                     text: format!("no chunk #{n} in {path} (range lookup failed: {e})"),
-                    images: Vec::new(),
+                    ..Default::default()
                 }
             }
         },
         Err(e) => {
             return ReadOut {
                 text: format!("read error: {e}"),
-                images: Vec::new(),
+                ..Default::default()
             }
         }
     };
@@ -653,19 +667,35 @@ pub fn read(
         if ext != "pdf" {
             return ReadOut {
                 text: format!("page_image is only supported for PDF (got {path})"),
-                images: Vec::new(),
+                ..Default::default()
             };
         }
         let images = match crate::read::render_pdf_page(&doc_path, resolved_ord) {
             Ok(Some(img)) => vec![img],
             _ => Vec::new(),
         };
-        let text = if images.is_empty() {
-            format!("page_image: failed to render {path}#{resolved_ord}")
-        } else {
-            format!("page_image {path}#{resolved_ord}")
+        // The ext check above has already answered "no page image applies here". Reaching this
+        // point means the document IS a PDF and its page still would not render — the file moved,
+        // was truncated, or the renderer choked. That is a failure, and it goes back as one.
+        //
+        // It carries the chunk text anyway: the body comes from the index, not from the missing
+        // file, so we HAVE what the agent asked to read and dropping it bought nothing. The agent
+        // gets the content it can use plus an unambiguous signal that the image did not come.
+        if images.is_empty() {
+            return ReadOut {
+                text: format!(
+                    "page_image: failed to render {path}#{resolved_ord} — returning the chunk text instead\n── {path}#{resolved_ord} ──\n{}",
+                    format_chunk_body(resolved_ord, &chunk.body)
+                ),
+                images,
+                error: true,
+            };
+        }
+        return ReadOut {
+            text: format!("page_image {path}#{resolved_ord}"),
+            images,
+            error: false,
         };
-        return ReadOut { text, images };
     }
     let footer = match (chunk.prev, chunk.next) {
         (Some(p), Some(nx)) => format!("\n\n‹ prev {path}#{p} · next {path}#{nx} ›"),
@@ -696,6 +726,7 @@ pub fn read(
             body, footer
         ),
         images,
+        error: false,
     }
 }
 
@@ -1949,9 +1980,17 @@ pub struct SourceBlob {
 
 /// Result of resolving a citation to its backing file. `text` is the model-facing provenance or
 /// error line (never base64); `file` is the deliverable when resolution succeeded within the cap.
+///
+/// `error` says the call FAILED rather than returned a value, so the MCP layer can set `isError`.
+/// Unlike [`ReadOut`] there is nothing to fall back on here — the tool's whole output IS the file —
+/// so a disk/render failure returns the note alone, but marked. The guidance arms stay plain
+/// content, because each one tells the agent how to ask again and succeed: a wrong path with
+/// did-you-mean hints, a reasoning node that backs several files, an over-cap file that wants a
+/// specific page. Those are answers; "the index has this file and the disk does not" is not.
 pub struct SourceFileOut {
     pub text: String,
     pub file: Option<SourceBlob>,
+    pub error: bool,
 }
 
 /// Document MIME by extension for source delivery. Unlike `read::mime_for` (image types only),
@@ -2002,7 +2041,19 @@ pub fn get_source_file(
     max_bytes: u64,
     raw: bool,
 ) -> SourceFileOut {
-    let err = |text: String| SourceFileOut { text, file: None };
+    // Two shapes of no-file. `err` is guidance the agent can act on (see `SourceFileOut`);
+    // `unavailable` is a file the index promises and the disk cannot produce, which is a tool
+    // failure and must not read as a value.
+    let err = |text: String| SourceFileOut {
+        text,
+        file: None,
+        error: false,
+    };
+    let unavailable = |text: String| SourceFileOut {
+        text,
+        file: None,
+        error: true,
+    };
 
     // A reasoning node backs no single source file — steer to a document path/page instead.
     if let Some(g) = graph {
@@ -2028,7 +2079,7 @@ pub fn get_source_file(
     let mut bytes = match std::fs::read(&doc_path) {
         Ok(b) => b,
         Err(e) => {
-            return err(format!(
+            return unavailable(format!(
                 "source file for {real} is not readable on disk ({e}) — the index has it but the file may have moved"
             ))
         }
@@ -2085,6 +2136,7 @@ pub fn get_source_file(
                 filename: name,
                 bytes,
             }),
+            error: false,
         };
     }
 
@@ -2107,13 +2159,16 @@ pub fn get_source_file(
                         mime: "application/pdf".to_string(),
                         bytes: sliced,
                     }),
+                    error: false,
                 }
             }
             Ok(sliced) => err(format!(
                 "page {page} of {real} is still {} bytes, over the {max_bytes}-byte cap — cite a lighter page",
                 sliced.len()
             )),
-            Err(e) => err(format!("could not extract page {page} of {real}: {e}")),
+            // The file is a PDF the index has, and the page it cites will not come out of it:
+            // unrenderable, same family as a missing file.
+            Err(e) => unavailable(format!("could not extract page {page} of {real}: {e}")),
         };
     }
 
@@ -2376,6 +2431,96 @@ mod tests {
         assert_eq!(out.images.len(), 1);
         assert_eq!(out.images[0].mime, "image/jpeg");
         assert!(out.images[0].bytes.starts_with(b"\xff\xd8"));
+        assert!(!out.error, "a rendered page is not a failure");
+    }
+
+    /// A file-backed failure must not come back looking like a value: the agent cannot tell a
+    /// failure note from an answer, and a weak reader relays it as one.
+    #[test]
+    fn read_page_image_render_failure_is_a_tool_error_that_still_carries_the_chunk_text() {
+        let (d, i) = pdf_corpus();
+        // The index keeps the chunk text; the file the renderer needs is gone.
+        std::fs::remove_file(d.path().join("sample.pdf")).unwrap();
+
+        let out = read(
+            d.path(),
+            &i,
+            None,
+            "sample.pdf",
+            1,
+            true,
+            &TraceLog::disabled(),
+        );
+
+        assert!(
+            out.error,
+            "an unrenderable page is a tool error: {}",
+            out.text
+        );
+        assert!(out.images.is_empty());
+        assert!(
+            out.text
+                .starts_with("page_image: failed to render sample.pdf#1"),
+            "{}",
+            out.text
+        );
+        // Error WITH text: the body came from the index, not the missing file, so there is no
+        // reason to drop what the agent asked to read.
+        assert!(out.text.contains("glossa sample"), "{}", out.text);
+    }
+
+    /// The ledger's case: the index promises a file the disk cannot produce. That is a failure,
+    /// not a one-line value for the reader to cite.
+    #[test]
+    fn get_source_file_unreachable_target_is_a_tool_error() {
+        let (d, i) = pdf_corpus();
+        std::fs::remove_file(d.path().join("sample.pdf")).unwrap();
+
+        let out = get_source_file(
+            &i,
+            None,
+            "sample.pdf",
+            Some(1),
+            DEFAULT_SOURCE_MAX_BYTES,
+            false,
+        );
+
+        assert!(out.file.is_none());
+        assert!(out.error, "an unreachable source file is a tool error");
+        assert!(out.text.contains("not readable on disk"), "{}", out.text);
+    }
+
+    /// The guidance arms stay successful content: each one tells the agent how to ask again.
+    #[test]
+    fn get_source_file_guidance_arms_are_content_not_errors() {
+        let (_d, i) = pdf_corpus();
+
+        // Wrong path: did-you-mean hints, actionable.
+        let unknown = get_source_file(
+            &i,
+            None,
+            "nope.pdf",
+            Some(1),
+            DEFAULT_SOURCE_MAX_BYTES,
+            false,
+        );
+        assert!(!unknown.error, "{}", unknown.text);
+
+        // Over the cap with no page: asks for a page.
+        let over = get_source_file(&i, None, "sample.pdf", None, 10, false);
+        assert!(!over.error, "{}", over.text);
+
+        // Delivered file: plainly not an error.
+        let ok = get_source_file(
+            &i,
+            None,
+            "sample.pdf",
+            Some(1),
+            DEFAULT_SOURCE_MAX_BYTES,
+            false,
+        );
+        assert!(ok.file.is_some());
+        assert!(!ok.error);
     }
 
     #[test]
@@ -2507,8 +2652,10 @@ mod tests {
         );
     }
 
+    /// A non-PDF chunk has no page image to give: the tool does not apply. That stays plain
+    /// content — turning it into a failure would be the same defect wearing the other hat.
     #[test]
-    fn read_page_image_rejects_non_pdf_document() {
+    fn read_page_image_on_a_non_pdf_is_not_applicable_not_an_error() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("sample.md"), b"# Sample\nglossa sample\n").unwrap();
         crate::index::store::index_dir(d.path(), true).unwrap();
@@ -2529,6 +2676,7 @@ mod tests {
             "page_image is only supported for PDF (got sample.md)"
         );
         assert!(out.images.is_empty());
+        assert!(!out.error, "not applicable is not a failure");
     }
 
     #[test]
@@ -4194,6 +4342,10 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "page_image is only supported for PDF (got sym:test)"
         );
         assert!(out.images.is_empty());
+        assert!(
+            !out.error,
+            "a node has no page image; that is not a failure"
+        );
     }
 
     #[test]
