@@ -261,10 +261,83 @@ pub fn resolve_roots_from(inputs: RootInputs, cwd: &Path) -> anyhow::Result<Reso
     Ok(resolve_root_from(inputs.positional, cwd))
 }
 
-/// Reads real `current_dir`. Thin wrapper over [`resolve_roots_from`].
+/// Refuse to treat a state directory as the corpus.
+///
+/// The destructive shape: in the split layout (`--root <share> --state-dir <local>`) a later
+/// `kb <cmd> <state-dir>` that drops `--root` makes the state dir the only corpus root. `.glossa`
+/// itself is skipped by the walk, and the zero-files hold in `index::store::scan_delta_at` covers
+/// the empty case — but ONE indexable file under the state dir is enough to look like a populated
+/// corpus, and the real documents are then pruned from the index with no warning.
+///
+/// The discriminator is deliberately narrow, because `state_base` DEFAULTS to the corpus root (see
+/// [`resolve_roots_from`]): "the root contains `.glossa`" describes every ordinary corpus and must
+/// never be the test. Two facts have to hold together:
+///
+/// 1. a state dir was explicitly CONFIGURED (`--state-dir` / `GLOSSA_STATE_DIR` / `[corpus]
+///    state_dir`) and a corpus root resolves to that very directory. In the default layout
+///    `state_dir` is `None` — the state base is derived, not configured — so this half cannot fire
+///    there at all, whatever the root happens to contain.
+/// 2. the index already held there describes documents that are NOT reachable under this root. That
+///    keeps the legitimate co-located spelling (`--root <dir> --state-dir <dir>`, which is just the
+///    default layout written out) working: its own documents do resolve under the root. A state
+///    base with no index yet has nothing to destroy, so it passes too.
+///
+/// Known ceiling: a co-located corpus addressed with `--state-dir <itself>` whose every indexed
+/// document has since been deleted from disk reads the same as the split-layout mistake, and is
+/// refused. Dropping the redundant `--state-dir` is the escape hatch (state lives in the corpus
+/// root by default), and the error message says so.
+pub fn ensure_corpus_is_not_the_state_dir(
+    roots: &[Root],
+    state_dir: Option<&Path>,
+) -> anyhow::Result<()> {
+    let Some(state_dir) = state_dir else {
+        return Ok(()); // default layout: no configured state dir, nothing to confuse it with
+    };
+    let state_abs = crate::index::store::abs_root(state_dir);
+    for r in roots {
+        if crate::index::store::abs_root(&r.path) != state_abs {
+            continue;
+        }
+        let manifest = crate::index::manifest::Manifest::load(&state_abs);
+        if manifest.files.is_empty() {
+            continue; // no index here yet — nothing this pass could prune
+        }
+        if manifest
+            .files
+            .keys()
+            .any(|k| crate::index::store::doc_file_in(roots, k).exists())
+        {
+            continue; // the index's own documents live here: a co-located corpus
+        }
+        let which = if r.label.is_empty() {
+            "the corpus path".to_string()
+        } else {
+            format!("root '{}'", r.label)
+        };
+        anyhow::bail!(
+            "refusing to index the state directory as a corpus: {which} resolves to {}, which is \
+             also the configured --state-dir, and the index there describes {} document(s) that do \
+             not exist under it. Indexing would walk the state dir as the corpus and prune the real \
+             documents. Name the corpus itself: --root <corpus> --state-dir {}. (If this directory \
+             really IS the corpus, drop --state-dir — state lives in the corpus root by default.)",
+            state_abs.display(),
+            manifest.files.len(),
+            state_abs.display(),
+        );
+    }
+    Ok(())
+}
+
+/// Reads real `current_dir`. Thin wrapper over [`resolve_roots_from`], plus the state-dir-as-corpus
+/// refusal ([`ensure_corpus_is_not_the_state_dir`]) — it lives here rather than in the pure core so
+/// `resolve_roots_from` stays free of filesystem I/O, and here it covers every caller: the CLI and
+/// MCP server both funnel through this, and so does `kbx`'s workspace resolver.
 pub fn resolve_roots_verbose(inputs: RootInputs) -> anyhow::Result<ResolvedRoot> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    resolve_roots_from(inputs, &cwd)
+    let state_dir = inputs.state_dir.clone();
+    let resolved = resolve_roots_from(inputs, &cwd)?;
+    ensure_corpus_is_not_the_state_dir(&resolved.roots, state_dir.as_deref())?;
+    Ok(resolved)
 }
 
 /// Resolve the knowledge-base root for a command, reading the real `current_dir`. See
@@ -665,6 +738,140 @@ mod tests {
             vec!["share", "other"],
             "every unreadable root is named, in order, and the readable ones are absent"
         );
+    }
+
+    /// Seed `<dir>/.glossa/manifest.json` with `keys` as indexed documents, as a prior index pass
+    /// would have left it. Nothing else about the index is needed: the guard reads the manifest.
+    fn seed_manifest(dir: &Path, keys: &[&str]) {
+        let mut m = crate::index::manifest::Manifest::default();
+        for k in keys {
+            m.files.insert(
+                (*k).to_string(),
+                crate::index::manifest::FileSig {
+                    mtime_secs: 1,
+                    size: 2,
+                },
+            );
+        }
+        m.save(dir).unwrap();
+    }
+
+    fn manifest_keys(dir: &Path) -> Vec<String> {
+        crate::index::manifest::Manifest::load(dir)
+            .files
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// The data-destroying shape: split layout, then `kb <cmd> <state-dir>` with `--root` dropped.
+    /// One stray indexable file in the state dir is enough to defeat the zero-files hold, so the
+    /// real documents would be pruned. The resolution must fail outright, and the index it was
+    /// about to destroy must still be there afterwards.
+    #[test]
+    fn a_corpus_root_that_is_the_configured_state_base_is_refused_and_the_documents_survive() {
+        let share = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(share.path().join("a.md"), "real document").unwrap();
+        std::fs::write(share.path().join("b.md"), "real document").unwrap();
+        // The state dir holds the share's index — and one unrelated indexable file of its own.
+        seed_manifest(state.path(), &["a.md", "b.md"]);
+        std::fs::write(state.path().join("notes.md"), "stray but indexable").unwrap();
+
+        let inputs = RootInputs {
+            positional: Some(state.path().to_path_buf()),
+            state_dir: Some(state.path().to_path_buf()),
+            ..Default::default()
+        };
+        // Through the real entry point, so this also pins that the guard is actually wired in.
+        let err = resolve_roots_verbose(inputs).unwrap_err().to_string();
+        assert!(
+            err.contains("state directory") && err.contains("--root <corpus>"),
+            "the refusal must name what it detected and what was probably meant: {err}"
+        );
+        assert_eq!(
+            manifest_keys(state.path()),
+            vec!["a.md".to_string(), "b.md".to_string()],
+            "the real documents must still be in the index after the refusal"
+        );
+    }
+
+    /// The regression guard for the trap in the obvious fix: `state_base` DEFAULTS to the corpus
+    /// root, so an ordinary corpus root contains `.glossa`. Refusing on that would refuse every
+    /// default-layout corpus. All three legitimate shapes here must resolve.
+    #[test]
+    fn a_default_layout_corpus_whose_root_contains_dot_glossa_is_never_refused() {
+        let corpus = tempfile::tempdir().unwrap();
+        mk_glossa(corpus.path());
+        std::fs::write(corpus.path().join("a.md"), "document").unwrap();
+        seed_manifest(corpus.path(), &["a.md"]);
+
+        // 1. Default layout: no --state-dir at all. The configured state dir is None, so the guard
+        //    cannot even look at what the root contains.
+        let inputs = RootInputs {
+            positional: Some(corpus.path().to_path_buf()),
+            ..Default::default()
+        };
+        let r = resolve_roots_verbose(inputs).unwrap();
+        assert_eq!(r.root, corpus.path());
+        assert_eq!(r.state_base, corpus.path());
+
+        // 2. The same layout spelled out redundantly: --state-dir pointing at the corpus itself.
+        //    The index there describes documents that DO live under the root, so it is a corpus.
+        let inputs = RootInputs {
+            positional: Some(corpus.path().to_path_buf()),
+            state_dir: Some(corpus.path().to_path_buf()),
+            ..Default::default()
+        };
+        resolve_roots_verbose(inputs).expect("a co-located corpus addressed as its own state dir");
+
+        // 3. A labeled root at its own state base, with a labeled key in the manifest.
+        let labeled = tempfile::tempdir().unwrap();
+        std::fs::write(labeled.path().join("c.md"), "document").unwrap();
+        seed_manifest(labeled.path(), &["docs/c.md"]);
+        let inputs = RootInputs {
+            roots: vec![Root {
+                label: "docs".into(),
+                path: labeled.path().to_path_buf(),
+            }],
+            state_dir: Some(labeled.path().to_path_buf()),
+            ..Default::default()
+        };
+        resolve_roots_verbose(inputs).expect("a labeled co-located corpus");
+    }
+
+    /// A first index into a fresh state dir has nothing to prune, so the guard must stay out of the
+    /// way — otherwise setting up a split layout would be impossible.
+    #[test]
+    fn a_state_dir_with_no_index_yet_is_not_refused() {
+        let state = tempfile::tempdir().unwrap();
+        assert!(ensure_corpus_is_not_the_state_dir(
+            &[Root {
+                label: String::new(),
+                path: state.path().to_path_buf(),
+            }],
+            Some(state.path())
+        )
+        .is_ok());
+    }
+
+    /// A root that merely lives UNDER the state base (state kept in the corpus's parent) is a sane
+    /// layout, not the mistake: only an exact match is refused.
+    #[test]
+    fn a_root_nested_inside_the_state_base_is_not_refused() {
+        let state = tempfile::tempdir().unwrap();
+        let corpus = state.path().join("docs");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::write(corpus.join("a.md"), "document").unwrap();
+        seed_manifest(state.path(), &["a.md"]);
+        assert!(ensure_corpus_is_not_the_state_dir(
+            &[Root {
+                label: String::new(),
+                path: corpus,
+            }],
+            Some(state.path())
+        )
+        .is_ok());
     }
 
     #[test]
