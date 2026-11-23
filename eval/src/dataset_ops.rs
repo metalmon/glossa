@@ -190,7 +190,9 @@ pub struct Stat {
     /// extra occurrences of a normalized question/answer (total - distinct).
     pub dup_questions: usize,
     pub dup_answers: usize,
-    /// cases with a blank (after trim) question OR answer.
+    /// cases with a blank (after trim) question, or a blank answer where one is required
+    /// (see [`answer_required`]) — the same rule `validate_cases` flags, so `stat` and `validate`
+    /// never disagree about whether a deliberately-unanswerable case is malformed.
     pub blank: usize,
     pub q_len: LenStats,
     pub a_len: LenStats,
@@ -234,7 +236,7 @@ pub fn compute_stat(cases: &[Case]) -> Stat {
         if !a_seen.insert(normalize(&c.answer)) {
             s.dup_answers += 1;
         }
-        if c.question.trim().is_empty() || c.answer.trim().is_empty() {
+        if c.question.trim().is_empty() || (answer_required(c) && c.answer.trim().is_empty()) {
             s.blank += 1;
         }
         q_lens.push(c.question.chars().count());
@@ -256,10 +258,20 @@ pub struct ValidationIssue {
     pub problem: String,
 }
 
-/// Structural checks over a parsed dataset: non-empty question AND answer (after trim), `hop_type`
-/// in {"", "lexical", "multihop"}, `needs_graph` in {"", "yes", "no", "maybe"}, and unique ids.
-/// Returns every issue found (empty = clean). A TOML/parse error is caught earlier, when the file
-/// is loaded.
+/// Whether a case needs gold answer text at all. An `answerable = false` case is an ABSTENTION
+/// test: the question cannot be answered from the corpus, so the correct behaviour is for the
+/// reader to decline and there is no gold text to compare against — the judge grades it by the
+/// abstention rubric and never shows it a GOLD block (see `judge::build_user`). Requiring an
+/// answer there forced every author to invent a refusal sentence that the judge then ignored, so a
+/// blank answer is legitimate input for those cases and a real authoring mistake for every other.
+pub fn answer_required(c: &Case) -> bool {
+    c.answerable
+}
+
+/// Structural checks over a parsed dataset: non-empty question, non-empty answer where one is
+/// required (see [`answer_required`]), `hop_type` in {"", "lexical", "multihop"}, `needs_graph` in
+/// {"", "yes", "no", "maybe"}, and unique ids. Returns every issue found (empty = clean). A
+/// TOML/parse error is caught earlier, when the file is loaded.
 ///
 /// These two value sets are the authority for the template and the field docs: an out-of-range
 /// value used to pass validation and then vanish into the report's "(untyped)"/"(unset)" bucket,
@@ -274,7 +286,7 @@ pub fn validate_cases(cases: &[Case]) -> Vec<ValidationIssue> {
                 problem: "empty question".into(),
             });
         }
-        if c.answer.trim().is_empty() {
+        if answer_required(c) && c.answer.trim().is_empty() {
             issues.push(ValidationIssue {
                 id: c.id.clone(),
                 problem: "empty answer".into(),
@@ -703,6 +715,50 @@ confidence = 3
             .iter()
             .any(|(id, p)| *id == "w" && p.contains("invalid needs_graph")));
         assert!(probs.contains(&("x", "duplicate id")));
+    }
+
+    /// An `answerable = false` case is an abstention test: there is no gold text to compare
+    /// against, so a blank answer is the honest way to write it and must validate clean. Requiring
+    /// an answer there forced authors to invent a refusal sentence the judge never even sees.
+    #[test]
+    fn unanswerable_case_with_empty_answer_validates_clean() {
+        let mut c = case("abstain", "What is the CEO's home address?", "");
+        c.answerable = false;
+        assert!(
+            validate_cases(std::slice::from_ref(&c)).is_empty(),
+            "an answerable=false case with no answer is valid input, not a malformed case"
+        );
+        // Whitespace-only is the same thing once trimmed.
+        c.answer = "   \n ".into();
+        assert!(
+            validate_cases(std::slice::from_ref(&c)).is_empty(),
+            "a whitespace-only answer on an abstention case is also clean"
+        );
+        // ...and `stat` must agree with `validate`, or the two tools contradict each other.
+        assert_eq!(
+            compute_stat(std::slice::from_ref(&c)).blank,
+            0,
+            "stat must not count a deliberately-unanswerable case as blank"
+        );
+    }
+
+    /// The other half: an `answerable = true` case with no answer is a real authoring mistake
+    /// (a gold with nothing to score against) and has to stay loud.
+    #[test]
+    fn answerable_case_with_empty_answer_is_still_rejected() {
+        let c = case("oops", "What is A?", "  ");
+        let issues = validate_cases(std::slice::from_ref(&c));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.id == "oops" && i.problem == "empty answer"),
+            "an answerable case with a blank answer must still fail validation: {issues:?}"
+        );
+        assert_eq!(
+            compute_stat(std::slice::from_ref(&c)).blank,
+            1,
+            "stat still counts it as blank"
+        );
     }
 
     #[test]

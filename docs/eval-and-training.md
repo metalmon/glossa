@@ -279,13 +279,19 @@ is silently dropped:
 |---|---|
 | `kbx dataset stat <file>` | Read-only counts / breakdowns: `hop_type`, `answerable` vs `unanswerable`, `needs_graph`, alias coverage, duplicate/blank counts, question/answer length min/median/max — plus an **answer-reachability** table when a graph is present. |
 | `kbx dataset merge --from <a> --into <b>` | Append `a`'s cases into `b`, deduped by normalized question, re-id-ing colliding ids; backs `b` up to `<b>.bak` first. |
-| `kbx dataset validate <file>` | Check non-empty q/a, valid `hop_type`, unique ids; exits non-zero on any issue. |
+| `kbx dataset validate <file>` | Check non-empty question, non-empty answer (except on `answerable=false` cases — see below), valid `hop_type`, unique ids; exits non-zero on any issue. |
 | `kbx dataset dedup <file>` | Remove normalized-duplicate questions (keep first); backs up to `<file>.bak`. |
 | `kbx dataset sample <file> -n N [--seed S]` | Print `N` cases chosen with a seeded (reproducible) RNG; `--seed` default `0`, `N ≥ total` prints all. |
 
 `answerable` / `unanswerable` is the gate marker: an `answerable=false` case is an **abstention
 test** (correct = the reader declines / says it is not in the KB), scored as such by `kbx eval run`
 when a `[judge]` endpoint is configured.
+
+Such a case may leave `answer` **empty**: the judge never shows it a `GOLD` block (it grades by the
+abstention rubric instead), so there is no gold text to write and no need to invent a refusal
+sentence for the lexical metrics to chew on. A blank gold form earns no EM/F1 credit — including
+when the reader returned nothing — so the verdict comes from the judge, where it belongs. An
+`answerable=true` case with no answer is still a validation error.
 
 ---
 

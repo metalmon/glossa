@@ -200,6 +200,62 @@ needs_graph="yes"
     );
 }
 
+/// `kbx dataset validate` must let a dataset measure abstention honestly: an `answerable = false`
+/// case has no gold text to compare against, so writing no answer is correct and has to exit zero.
+/// An `answerable = true` case with no answer is a real authoring mistake and has to stay loud —
+/// both directions checked through the real binary, since the exit code is what a CI gate reads.
+#[test]
+fn kbx_dataset_validate_accepts_unanswerable_without_an_answer_and_still_rejects_answerable() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+
+    let ok = dir.path().join("abstain.toml");
+    std::fs::write(
+        &ok,
+        r#"
+[[case]]
+id="q1"
+question="What is A?"
+answer="A is a thing."
+
+[[case]]
+id="out-of-scope"
+question="What is the weather tomorrow?"
+answer=""
+answerable=false
+"#,
+    )
+    .unwrap();
+    Command::cargo_bin("kbx")
+        .expect("find kbx binary")
+        .args(["dataset", "validate"])
+        .arg(&ok)
+        .assert()
+        .success();
+
+    let bad = dir.path().join("mistake.toml");
+    std::fs::write(
+        &bad,
+        r#"
+[[case]]
+id="forgot-the-answer"
+question="What is A?"
+answer=""
+"#,
+    )
+    .unwrap();
+    let assert = Command::cargo_bin("kbx")
+        .expect("find kbx binary")
+        .args(["dataset", "validate"])
+        .arg(&bad)
+        .assert()
+        .failure();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("forgot-the-answer: empty answer"),
+        "an answerable case with no answer must still be named:\n{stdout}"
+    );
+}
+
 /// `kbx distil --help` should also expose the densify-mode flags (Task 4: densify is now the
 /// default, golds are opt-in via `--emit-golds`) — a regression here means the `Distil` clap
 /// variant lost a flag `distil::run`'s dispatch needs.

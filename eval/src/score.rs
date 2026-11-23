@@ -56,10 +56,29 @@ pub fn token_f1(pred: &str, gold: &str) -> f32 {
     2.0 * precision * recall / (precision + recall)
 }
 
+/// Whether a gold surface form can be matched against at all. A blank (after trim) form carries no
+/// text, so every `*_any` scorer below drops it before comparing. Without that an
+/// `answerable = false` case — which carries no gold answer by design, since the judge grades it by
+/// the abstention rubric and never sees a GOLD block — would hand `exact_match`/`token_f1` an empty
+/// gold, and both treat empty-vs-empty as a PERFECT score (`normalize("") == normalize("")`, and
+/// `token_f1`'s both-empty branch returns 1.0). A reader that served nothing would then post EM 1.0
+/// / F1 1.0 on every abstention case. Dropping the form instead routes each scorer into its
+/// documented empty-set behaviour (never matches / 0.0) — the honest answer, since there is no text
+/// to earn lexical credit against.
+///
+/// Blank ALIASES are filtered by the same rule — validation never checked those.
+fn has_text(gold: &str) -> bool {
+    !gold.trim().is_empty()
+}
+
 /// EM against a set of acceptable gold answers (primary answer + any aliases) — MuSiQue/SQuAD
-/// style: correct if the prediction exactly matches ANY gold form. Empty set → never matches.
+/// style: correct if the prediction exactly matches ANY gold form. Empty set (or one holding only
+/// blank forms — see [`has_text`]) → never matches.
 pub fn exact_match_any(pred: &str, golds: &[String]) -> bool {
-    golds.iter().any(|g| exact_match(pred, g))
+    golds
+        .iter()
+        .filter(|g| has_text(g.as_str()))
+        .any(|g| exact_match(pred, g))
 }
 
 /// True if `needle`'s token run appears contiguously inside `haystack`.
@@ -93,15 +112,23 @@ pub fn contains_match(pred: &str, gold: &str) -> bool {
 
 /// EM against a gold set, relaxed to accept token-level containment (see
 /// [`contains_match`]). Falls back to strict [`exact_match`] via containment of
-/// equal-length sequences. Empty gold set never matches.
+/// equal-length sequences. Empty gold set (or one holding only blank forms — see [`has_text`])
+/// never matches.
 pub fn relaxed_match_any(pred: &str, golds: &[String]) -> bool {
-    golds.iter().any(|g| contains_match(pred, g))
+    golds
+        .iter()
+        .filter(|g| has_text(g.as_str()))
+        .any(|g| contains_match(pred, g))
 }
 
 /// Token-F1 against a set of gold answers, taking the max over golds (best-matching form), as
-/// MuSiQue/SQuAD do. Empty set → 0.0.
+/// MuSiQue/SQuAD do. Empty set — or one holding only blank forms (see [`has_text`]) → 0.0.
 pub fn token_f1_any(pred: &str, golds: &[String]) -> f32 {
-    golds.iter().map(|g| token_f1(pred, g)).fold(0.0, f32::max)
+    golds
+        .iter()
+        .filter(|g| has_text(g.as_str()))
+        .map(|g| token_f1(pred, g))
+        .fold(0.0, f32::max)
 }
 
 /// Fraction of gold supporting paragraphs whose file appeared in the trace's seen files or
@@ -313,5 +340,40 @@ mod alias_score_tests {
             "F1 is the max over golds (perfect on the second)"
         );
         assert_eq!(token_f1_any("x", &[]), 0.0, "empty gold set → 0.0");
+    }
+
+    /// An `answerable = false` case carries no gold text (the judge grades it by the abstention
+    /// rubric instead), so a blank gold form must earn NO lexical credit. Both primitives score
+    /// empty-vs-empty as perfect on their own — `exact_match` compares two empty normalizations
+    /// and `token_f1` has a both-empty 1.0 branch — so without the filter a reader that served
+    /// nothing would post EM 1.0 / F1 1.0 on every abstention case.
+    #[test]
+    fn blank_gold_form_earns_no_lexical_credit() {
+        let blank = vec![String::new()];
+        let ws = vec!["   ".to_string()];
+        for golds in [&blank, &ws] {
+            assert_eq!(
+                token_f1_any("", golds),
+                0.0,
+                "an empty answer against a blank gold is not a perfect F1"
+            );
+            assert!(
+                !exact_match_any("", golds),
+                "an empty answer against a blank gold is not an exact match"
+            );
+            assert!(
+                !relaxed_match_any("", golds),
+                "an empty answer against a blank gold is not a relaxed match"
+            );
+            assert_eq!(token_f1_any("some real answer", golds), 0.0);
+            assert!(!exact_match_any("some real answer", golds));
+        }
+        // A blank ALIAS must not poison a gold set that does carry real text.
+        let mixed = vec![String::new(), "new york city".to_string()];
+        assert!(
+            (token_f1_any("New York City", &mixed) - 1.0).abs() < 1e-6,
+            "the real gold form still scores"
+        );
+        assert!(exact_match_any("new york city", &mixed));
     }
 }
