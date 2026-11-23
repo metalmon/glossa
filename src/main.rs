@@ -1932,7 +1932,16 @@ fn main() -> anyhow::Result<()> {
             // file outright; the file's [corpus] is consulted only when neither supplied any roots.
             let (effective_roots, effective_state_dir) =
                 merge_corpus(&root_flags, state_dir.clone(), &deploy_cfg);
-            let rr = resolve_inputs(path, &effective_roots, effective_state_dir)?;
+            let rr = resolve_inputs(path, &effective_roots, effective_state_dir.clone())?;
+
+            // This pass walks and prunes, so a state directory handed in as the corpus (split
+            // layout, `--root` dropped) would delete the real documents from the index. Refuse
+            // before any of that — the guard itself explains why it is wired here and not in the
+            // shared resolver.
+            glossa::root::ensure_corpus_is_not_the_state_dir(
+                &rr.roots,
+                effective_state_dir.as_deref(),
+            )?;
 
             // A root we cannot read indexes nothing, and the walker says nothing about it — so
             // without this the pass printed `added: 0` and exited 0, which is how a corpus on an
@@ -2249,7 +2258,15 @@ fn main() -> anyhow::Result<()> {
                 // --root nor GLOSSA_ROOTS is present (see `merge_corpus`).
                 let (effective_roots, effective_state_dir) =
                     merge_corpus(&root_flags, state_dir.clone(), c);
-                let rr = resolve_inputs_traced(path, &effective_roots, effective_state_dir)?;
+                let rr =
+                    resolve_inputs_traced(path, &effective_roots, effective_state_dir.clone())?;
+                // The server's `index` tool (and the post-upgrade migration) prune through exactly
+                // these roots, so a server started on its own state directory destroys the index on
+                // its first pass. Same refusal as `Cmd::Index`, at startup rather than mid-serve.
+                glossa::root::ensure_corpus_is_not_the_state_dir(
+                    &rr.roots,
+                    effective_state_dir.as_deref(),
+                )?;
                 // Server (Spec C): each setting is a clap Option<T> that already collapsed flag+env
                 // via `env=`, so a plain two-tier pick/merge_list is correct here (no
                 // GLOSSA_ROOTS-style 3-way trap).

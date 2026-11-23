@@ -286,6 +286,15 @@ pub fn resolve_roots_from(inputs: RootInputs, cwd: &Path) -> anyhow::Result<Reso
 /// document has since been deleted from disk reads the same as the split-layout mistake, and is
 /// refused. Dropping the redundant `--state-dir` is the escape hatch (state lives in the corpus
 /// root by default), and the error message says so.
+///
+/// Deliberately NOT called from [`resolve_roots_verbose`], even though that is the one resolver
+/// every binary shares. Two reasons: only the passes that WALK AND PRUNE can destroy anything (a
+/// `kb search` aimed at the state dir reads a stale index and misleads, but loses nothing), and
+/// `kbx` resolves through the same function while being *documented* to take the state dir as its
+/// positional path — it never rebuilds the index, so guarding it would refuse the prescribed
+/// workflow to prevent a hazard it does not have. The call sites are the `kb` indexing entry points
+/// in `main.rs`: `Cmd::Index`, and `Cmd::Mcp` because the server's `index` tool prunes through the
+/// roots it resolved at startup.
 pub fn ensure_corpus_is_not_the_state_dir(
     roots: &[Root],
     state_dir: Option<&Path>,
@@ -328,16 +337,13 @@ pub fn ensure_corpus_is_not_the_state_dir(
     Ok(())
 }
 
-/// Reads real `current_dir`. Thin wrapper over [`resolve_roots_from`], plus the state-dir-as-corpus
-/// refusal ([`ensure_corpus_is_not_the_state_dir`]) — it lives here rather than in the pure core so
-/// `resolve_roots_from` stays free of filesystem I/O, and here it covers every caller: the CLI and
-/// MCP server both funnel through this, and so does `kbx`'s workspace resolver.
+/// Reads real `current_dir`. Thin wrapper over [`resolve_roots_from`]. Resolution stays free of
+/// policy: `kbx` shares this function and is meant to be aimed at a state directory, so the
+/// state-dir-as-corpus refusal is wired at the `kb` indexing entry points instead — see
+/// [`ensure_corpus_is_not_the_state_dir`].
 pub fn resolve_roots_verbose(inputs: RootInputs) -> anyhow::Result<ResolvedRoot> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let state_dir = inputs.state_dir.clone();
-    let resolved = resolve_roots_from(inputs, &cwd)?;
-    ensure_corpus_is_not_the_state_dir(&resolved.roots, state_dir.as_deref())?;
-    Ok(resolved)
+    resolve_roots_from(inputs, &cwd)
 }
 
 /// Resolve the knowledge-base root for a command, reading the real `current_dir`. See
@@ -783,8 +789,13 @@ mod tests {
             state_dir: Some(state.path().to_path_buf()),
             ..Default::default()
         };
-        // Through the real entry point, so this also pins that the guard is actually wired in.
-        let err = resolve_roots_verbose(inputs).unwrap_err().to_string();
+        // Resolution itself stays policy-free (`kbx` shares it) — the refusal is wired at the `kb`
+        // indexing entry points, and `kb_index_refuses_a_state_directory_as_the_corpus` in
+        // tests/cli_it.rs is what pins THAT. Here: the predicate on the resolved roots.
+        let resolved = resolve_roots_from(inputs.clone(), state.path()).unwrap();
+        let err = ensure_corpus_is_not_the_state_dir(&resolved.roots, inputs.state_dir.as_deref())
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("state directory") && err.contains("--root <corpus>"),
             "the refusal must name what it detected and what was probably meant: {err}"
@@ -812,9 +823,11 @@ mod tests {
             positional: Some(corpus.path().to_path_buf()),
             ..Default::default()
         };
-        let r = resolve_roots_verbose(inputs).unwrap();
+        let r = resolve_roots_from(inputs.clone(), corpus.path()).unwrap();
         assert_eq!(r.root, corpus.path());
         assert_eq!(r.state_base, corpus.path());
+        ensure_corpus_is_not_the_state_dir(&r.roots, inputs.state_dir.as_deref())
+            .expect("a default-layout corpus resolves even though its root holds .glossa");
 
         // 2. The same layout spelled out redundantly: --state-dir pointing at the corpus itself.
         //    The index there describes documents that DO live under the root, so it is a corpus.
@@ -823,7 +836,9 @@ mod tests {
             state_dir: Some(corpus.path().to_path_buf()),
             ..Default::default()
         };
-        resolve_roots_verbose(inputs).expect("a co-located corpus addressed as its own state dir");
+        let r = resolve_roots_from(inputs.clone(), corpus.path()).unwrap();
+        ensure_corpus_is_not_the_state_dir(&r.roots, inputs.state_dir.as_deref())
+            .expect("a co-located corpus addressed as its own state dir");
 
         // 3. A labeled root at its own state base, with a labeled key in the manifest.
         let labeled = tempfile::tempdir().unwrap();
@@ -837,7 +852,25 @@ mod tests {
             state_dir: Some(labeled.path().to_path_buf()),
             ..Default::default()
         };
-        resolve_roots_verbose(inputs).expect("a labeled co-located corpus");
+        let r = resolve_roots_from(inputs.clone(), labeled.path()).unwrap();
+        ensure_corpus_is_not_the_state_dir(&r.roots, inputs.state_dir.as_deref())
+            .expect("a labeled co-located corpus");
+    }
+
+    /// `kbx` is documented to take the state directory as its positional path and never rebuilds
+    /// the index, so the refusal must not reach the resolver it shares with `kb`. Pins the
+    /// placement, not just the predicate: resolution of the destructive shape still SUCCEEDS.
+    #[test]
+    fn the_shared_resolver_itself_stays_policy_free_so_kbx_can_target_a_state_dir() {
+        let state = tempfile::tempdir().unwrap();
+        seed_manifest(state.path(), &["a.md"]);
+        let inputs = RootInputs {
+            positional: Some(state.path().to_path_buf()),
+            state_dir: Some(state.path().to_path_buf()),
+            ..Default::default()
+        };
+        let r = resolve_roots_verbose(inputs).expect("the resolver applies no corpus policy");
+        assert_eq!(r.root, state.path());
     }
 
     /// A first index into a fresh state dir has nothing to prune, so the guard must stay out of the

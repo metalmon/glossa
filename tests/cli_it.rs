@@ -393,3 +393,96 @@ fn zero_hit_search_preserves_last_search() {
         .success()
         .stdout(predicates::str::contains("hello world here"));
 }
+
+/// End-to-end on the real binary: the split layout, then the mistake that destroys the index —
+/// `kb index <state-dir>` with `--root` dropped, so the state dir becomes the corpus. `.glossa` is
+/// skipped by the walk and the zero-files hold covers an empty state dir, but the stray `notes.md`
+/// below is enough to make it look populated, and before the guard the share's documents were
+/// pruned (`docs: 2` -> `docs: 1`).
+///
+/// This asserts the refusal through the actual CLI, not the predicate: a unit test of the predicate
+/// passes whether or not anything calls it.
+#[test]
+fn kb_index_refuses_a_state_directory_as_the_corpus() {
+    let share = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    fs::write(share.path().join("a.md"), b"# A\nthe first real document\n").unwrap();
+    fs::write(
+        share.path().join("b.md"),
+        b"# B\nthe second real document\n",
+    )
+    .unwrap();
+
+    // The split layout, built the intended way: documents on the share, state kept locally.
+    Command::cargo_bin("kb")
+        .unwrap()
+        .args(["index", "--root"])
+        .arg(format!("docs={}", share.path().display()))
+        .arg("--state-dir")
+        .arg(state.path())
+        .assert()
+        .success();
+    let manifest = state.path().join(".glossa").join("manifest.json");
+    assert!(
+        fs::read_to_string(&manifest).unwrap().contains("docs/a.md"),
+        "the split-layout index must list the share's documents to begin with"
+    );
+
+    // One indexable file of the state dir's own, which is all it took to defeat the zero-files hold.
+    fs::write(state.path().join("notes.md"), b"# N\nstray but indexable\n").unwrap();
+
+    // The mistake: the state dir handed in as the corpus, `--root` forgotten.
+    Command::cargo_bin("kb")
+        .unwrap()
+        .args(["index"])
+        .arg(state.path())
+        .arg("--state-dir")
+        .arg(state.path())
+        .assert()
+        .failure()
+        .stderr(
+            contains("refusing to index the state directory as a corpus")
+                .and(contains("--root <corpus>")),
+        );
+
+    // The point of refusing: the real documents are still in the index.
+    let after = fs::read_to_string(&manifest).unwrap();
+    assert!(
+        after.contains("docs/a.md") && after.contains("docs/b.md"),
+        "the refusal must leave the indexed documents untouched: {after}"
+    );
+}
+
+/// The companion to the test above, on the real binary: an ordinary co-located corpus — whose root
+/// legitimately grows a `.glossa` of its own — still indexes. The guard must never reach it.
+#[test]
+fn kb_index_still_indexes_a_default_layout_corpus_whose_root_holds_dot_glossa() {
+    let corpus = tempfile::tempdir().unwrap();
+    fs::write(corpus.path().join("a.md"), b"# A\nthe only document\n").unwrap();
+
+    // First pass creates `<corpus>/.glossa` — the state base IS the corpus root here.
+    Command::cargo_bin("kb")
+        .unwrap()
+        .args(["index"])
+        .arg(corpus.path())
+        .assert()
+        .success();
+    assert!(corpus
+        .path()
+        .join(".glossa")
+        .join("manifest.json")
+        .is_file());
+
+    // Second pass, with the `.glossa` now present, must still succeed.
+    Command::cargo_bin("kb")
+        .unwrap()
+        .args(["index"])
+        .arg(corpus.path())
+        .assert()
+        .success();
+    assert!(
+        fs::read_to_string(corpus.path().join(".glossa").join("manifest.json"))
+            .unwrap()
+            .contains("a.md")
+    );
+}
