@@ -1535,6 +1535,30 @@ fn read_common(
     }
 }
 
+/// Project a `get_source_file` outcome into its MCP reply: the provenance/error line, then the
+/// delivered file as an embedded resource when there is one.
+///
+/// An unreachable or unrenderable file answers with `isError`, never as a one-line value the reader
+/// can cite — the guidance arms (wrong path, reasoning node, over cap) stay successful content; see
+/// `tools::SourceFileOut`. Split out of the tool handler so this mapping is reachable on its own:
+/// the handler's own path runs `freshen_now`/`lazy_reindex_if_changed` first, and the failure it
+/// reports (a file the index has and the disk will not read) cannot be staged portably on CI.
+fn source_file_result(out: crate::tools::SourceFileOut) -> CallToolResult {
+    let is_error = out.error;
+    let mut content = vec![Content::text(out.text)];
+    if let Some(f) = out.file {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&f.bytes);
+        content.push(Content::resource(
+            ResourceContents::blob(b64, f.filename).with_mime_type(f.mime),
+        ));
+    }
+    if is_error {
+        CallToolResult::error(content)
+    } else {
+        CallToolResult::success(content)
+    }
+}
+
 /// Project a gate outcome into the JSON the `verify` tool returns, by serving profile. Reader gets a
 /// terse verdict (decision + score + one-line reason) so a weak reader isn't tempted to reinterpret
 /// the internals; Editor/Full get the full diagnostic (bucket, threshold, rare-token counts, the
@@ -1679,22 +1703,7 @@ impl GlossaServer {
             max,
             a.raw.unwrap_or(false),
         );
-        let is_error = out.error;
-        let mut content = vec![Content::text(out.text)];
-        if let Some(f) = out.file {
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&f.bytes);
-            content.push(Content::resource(
-                ResourceContents::blob(b64, f.filename).with_mime_type(f.mime),
-            ));
-        }
-        // An unreachable or unrenderable file is a failure, not a one-line value the reader can
-        // cite. The guidance arms (wrong path, reasoning node, over cap) stay successful content —
-        // see `tools::SourceFileOut`.
-        Ok(if is_error {
-            CallToolResult::error(content)
-        } else {
-            CallToolResult::success(content)
-        })
+        Ok(source_file_result(out))
     }
 
     // keep in sync with registry::DESC_GLOSSARY (see search's comment above for why this is a literal).
@@ -3378,6 +3387,36 @@ mod tests {
         let rendered = format!("{:?}", out.content);
         assert!(rendered.contains("failed to render"), "{rendered}");
         assert!(rendered.contains("glossa sample"), "{rendered}");
+    }
+
+    /// The same contract on the other half of `get_source_file`: the reply the tool handler hands
+    /// back carries `isError` for an unreachable file, and stays successful when a file was
+    /// delivered. This drives the handler's whole body bar its arg plumbing.
+    #[test]
+    fn unreachable_source_file_answers_with_is_error_not_content() {
+        let failed = source_file_result(crate::tools::SourceFileOut {
+            text: "source file for a.pdf is not readable on disk (…)".into(),
+            file: None,
+            error: true,
+        });
+        assert_eq!(failed.is_error, Some(true), "{failed:?}");
+        assert_eq!(failed.content.len(), 1, "no file rides out on a failure");
+
+        let delivered = source_file_result(crate::tools::SourceFileOut {
+            text: "delivered whole file: a.pdf".into(),
+            file: Some(crate::tools::SourceBlob {
+                filename: "a.pdf".into(),
+                mime: "application/pdf".into(),
+                bytes: b"%PDF-1.4".to_vec(),
+            }),
+            error: false,
+        });
+        assert_eq!(delivered.is_error, Some(false), "{delivered:?}");
+        assert_eq!(
+            delivered.content.len(),
+            2,
+            "note plus the embedded resource"
+        );
     }
 
     #[tokio::test]
