@@ -110,9 +110,24 @@ const EXPECTED: &[(&str, &[&str])] = &[
         //
         // The hoisted copy also shows what this format cannot do yet: it is a flat
         // `Title: …` / `Readings: …` blob with no table structure, and the chart chunk appends at
-        // the end rather than taking the slide position the `p:graphicFrame` gives it.
+        // the end (its location is the bare label `Deck chart title`) rather than taking the
+        // slide position the `p:graphicFrame` gives it.
+        //
+        // Caveat on the ORDER of the first chunk, and it is a property of the fixture, not of the
+        // format: all three of its body text shapes carry the same `<a:off y="365125">`, so the
+        // converter groups them ahead of both graphics. **This row therefore says nothing about
+        // where hoisted chart text lands relative to the body**, and "…follows the chart." sitting
+        // before `Title: …` is not evidence that the position was lost. A later task that wants to
+        // witness pptx placement needs distinct y offsets on those shapes first.
+        //
+        // What the row DOES witness: no text is lost (all six body strings and both SmartArt
+        // nodes are present — the diagram's words have no chunk of ours to replace them), and the
+        // chart's numbers appear twice.
         "sample_chart.pptx",
-        &["PRE-FIX PLACEHOLDER - harvest from CI"],
+        &[
+            "glossa sample slide\n\nSlide body text that precedes the chart.\n\nSlide body text that follows the chart.\n\nSlide body text that follows the diagram.\n\nTitle: Deck chart title\n\nCategories: Left, Middle, Right\n\nReadings: 77.7, 88.8, 99.9\n\nDeck diagram node one\n\nDeck diagram node two",
+            "Chart: Deck chart title (barChart)\n\n|  | Readings |\n| --- | --- |\n| Left | 77.7 |\n| Middle | 88.8 |\n| Right | 99.9 |",
+        ],
     ),
     ("sample_legacy.doc", &["# glossa sample legacy doc"]),
     (

@@ -1601,19 +1601,34 @@ mod tests {
         assert!(joined.contains("glossa sample"), "got:\n{joined}");
     }
 
-    /// EVIDENCE TEST for the pptx duplication defect (Task 10 of the chart-ordinals plan).
+    /// PINNED DEFECT, not desired behaviour: **pptx chart text is indexed twice today.**
     ///
-    /// pptx has the same shape as the two formats above, with neither of their de-duplications:
+    /// pptx has the same shape as the two formats above with neither of their de-duplications:
     /// `office_oxide` 0.1.17 hoists a referenced chart's text into the slide flow
     /// (`convert_pptx.rs:538`, `GraphicContent::Text`), our `ooxml_chart` pass also covers pptx
     /// (`chart_names_for` = `docx | xlsx | pptx`), and the de-duplication in `extract` is gated
     /// `ext == "xlsx"` / `ext == "docx"` — so nothing drops either copy.
     ///
-    /// "77.7" is a cached value of this fixture's only chart series. It appears nowhere in the
-    /// slide's body text, so every occurrence across the chunks is one path that put the chart's
-    /// numbers in the index.
+    /// Measured on CI run 45159886445 (the red run this assertion was harvested from), where the
+    /// same assertion written as `== 1` failed with `left: 2, right: 1`. The two copies are:
+    ///
+    /// 1. the slide's body chunk, which ends `… Title: Deck chart title` / `Categories: Left,
+    ///    Middle, Right` / `Readings: 77.7, 88.8, 99.9` — `office_oxide`'s flat hoisted form; and
+    /// 2. our own `Chart: Deck chart title (barChart)` chunk, which carries the same numbers as
+    ///    a GFM table.
+    ///
+    /// "77.7" is a cached value of this fixture's only chart series and appears nowhere in the
+    /// slide's body text, so each occurrence is one path that put the chart's numbers in the
+    /// index. It is asserted as `2` rather than `#[ignore]`d on purpose: an ignored test says
+    /// nothing, while this one keeps reporting the defect and reds the moment the duplication
+    /// stops — including by accident.
+    ///
+    /// **The task that fixes pptx de-duplication owns inverting this to `1` and renaming it.**
+    /// Task 10 of the chart-ordinals plan established the defect and deliberately stopped there;
+    /// whether the fix is consumer-side or needs a library change is recorded in that plan's
+    /// "Still open" section.
     #[test]
-    fn pptx_chart_text_is_indexed_exactly_once() {
+    fn pptx_chart_text_is_duplicated_today() {
         let bytes = include_bytes!("../../tests/fixtures/sample_chart.pptx");
         let chunks = OfficeExtractor
             .extract(Path::new("sample_chart.pptx"), bytes)
@@ -1621,8 +1636,23 @@ mod tests {
         let text = joined(&chunks);
         assert_eq!(
             text.matches("77.7").count(),
-            1,
-            "chart value must be indexed exactly once; chunks were:\n{chunks:#?}"
+            2,
+            "the pptx chart duplication changed shape — read the chunks before updating this \
+             count, and if the duplication is gone, invert this test rather than retuning it; \
+             chunks were:\n{chunks:#?}"
+        );
+        // Both shapes, named: the flat hoisted copy inside the body chunk, and ours.
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.text.contains("Readings: 77.7, 88.8, 99.9")),
+            "expected office_oxide's flat hoisted chart line, got: {chunks:#?}"
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.text.starts_with("Chart: Deck chart title")),
+            "expected our own structured chart chunk, got: {chunks:#?}"
         );
     }
 

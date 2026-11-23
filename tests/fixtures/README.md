@@ -93,6 +93,11 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
   test can count how many times the chart's data reached the index. It reaches it **twice today**
   — the pptx duplication defect that `src/extract/office.rs`'s xlsx- and docx-gated
   de-duplication does not cover. Pure ASCII, built by an untracked scratchpad script.
+  One limit to know before reusing it: its three body text shapes all carry the same
+  `<a:off y="365125">`, so the converter groups them ahead of both graphics and the emitted chunk
+  does **not** read in slide order. That is fine for counting duplication, which is what this
+  fixture exists for, but a task that wants to witness pptx chart *placement* must give those
+  shapes distinct y offsets first.
 - `sample_chart_legacy.rtf` — hand-built RTF (pure ASCII, 6.4 KB) carrying an OLE1-embedded
   legacy `MSGraph.Chart.8` object: `{\*\objdata <hex>}` → OLE1 native header → compound file →
   `Workbook` stream (in the *mini* stream) → BIFF globals + chart substreams, the datasheet
