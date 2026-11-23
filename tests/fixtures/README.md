@@ -80,6 +80,19 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
   appends a synthetic "Charts" section to its IR) and our `ooxml_chart` OOXML chart-data
   extraction — and the de-duplication between them (`src/extract/office.rs`'s
   `synthetic_xlsx_chart_section_chart_count` and `xlsx_chart_part_names`).
+- `sample_chart.pptx` — the repository's **only** pptx fixture, hand-built (never
+  PowerPoint-generated). One slide, three things deliberately: ordinary body text, a REFERENCED
+  chart (`<p:graphicFrame>` → `<a:graphicData uri=…/chart>` → `<c:chart r:id="rId2"/>` plus the
+  `ppt/slides/_rels/slide1.xml.rels` chain that resolves it to `ppt/charts/chart1.xml`), and a
+  SmartArt diagram (`<dgm:relIds r:dm="rId3"/>` → `ppt/diagrams/data1.xml`, nodes "Deck diagram
+  node one"/"two"). Both graphics travel the SAME converter path — `office_oxide` 0.1.17 flattens
+  each into `GraphicContent::Text` (`convert_pptx.rs:538`) with no way to tell them apart — which
+  is why the diagram is here: it is the guard any de-duplication must not eat, since a diagram has
+  no chart chunk of ours to replace it. The chart's title ("Deck chart title"), its series name
+  ("Readings") and its values (77.7 / 88.8 / 99.9) appear nowhere in the slide's body text, so a
+  test can count how many times the chart's data reached the index. It reaches it **twice today**
+  — the pptx duplication defect that `src/extract/office.rs`'s xlsx- and docx-gated
+  de-duplication does not cover. Pure ASCII, built by an untracked scratchpad script.
 - `sample_chart_legacy.rtf` — hand-built RTF (pure ASCII, 6.4 KB) carrying an OLE1-embedded
   legacy `MSGraph.Chart.8` object: `{\*\objdata <hex>}` → OLE1 native header → compound file →
   `Workbook` stream (in the *mini* stream) → BIFF globals + chart substreams, the datasheet
@@ -95,8 +108,8 @@ document extractors. Each contains the ASCII marker text `glossa sample`.
   and are not extracted; `.ppt` yields no images via office_oxide (both out of scope here).
 
 Do **not** replace these with real business/client documents — this repository is public.
-To add fixtures for other formats (xlsx/pptx/doc/xls/ppt), create equally neutral synthetic
-files containing the same `glossa sample` marker.
+To add fixtures for the formats still without one (`.ppt`, a chartless `.pptx`), create equally
+neutral synthetic files containing the same `glossa sample` marker.
 
 The `.odt`/`.ods` files are generated with [`odfpy`](https://pypi.org/project/odfpy/) (keeps this
 repo Python-free — only the binary fixtures are committed). Regenerate via the untracked

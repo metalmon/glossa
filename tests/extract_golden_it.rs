@@ -30,8 +30,9 @@ use std::path::Path;
 ///
 /// The chunk *count* is pinned by the length of each slice, and the text by its contents. Both
 /// matter: a split that moves changes the count without changing the concatenated text.
-/// Harvested from `office_oxide 0.1.17` on 2026-11-17. There is no `.pptx`/`.ppt` fixture in the
-/// repo and no plain `sample.xlsx` or `sample.rtf`; add their rows here if any is ever committed.
+/// Harvested from `office_oxide 0.1.17` on 2026-11-17, plus `sample_chart.pptx` on 2026-11-23.
+/// There is no `.ppt` fixture in the repo and no plain `sample.pptx`, `sample.xlsx` or
+/// `sample.rtf`; add their rows here if any is ever committed.
 ///
 /// Every `.rtf`, `.odt`, `.ods` and `.odp` fixture in `tests/fixtures/` is listed. If one is added
 /// there, add its row here too — an unlisted fixture is an unpinned fixture.
@@ -92,6 +93,26 @@ const EXPECTED: &[(&str, &[&str])] = &[
     (
         "sample.xlsb",
         &["| glossa sample xlsb |  |\n| --- | --- |\n| Sensor | Limit |\n| inlet pressure | 42 |\n| outlet pressure | 97 |"],
+    ),
+    (
+        // PRE-FIX STATE, pinned deliberately. This row records the **pptx chart duplication
+        // defect**, not desired output: the chart's title and its cached values ("Deck chart
+        // title", 77.7 / 88.8 / 99.9) appear TWICE below — once as `office_oxide`'s flat hoisted
+        // lines inside the slide's body chunk (`convert_pptx.rs:538`, `GraphicContent::Text`) and
+        // once in our own structured `Chart:` chunk (`ooxml_chart`, whose `chart_names_for`
+        // covers pptx). The de-duplication in `src/extract/office.rs::extract` is gated
+        // `ext == "xlsx"` and `ext == "docx"`, so pptx gets none.
+        //
+        // Task 10 of the chart-ordinals plan established this and deliberately stopped there; the
+        // fix is a separate decision (see that plan's "Still open"). Whoever fixes it should
+        // expect this row to move, and should read the move as the point of the change rather
+        // than as a regression.
+        //
+        // The hoisted copy also shows what this format cannot do yet: it is a flat
+        // `Title: …` / `Readings: …` blob with no table structure, and the chart chunk appends at
+        // the end rather than taking the slide position the `p:graphicFrame` gives it.
+        "sample_chart.pptx",
+        &["PRE-FIX PLACEHOLDER - harvest from CI"],
     ),
     ("sample_legacy.doc", &["# glossa sample legacy doc"]),
     (

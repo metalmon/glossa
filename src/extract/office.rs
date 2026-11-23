@@ -1601,6 +1601,58 @@ mod tests {
         assert!(joined.contains("glossa sample"), "got:\n{joined}");
     }
 
+    /// EVIDENCE TEST for the pptx duplication defect (Task 10 of the chart-ordinals plan).
+    ///
+    /// pptx has the same shape as the two formats above, with neither of their de-duplications:
+    /// `office_oxide` 0.1.17 hoists a referenced chart's text into the slide flow
+    /// (`convert_pptx.rs:538`, `GraphicContent::Text`), our `ooxml_chart` pass also covers pptx
+    /// (`chart_names_for` = `docx | xlsx | pptx`), and the de-duplication in `extract` is gated
+    /// `ext == "xlsx"` / `ext == "docx"` — so nothing drops either copy.
+    ///
+    /// "77.7" is a cached value of this fixture's only chart series. It appears nowhere in the
+    /// slide's body text, so every occurrence across the chunks is one path that put the chart's
+    /// numbers in the index.
+    #[test]
+    fn pptx_chart_text_is_indexed_exactly_once() {
+        let bytes = include_bytes!("../../tests/fixtures/sample_chart.pptx");
+        let chunks = OfficeExtractor
+            .extract(Path::new("sample_chart.pptx"), bytes)
+            .unwrap();
+        let text = joined(&chunks);
+        assert_eq!(
+            text.matches("77.7").count(),
+            1,
+            "chart value must be indexed exactly once; chunks were:\n{chunks:#?}"
+        );
+    }
+
+    /// The guard that outranks the de-duplication, and the reason a value-matching fix is
+    /// forbidden: the slide's own body text and the SmartArt diagram's node text ride the same
+    /// converter path as the chart's text, and nothing of ours re-emits them. A fix that ate
+    /// them would lose text outright, which is worse than duplicating it. True today; it must
+    /// stay true after any fix.
+    #[test]
+    fn pptx_body_and_diagram_text_reach_the_index() {
+        let bytes = include_bytes!("../../tests/fixtures/sample_chart.pptx");
+        let chunks = OfficeExtractor
+            .extract(Path::new("sample_chart.pptx"), bytes)
+            .unwrap();
+        let text = joined(&chunks);
+        for expected in [
+            "glossa sample slide",
+            "Slide body text that precedes the chart.",
+            "Slide body text that follows the chart.",
+            "Deck diagram node one",
+            "Deck diagram node two",
+            "Slide body text that follows the diagram.",
+        ] {
+            assert!(
+                text.contains(expected),
+                "pptx extraction lost {expected:?}, got:\n{text}"
+            );
+        }
+    }
+
     /// The synthetic-section predicate is structural, not title-based: a real worksheet that a
     /// user happens to name "Charts" — holding an ordinary table, not the heading/paragraph
     /// alternation `office_oxide` emits — must not be mistaken for the synthetic section.
