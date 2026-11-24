@@ -4573,6 +4573,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             &crate::grep::GrepOpts::default(),
             &t
         )
+        .text
         .contains("MODULE.pdf#1:"));
         let no = grep(
             d.path(),
