@@ -5,9 +5,10 @@ task-framed introduction to `kb` as an agent-shell tool (5 commands, with usage 
 [cli-for-agents.md](cli-for-agents.md) — this page is the complete, flag-level reference for every
 subcommand.
 
-`kbx` (`build`/`reason`/`train`/`distil`/`eval`) is a **separate** developer/benchmark binary built
-from source only — it is not part of the end-user surface and is not documented here. See
-[eval-and-training.md](eval-and-training.md).
+`kbx` (`build`/`reason`/`train`/`distil`/`eval`) is a **separate** developer/benchmark binary. It
+ships inside every release archive alongside `kb` (`.github/workflows/release.yml` copies it on
+every matrix row, unconditionally), but it is not part of the end-user agent surface and is not
+documented here. See [eval-and-training.md](eval-and-training.md).
 
 `kbi` (the remote inference server for NLI + reranker scoring) ships in the GPU-execution-provider
 release artifacts and is user-facing; it has its own CLI (`kbi <serve flags>` / `kbi service …`).
@@ -43,7 +44,7 @@ kb search <pattern> [path] [flags]
 | `-g, --glob <GLOB>` | Only search paths matching GLOB (rg `-g`) |
 | `-t, --type <TYPE>` | Only this file type, e.g. `pdf` |
 | `--scope <DOC-OR-GLOB>` | Restrict to one document or path-glob; ANDed with `--glob` |
-| `-l, --limit <N>` | Max hits (default `100`) |
+| `-l, --limit <N>` | Max hits (default `50`) |
 | `-s, --scan` | Literal ripgrep-regex scan of raw files instead of the BM25 index (slow, not stemmed) |
 | `-u, --no-ignore` | Disable `.gitignore`/`.ignore`/hidden filtering |
 | `-f, --format <auto\|rg\|pretty>` | Output style (default `auto`: pretty in a terminal, rg when piped) |
@@ -109,8 +110,8 @@ kb grep <pattern> [path] [flags]
 | Flag | Meaning |
 |------|---------|
 | `-i, --ignore-case` | Case-insensitive |
-| `-F, --fixed-strings` | Literal string, not regex |
-| `-w, --word-regexp` | Whole-word match |
+| `-F, --fixed` | Literal string, not regex |
+| `-w, --word` | Whole-word match |
 | `-g, --glob <GLOB>` | Only paths matching GLOB |
 | `-t, --type <TYPE>` | Only this file type |
 | `--scope <DOC-OR-GLOB>` | Restrict to one document or path-glob; ANDed with `--glob` |
@@ -184,7 +185,7 @@ kb mcp dump-tz-tools [-d/--config-dir <DIR>]
 |------|-----|---------|
 | `-p, --profile <NAME>` | | Tool profile: `reader` \| `editor` \| `full`. Default `editor`. |
 | `-t, --trace` | | Log every tool call to `<root>/.glossa/traces/*.jsonl` (for the eval harness) |
-| `-G, --no-graph` | | Expose only `search`+`read` (graph/index/admin tools hidden) — eval control arm |
+| `-G, --no-graph` | | Closes the graph gate — narrower than "read-only": `graph_stats` has no gate and survives it, and the notebook write tools (`note`/`del`) are gated separately and also survive. Full tool-by-tool breakdown: [mcp.md](mcp.md#profiles). |
 | `--vision` | `GLOSSA_VISION` | Enable image output in `read` (embedded figures, `page_image`), served as JPEG. Off by default — a figure-heavy page's base64 payload can overflow the stdio JSON-RPC frame. Safe on `--transport streamable-http`. |
 | `--source-file` | `GLOSSA_SOURCE_FILE` | Enable the `get_source_file` tool (delivers the original file behind a citation). Off by default — many clients can't consume the returned resource. |
 | `--transport <stdio\|streamable-http>` | `GLOSSA_MCP_TRANSPORT` | Default `stdio`. |
@@ -197,7 +198,8 @@ kb mcp dump-tz-tools [-d/--config-dir <DIR>]
 | `--tls-key <PATH>` *(`tls` feature)* | `GLOSSA_TLS_KEY` | PEM private key matching `--tls-cert`. |
 | `--tls-client-ca <PATH>` *(`tls` feature)* | `GLOSSA_TLS_CLIENT_CA` | PEM client-CA enabling mTLS (client certs required and verified). |
 | `--session-idle-secs <N>` | `GLOSSA_MCP_SESSION_IDLE_SECS` | Idle-session timeout for `streamable-http`; `0` (default) disables it. |
-| `-N, --noimage` | `GLOSSA_NO_IMAGE` | **Deprecated no-op** — images are already off by default; use `--vision` to enable them. |
+| `--dedup` | `GLOSSA_MCP_DEDUP` | Enable the retrieval anti-loop dedup (repeat/streak/plateau markers). Bare flag turns it on; off by default. |
+| `-N, --noimage` | `GLOSSA_NO_IMAGE` | **Not a no-op** — it is a veto over `--vision`: `--vision --noimage` still leaves images off. Hidden from `kb mcp --help`; listed here because a leftover `GLOSSA_NO_IMAGE` in a service environment silently disables `--vision` with nothing in the startup output to say so. |
 
 `kb mcp dump-tz-tools -d <config_dir>` regenerates TensorZero tool config from the live MCP tool
 definitions (default `config_dir`: `eval/tensorzero/config`); equivalent to `just tools`.
@@ -205,7 +207,8 @@ definitions (default `config_dir`: `eval/tensorzero/config`); equivalent to `jus
 `kb mcp service install|uninstall|start|stop|status` installs and manages `kb` as an OS service
 (Windows SCM / Linux systemd), streamable-http by default. `install` takes `--service-name`, a corpus
 (positional or the global `--root`), `--bind`, `--profile`, repeatable `--allowed-host`, and
-`--vision`/`--dedup`/`--source-file`/`--no-graph`/`--trace`/`--session-idle-secs`/`--insecure`. The
+`--vision`/`--dedup`/`--source-file`/`--no-graph`/`--trace`/`--session-idle-secs`/`--insecure`, plus
+`--auth-token-file` and (in a `tls`-feature build) `--tls-cert`/`--tls-key`/`--tls-client-ca`. The
 surface mirrors `kb mcp` one-for-one, so a command line that works interactively converts to a
 service unchanged — which matters most for the tool-surface switches, since they have no
 config-file form and a service only ever has what `install` carries. Parity is about getting an

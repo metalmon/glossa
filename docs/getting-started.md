@@ -76,7 +76,9 @@ kb search "maxTsdr" -l 20
 kb search "print queue" -g '*.pdf'
 ```
 
-Output is ripgrep-compatible by default (`path:location: snippet`). In a terminal, format auto-switches to numbered lines; force with `-f pretty` or `-f rg`.
+Piped output (the default when not writing to a terminal) prints one line per hit:
+`path#N  heading: snippet  [score]` — the locator is fused into the path with `#`, not a separate
+colon field. In a terminal, format auto-switches to numbered lines; force with `-f pretty` or `-f rg`.
 
 **Literal / regex scan** over extracted text (exact tokens, error codes, version strings):
 

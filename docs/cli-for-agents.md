@@ -14,7 +14,7 @@ and go.
 |---------|--------------|--------|
 | `kb cat <file>` | Print a file's **whole** extracted text, straight from disk. A `cat` that understands `.pdf` / `.docx` / `.xlsx` / `.pptx` / `.md`. | none |
 | `kb grep <pattern> [dir]` | Ripgrep-style regex/literal search **inside** the extracted text of every document — including binary Office/PDF. | auto |
-| `kb search <keywords> [dir]` | BM25-ranked keyword search over a folder (morphology-aware). Prints `#n path · snippet`. | auto |
+| `kb search <keywords> [dir]` | BM25-ranked keyword search over a folder (morphology-aware). Piped (the default for a shelled-out agent) prints one `path#N  heading: snippet  [score]` line per hit. | auto |
 | `kb read <target> [n]` | Read a document by path, by a `path#N` chunk token (the same copy-ready ref `search`/`grep` print), **or** a result number from the last `search`. Index/graph-aware. | auto |
 | `kb glob <pattern> [dir]` | List documents whose **path** matches a shell glob. | auto |
 
@@ -28,8 +28,8 @@ They look similar but have different contracts — pick by intent:
   or `head`.
 - **`kb read <target>`** is the omnivorous, corpus-aware reader: a path
   (optionally with a `#N` chunk ordinal — for PDFs the page number), a numbered
-  hit from the last search, or (over MCP) a graph node id / notebook note. Use it
-  while navigating an indexed knowledge base.
+  hit from the last search, or a graph node id (`res:…`) — the CLI accepts all
+  of these, not only MCP. Use it while navigating an indexed knowledge base.
 
 ## Frictionless examples
 
@@ -53,7 +53,7 @@ kb read handbook.docx#3      # the 3rd chunk of a Word doc
 Output goes to stdout with a header only when writing to a terminal; piped or
 captured, it is clean text — safe to feed straight into another tool or an
 agent's context window (mind the size for large documents; prefer `grep` or a
-`location` to pull just what you need).
+`path#N` chunk ordinal to pull just what you need).
 
 ## Telling your agent to use it
 
