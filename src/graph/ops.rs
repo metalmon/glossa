@@ -244,6 +244,11 @@ fn resolve_section_ref(idx: &DocIndex, s: &str) -> Result<Option<String>, String
 enum EndpointResolution {
     /// Resolved to exactly this node id.
     Resolved(String),
+    /// Resolved only by the fuzzy morphology fallback: no label matched exactly, and this node
+    /// is the closest morphological neighbour. A DIFFERENT label than the caller wrote, so the
+    /// caller reports every one of these — and refuses it outright when the reference names a
+    /// node that the same batch dropped (see `vet_fuzzy_rebind`).
+    Fuzzy(String),
     /// No node matched the reference.
     NoMatch,
     /// A bare label under an unfixed-type relation matched more than one node TYPE, so the
@@ -277,6 +282,47 @@ fn fmt_candidates(cands: &[(String, String)]) -> String {
         .join(" or ")
 }
 
+/// Most fuzzy rebindings listed in one upsert response. Past this the rest are summarized by a
+/// count, so a large batch cannot turn a per-edge inference into an unbounded wall of warnings.
+const REBIND_REPORT_CAP: usize = 10;
+
+/// Vet an [`EndpointResolution::Fuzzy`] match before it is allowed to become an edge.
+///
+/// `Ok(note)` — a legitimate morphological resolution (the case the fallback exists for: an
+/// author writing a label in a different grammatical form than the node carries, "connection
+/// loss" for the node labelled "connection losses"). The note names what was rebound to what,
+/// for the caller to report.
+///
+/// `Err(reason)` — `label` names a node this same batch DROPPED. There is then no node to bind
+/// to, and the closest morphological neighbour is a different fact; binding it would write a
+/// false reasoning step that reads exactly like a true one. The caller refuses the edge.
+fn vet_fuzzy_rebind(
+    g: &GraphStore,
+    dropped_labels: &std::collections::HashSet<String>,
+    role: &str,
+    label: &str,
+    id: &str,
+    edge_source_path: &str,
+) -> Result<String, String> {
+    let bound_to = g
+        .get_node(id)
+        .ok()
+        .flatten()
+        .map(|n| format!("{} [{}] \"{}\"", n.id, n.node_type, n.label))
+        .unwrap_or_else(|| id.to_string());
+    if dropped_labels.contains(&normalize_label(label)) {
+        let whence = if edge_source_path.is_empty() {
+            "this batch".to_string()
+        } else {
+            format!("\"{edge_source_path}\"")
+        };
+        return Err(format!(
+            "`{role}` label \"{label}\" has no node — its node was DROPPED earlier in {whence} (see the node error in this same response). The label matched only a DIFFERENT node morphologically ({bound_to}), so the edge was refused rather than bound to the wrong fact — fix the node and resend both"
+        ));
+    }
+    Ok(format!("`{role}` \"{label}\" → {bound_to}"))
+}
+
 /// Shared resolution context for `EndpointResolver::resolve` — the index, graph, ontology,
 /// and the batch-local lookup maps that every endpoint resolution needs, grouped so the
 /// resolver takes two arguments (`label`, `prefer_types`) instead of eight.
@@ -292,8 +338,11 @@ struct EndpointResolver<'a> {
 impl EndpointResolver<'_> {
     /// Resolve an edge endpoint label to a node id: exact normalized-label match first, then a
     /// fuzzy morphology match against existing reasoning nodes (the small model often paraphrases
-    /// its own label — a truncation or wording variant). As a last resort, strip a leading
-    /// node-TYPE token the model prefixed onto its own label ("Standard SPEC-1234" → "SPEC-1234")
+    /// its own label — a truncation or wording variant; an author writes an inflected label in a
+    /// different grammatical form than the node carries). A morphology match comes back as
+    /// `Fuzzy`, never `Resolved`: it binds a label the caller did NOT write, so the caller reports
+    /// it and refuses it for a label whose node the same batch dropped. As a last resort, strip a
+    /// leading node-TYPE token the model prefixed onto its own label ("Standard SPEC-1234" → "SPEC-1234")
     /// — gated on the token naming a declared type, so ordinary multi-word labels are never
     /// mangled. Returns None when nothing matches.
     fn resolve(&self, label: &str, prefer_types: &[String]) -> EndpointResolution {
@@ -431,7 +480,9 @@ impl EndpointResolver<'_> {
             .min_by_key(|n| n.label.split_whitespace().count())
             .map(|n| n.id)
         {
-            Some(id) => Resolved(id),
+            // Morphological, not exact — flagged so the caller can report the rebinding and
+            // refuse it when the label belonged to a node dropped in the same batch.
+            Some(id) => Fuzzy(id),
             None => NoMatch,
         }
     }
@@ -487,6 +538,11 @@ pub struct UpsertOutcome {
     pub handles: Vec<(String, String)>,
     /// Malformed items that were dropped (partial apply) or caused full rejection
     pub dropped: Vec<String>,
+    /// Edge endpoints that resolved only MORPHOLOGICALLY — the caller's label matched no node
+    /// exactly and was rebound to the closest neighbour. One line per rebinding, capped at
+    /// [`REBIND_REPORT_CAP`] plus a trailing "… and N more" summary, so this never grows with
+    /// the batch. An exact match is silent; an inference is reported.
+    pub rebound: Vec<String>,
 }
 
 /// Build the human-readable tool response from an upsert outcome.
@@ -520,6 +576,15 @@ pub fn format_upsert_response(out: &UpsertOutcome) -> String {
         parts.push("Merged (already existed, edges attached):".into());
         for (from, to) in &out.merged {
             parts.push(format!("- {from} → {to}"));
+        }
+    }
+    if !out.rebound.is_empty() {
+        parts.push(
+            "Resolved by MORPHOLOGY, not an exact label — VERIFY each is the node you meant:"
+                .into(),
+        );
+        for r in &out.rebound {
+            parts.push(format!("- {r}"));
         }
     }
     if !out.handles.is_empty() {
@@ -579,6 +644,11 @@ pub fn graph_upsert(
     // bad items with a clear, actionable reason — never discard valid work because a sibling item is
     // malformed (the old all-or-nothing footballed the model). Label length is NOT gated.
     let mut errs: Vec<String> = Vec::new();
+    // Normalized labels of the nodes (1) drops below. An edge endpoint naming one of these has
+    // no node: the author named something that did not survive. The fuzzy morphology fallback
+    // would then bind the edge to the nearest NEIGHBOUR — a different fact — so (4) refuses such
+    // an edge instead. Known here for free: a dropped node is one this loop `continue`s past.
+    let mut dropped_labels: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // (1) Nodes: keep those whose source_path is a real indexed document; drop the rest.
     // A node also carrying valid_from/valid_to is normalized here — an unparseable date is a
@@ -609,6 +679,7 @@ pub fn graph_upsert(
                     "node \"{}\" [{}] dropped: type requires grounding but no source_path was given — give it the `path#n` of the section it is grounded in",
                     nd.label, nd.node_type
                 ));
+                dropped_labels.insert(normalize_label(&nd.label));
                 continue;
             }
             // Ungrounded by design: no document, no auto-MENTIONS (resolve_section_ref
@@ -622,6 +693,7 @@ pub fn graph_upsert(
                         "node \"{}\" dropped: source_path \"{}\" is not a document in the knowledge base — use a real path from a search/read result, or omit source_path to leave it ungrounded{}",
                         nd.label, nd.source_path, crate::tools::document_path_hints(idx, &nd.source_path)
                     ));
+                    dropped_labels.insert(normalize_label(&nd.label));
                     continue;
                 }
             }
@@ -640,6 +712,7 @@ pub fn graph_upsert(
                     nd.label,
                     nd.valid_from.as_deref().unwrap_or_default()
                 ));
+                dropped_labels.insert(normalize_label(&nd.label));
                 continue;
             }
         };
@@ -656,6 +729,7 @@ pub fn graph_upsert(
                     nd.label,
                     nd.valid_to.as_deref().unwrap_or_default()
                 ));
+                dropped_labels.insert(normalize_label(&nd.label));
                 continue;
             }
         };
@@ -751,6 +825,7 @@ pub fn graph_upsert(
             merged: vec![],
             handles: vec![],
             dropped,
+            rebound: vec![],
         };
         return UpsertOutcome {
             message: format_upsert_response(&out),
@@ -858,6 +933,9 @@ pub fn graph_upsert(
         fmt_capped(&call_handles, 8)
     };
     let mut edgespecs: Vec<EdgeSpec> = Vec::new();
+    // Fuzzy rebindings to report, and how many there were in total (the list is capped).
+    let mut rebound: Vec<String> = Vec::new();
+    let mut rebound_total: usize = 0;
     for ue in &edges {
         let (of, ot, oet) = (ue.from.clone(), ue.to.clone(), ue.edge_type.clone());
 
@@ -952,6 +1030,28 @@ pub fn graph_upsert(
                     // treat as node label (exact, then fuzzy morphology fallback)
                     match resolver.resolve(&from_ep, &from_types) {
                         EndpointResolution::Resolved(id) => from_resolved = Some(id),
+                        EndpointResolution::Fuzzy(id) => {
+                            match vet_fuzzy_rebind(
+                                g,
+                                &dropped_labels,
+                                "from",
+                                &from_ep,
+                                &id,
+                                &edge_source_path,
+                            ) {
+                                Ok(note) => {
+                                    from_resolved = Some(id);
+                                    rebound_total += 1;
+                                    if rebound.len() < REBIND_REPORT_CAP {
+                                        rebound.push(format!("edge {of} -{oet}-> {ot}: {note}"));
+                                    }
+                                }
+                                Err(m) => {
+                                    errs.push(format!("edge {of} -{oet}-> {ot} dropped: {m}"));
+                                    edge_ok = false;
+                                }
+                            }
+                        }
                         EndpointResolution::Ambiguous(cands) => {
                             errs.push(format!(
                                 "edge {of} -{oet}-> {ot} dropped: `from` label \"{of}\" is ambiguous — matches {} — reference the node by id or qualify as Type:label",
@@ -995,6 +1095,28 @@ pub fn graph_upsert(
                     // treat as node label (exact, then fuzzy morphology fallback)
                     match resolver.resolve(&to_ep, &to_types) {
                         EndpointResolution::Resolved(id) => to_resolved = Some(id),
+                        EndpointResolution::Fuzzy(id) => {
+                            match vet_fuzzy_rebind(
+                                g,
+                                &dropped_labels,
+                                "to",
+                                &to_ep,
+                                &id,
+                                &edge_source_path,
+                            ) {
+                                Ok(note) => {
+                                    to_resolved = Some(id);
+                                    rebound_total += 1;
+                                    if rebound.len() < REBIND_REPORT_CAP {
+                                        rebound.push(format!("edge {of} -{oet}-> {ot}: {note}"));
+                                    }
+                                }
+                                Err(m) => {
+                                    errs.push(format!("edge {of} -{oet}-> {ot} dropped: {m}"));
+                                    edge_ok = false;
+                                }
+                            }
+                        }
                         EndpointResolution::Ambiguous(cands) => {
                             errs.push(format!(
                                 "edge {of} -{oet}-> {ot} dropped: `to` label \"{ot}\" is ambiguous — matches {} — reference the node by id or qualify as Type:label",
@@ -1047,6 +1169,14 @@ pub fn graph_upsert(
                 });
             }
         }
+    }
+
+    // Bounded report: list at most REBIND_REPORT_CAP rebindings, then say how many were hidden.
+    if rebound_total > rebound.len() {
+        let hidden = rebound_total - rebound.len();
+        rebound.push(format!(
+            "… and {hidden} more fuzzy rebinding(s) not listed — re-send with exact labels to be sure"
+        ));
     }
 
     // (4a) Grounding auto-derive — the ONE place every writer gets this for free. A node
@@ -1117,6 +1247,7 @@ pub fn graph_upsert(
             merged: vec![],
             handles: vec![],
             dropped,
+            rebound: vec![],
         };
         return UpsertOutcome {
             message: format_upsert_response(&out),
@@ -1162,6 +1293,7 @@ pub fn graph_upsert(
             merged: vec![],
             handles: vec![],
             dropped,
+            rebound: vec![],
         };
         return UpsertOutcome {
             message: format_upsert_response(&out),
@@ -1225,6 +1357,7 @@ pub fn graph_upsert(
             merged: vec![],
             handles: vec![],
             dropped: errs,
+            rebound: vec![],
         };
         return UpsertOutcome {
             message: format_upsert_response(&out),
@@ -1299,6 +1432,7 @@ pub fn graph_upsert(
                 merged: result.merged,
                 handles,
                 dropped: errs,
+                rebound,
             };
             UpsertOutcome {
                 message: format_upsert_response(&out),
@@ -1315,6 +1449,7 @@ pub fn graph_upsert(
                 merged: vec![],
                 handles: vec![],
                 dropped: vec![format!("graph_upsert failed: {e}")],
+                rebound: vec![],
             };
             UpsertOutcome {
                 message: format!("graph_upsert failed: {e}"),
@@ -2447,6 +2582,174 @@ strict = false
         };
         let ok = resolver.resolve("Connection loss", &[]);
         assert_eq!(ok, EndpointResolution::Resolved(sym_id));
+    }
+
+    /// The measured mis-binding: a batch whose node was DROPPED still had its edge written, and
+    /// the orphaned `from` label was rebound by the fuzzy fallback to an unrelated neighbour
+    /// sharing one token ("Replace the cable" → [Cause] "Faulty cable"). A wrongly bound edge in
+    /// the reasoning skeleton is a false step that reads exactly like a true one, so the edge
+    /// must be refused — and no unrelated node may gain an edge.
+    #[test]
+    fn edge_from_label_of_node_dropped_in_same_batch_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(GROUNDING_ONT).unwrap();
+        write_doc(&idx, "manual.md");
+
+        // The neighbour the fallback used to grab: it shares the token "cable" and nothing else.
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Symptom", "Faulty cable", "manual.md")],
+            vec![],
+            1_000_000,
+            "agent",
+        );
+        assert!(!out.rejected, "setup node written: {}", out.message);
+        let neighbour = id_for(&ont, "Symptom", "Faulty cable");
+
+        // Resolution requires grounding, so this node is dropped — and its edge names it.
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Resolution", "Replace the cable", "")],
+            vec![uedge(
+                "Replace the cable",
+                "MENTIONS",
+                "manual.md#1",
+                "manual.md",
+            )],
+            1_000_001,
+            "agent",
+        );
+        assert_eq!(
+            out.edges, 0,
+            "the edge of a dropped node must not be written: {}",
+            out.message
+        );
+        let out_edges = g.outgoing(&neighbour).unwrap();
+        assert!(
+            !out_edges.iter().any(|e| e.edge_type == "MENTIONS"),
+            "the unrelated neighbour must gain no edge: {out_edges:?}"
+        );
+        assert!(
+            out.dropped
+                .iter()
+                .any(|d| d.contains("Replace the cable") && d.contains("DROPPED")),
+            "the refusal names the label that did not resolve and that its node was dropped: {:?}",
+            out.dropped
+        );
+    }
+
+    /// Regression guard for the behaviour the fuzzy fallback exists for and that must NOT break:
+    /// a Russian label written in a different grammatical case than the node carries still
+    /// resolves to that node ("потеря связи" → the node labelled "потери связи").
+    #[test]
+    fn morphological_endpoint_still_resolves_to_its_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "manual.md");
+
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Symptom", "потери связи", "manual.md")],
+            vec![],
+            1_000_000,
+            "agent",
+        );
+        assert!(!out.rejected, "setup node written: {}", out.message);
+        let sym = id_for(&ont, "Symptom", "потери связи");
+
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Resolution", "перезапуск модуля", "manual.md")],
+            // Nominative in the edge; the node carries the genitive.
+            vec![uedge(
+                "потеря связи",
+                "RESOLVED_BY",
+                "перезапуск модуля",
+                "manual.md",
+            )],
+            1_000_001,
+            "agent",
+        );
+        assert_eq!(
+            out.edges, 1,
+            "a morphological endpoint must still resolve: {}",
+            out.message
+        );
+        let res = id_for(&ont, "Resolution", "перезапуск модуля");
+        let out_edges = g.outgoing(&sym).unwrap();
+        assert!(
+            out_edges
+                .iter()
+                .any(|e| e.edge_type == "RESOLVED_BY" && e.to == res),
+            "the edge landed on the morphologically matched node: {out_edges:?}"
+        );
+    }
+
+    /// A fuzzy rebinding is an inference, so it is reported: the caller can tell an exact match
+    /// from a morphological one and see which endpoint went where.
+    #[test]
+    fn fuzzy_rebinding_is_reported_to_the_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let ont = Ontology::parse(DEDUP_ONT).unwrap();
+        write_doc(&idx, "manual.md");
+
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Symptom", "Connection losses", "manual.md")],
+            vec![],
+            1_000_000,
+            "agent",
+        );
+        assert!(!out.rejected, "setup node written: {}", out.message);
+        let sym = id_for(&ont, "Symptom", "Connection losses");
+
+        let out = graph_upsert(
+            &idx,
+            &g,
+            &ont,
+            vec![unode("Resolution", "Module restart", "manual.md")],
+            vec![uedge(
+                "Connection loss",
+                "RESOLVED_BY",
+                "Module restart",
+                "manual.md",
+            )],
+            1_000_001,
+            "agent",
+        );
+        assert_eq!(out.edges, 1, "edge written: {}", out.message);
+        assert_eq!(
+            out.rebound.len(),
+            1,
+            "exactly the fuzzy endpoint is reported (the exact `to` is silent): {:?}",
+            out.rebound
+        );
+        assert!(
+            out.rebound[0].contains("Connection loss") && out.rebound[0].contains(&sym),
+            "the report names the label written and the node it bound to: {:?}",
+            out.rebound
+        );
+        assert!(
+            out.message.contains("MORPHOLOGY"),
+            "the rebinding reaches the caller's response: {}",
+            out.message
+        );
     }
 
     /// Edge whose `to` label has no corresponding node is rejected; message names the label.

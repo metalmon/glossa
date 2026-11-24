@@ -376,7 +376,11 @@ Always call **`glossary`** before creating nodes to reuse existing ids.
 
 ## Id conventions
 
-With `id_prefix` in ontology, stable ids are derived from type + normalized label (e.g. `sym:poterya-svyazi`). Reference nodes in edges by id or label; upsert resolves labels to ids.
+With `id_prefix` in ontology, stable ids are derived from type + normalized label (e.g. `sym:poterya-svyazi`). Reference nodes in edges by id or label.
+
+**Label resolution is morphological, not exact.** `graph_upsert` tries an exact (normalized) label match first; an endpoint that matches nothing exactly falls back to the closest *morphological* match among existing nodes — deliberately, so a label written in a different grammatical form than the node carries still reaches it (an endpoint "connection loss" resolves to the node labelled "connection losses"). The consequence to know: **a fuzzy endpoint can bind to a different label than you wrote, i.e. to a different fact.** Every fuzzy rebinding is therefore reported in the upsert response under `Resolved by MORPHOLOGY, not an exact label` (capped per call), naming the endpoint and the node it bound to — verify each is the node you meant, or re-send with the exact label / the node id.
+
+One case never rebinds: an endpoint naming a node that **the same batch dropped** is refused, not bound to a neighbour. The author named something that did not survive, so the nearest morphological match is a different fact; the edge is dropped with a reason naming the label and that its node was dropped. Losing one edge you asked for is better than writing one you did not.
 
 ## CLI ↔ MCP parity
 

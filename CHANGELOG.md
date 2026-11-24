@@ -6,7 +6,33 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **An edge whose node the same `graph_upsert` batch dropped is no longer bound to a neighbour.**
+  A batch carrying a node that was dropped (grounding, a bad `source_path`, an unparseable
+  validity bound) still wrote that node's edges, and the orphaned endpoint label went through the
+  deliberate fuzzy-morphology fallback — which matched an *unrelated* node on one shared token and
+  grounded the edge there (measured: `{"from": "Replace the cable", "edge_type": "MENTIONS"}`
+  written as `[Cause] "Faulty cable" -MENTIONS-> manual.md#4`). In a graph an agent reads as
+  facts, that is a false reasoning step that reads exactly like a true one, and nothing in the
+  response said the edge had gone elsewhere. Such an edge is now **refused**, with a reason naming
+  the label, the edge's document, and that its node was dropped — losing one edge the author asked
+  for is better than writing one they did not.
+
+  **The morphology fallback itself is unchanged** for what it exists for: an endpoint written in a
+  different grammatical form than the node carries still resolves to that node.
+
 ### Changed
+
+- **A fuzzy (morphological) endpoint resolution is now reported.** An upsert that could not match
+  an endpoint label exactly, and rebound it to the closest morphological neighbour, lists each
+  rebinding under `Resolved by MORPHOLOGY, not an exact label — VERIFY each is the node you meant`
+  (also `UpsertOutcome.rebound`), naming the endpoint and the node it bound to. Previously a caller
+  could not distinguish an exact match from an inferred one — which is why the mis-binding above
+  was silent. The list is capped per call (10) with a trailing count, so a large batch cannot turn
+  a per-edge inference into an unbounded wall of warnings. `docs/graph-and-ontology.md` said only
+  "upsert resolves labels to ids", which reads as exact; it now states that resolution is
+  morphological, that it can bind a different label, and that a dropped endpoint refuses.
 
 - **A failed `search`, `grep` or `glob` now reports as a tool error too.** The file-backed half of
   this shipped first (below); the three retrieval tools still flattened their failure into the
