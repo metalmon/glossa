@@ -367,10 +367,12 @@ Change detection has two tiers, and both have a blind spot worth knowing about:
   current content straight off disk, not from the index, so it always sees the latest bytes.
 
 Both cases are rare in practice (most editors and sync tools bump mtime and/or size on save), but
-when the served result looks stale and neither has caught up: **`kb index --force`** does a full,
-unscoped rebuild that re-stats every file regardless of the dirsig/manifest state, and is the
-escape hatch for both of these plus a stuck empty-mount hold (below). It refuses to run while any
-root is unreadable — a rebuild that cannot see the whole corpus would drop what it cannot see.
+when the served result looks stale and neither has caught up, two escape hatches exist:
+**`kb index --file <rel>`** reindexes just that one document relative to the corpus root — the
+lighter fix when you know which file changed. **`kb index --force`** does a full, unscoped rebuild
+that re-stats every file regardless of the dirsig/manifest state; reach for it when you don't know
+which file is stale, or for the stuck empty-mount hold (below). It refuses to run while any root is
+unreadable — a rebuild that cannot see the whole corpus would drop what it cannot see.
 
 ### Empty-mount guard
 

@@ -35,8 +35,8 @@ stat-scans the corpus and incrementally reindexes changed files — but scans ar
 most once per `GLOSSA_MIN_RESCAN_MS` (default `2000` ms) so a hot query loop doesn't re-walk the
 filesystem on every call. If you edited a file and query again within that window, you may see the
 old text; wait out the window or lower `GLOSSA_MIN_RESCAN_MS`. If a manual `kb index --force` is
-needed for a genuinely stuck state, run it — this is also the only pass that rebuilds the
-answer-grounding DF sidecar (`.glossa/df`).
+needed for a genuinely stuck state, run it — this and a schema migration are the only passes that
+rebuild the answer-grounding DF sidecar (`.glossa/df`).
 
 ## Corpus is on a network mount
 
