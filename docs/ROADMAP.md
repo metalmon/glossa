@@ -1,6 +1,8 @@
 # glossa — roadmap and backlog
 
-Status as of **2026-09-30**. Version **0.5.2** (last tag `v0.5.2`), plus unreleased work (the `kbi` rename + `kb mcp service`).
+Status as of **2026-09-30**, version **0.5.2** at the time. The codebase has since moved well past
+that — master is ahead of the `v0.5.9` tag — and the **Shipped** sections below were not updated for
+the releases in between; read them as "shipped by 0.5.2 or earlier," not as a current inventory.
 
 For what ships today, see [README.md](../README.md) and [architecture.md](architecture.md). This file tracks performance notes, technical debt, and direction.
 
@@ -28,7 +30,7 @@ Legend used below: **Shipped** = in a release today; **Partial** = exists but in
 - **Search:** BM25 ranked search (multilingual stemming), ripgrep-style `grep`, path `glob`, optional raw `--scan`.
 - **Graph:** SQLite store, provenance-stamped nodes/edges, configurable `ontology.toml` with `id_prefix`, structural layer on index.
 - **Derived layer:** `graph generalize` — closure, SIMILAR, communities, centrality; debounced auto-generalize on editor MCP after index changes.
-- **MCP:** 22 tools (24 with `--features constraint`), profiles `reader` | `editor` | `full`, stdio + **streamable-http**, `/health` `/ready` `/metrics`; background `ensure_fresh` on read tools.
+- **MCP:** 24 tools by default (26 with `--features constraint`), profiles `reader` | `editor` | `full`, stdio + **streamable-http**, `/health` `/ready` `/metrics`; background `ensure_fresh` on read tools.
 - **CLI:** `kb search|grep|glob|read|index|graph …|mcp` — scripting-first, not a TUI.
 - **Source-file delivery:** `get_source_file` returns the original document for a hit; docx is auto-converted to PDF for viewing (`src/convert/docx_pdf.rs`).
 - **Graph UX:** `graph_stats`, SIMILAR + COMMUNITY in `related`, structural `neighbors` (typed 1-hop edges) and `reach` (cross-document connection between two nodes), formatted `graph_upsert` responses (Written / Merged / REJECTED).
@@ -72,7 +74,7 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 | Image files (png, …) | **Partial** | Index: filename/folder label chunk only. `read` serves standalone image files as raw bytes to vision (`read.rs`) and can rasterize any PDF page — behind `--vision` |
 | Image-only / scanned PDFs | **Partial** | Parseable scans now get one empty stub **per physical page** (`pdf.rs`); the `(no-text)` filename fallback fires only for *unparseable* PDFs. Still no OCR |
 | Indexing UX | **Partial** | `+ path` per file on index; no bar/counters/ETA |
-| Format sniffing (content, not extension) | **Open** | Routing by suffix; mislabeled `.doc`/RTF etc. hit wrong parser |
+| Format sniffing (content, not extension) | **Partial** | Routing is still by suffix in general, but a mislabeled `.doc` that is really RTF is now sniffed and routed to the RTF reader (`rtf::looks_like_rtf`); general content sniffing beyond that case is still open |
 | Table fidelity (xlsx/docx/pdf) | **Partial** | Office **done** — `expand_merged_tables` densifies merged col/row spans, multi-line cells collapsed, emitted as GFM (`office_table.rs` / `office_chunk.rs`). PDF: **flat layout-text only** — the structured table detector was removed (unreliable: mis-classified multi-column prose as tables, grids low-quality; A/B on a multi-column PDF corpus). Tables come through as flattened rows |
 | Vision for image-only pages | **Partial** | `render_pdf_page` rasterizes any page to JPEG@200DPI and serves embedded scans byte-for-byte, wired into `read` via the `page_image` arg behind `--vision` (`read.rs` / `tools.rs`). **Manual** — not auto-triggered for detected image-only pages |
 | Structured JSON chunks | **Open** | `.json` indexed as plain text windows |
@@ -81,7 +83,8 @@ See [eval-and-training.md](eval-and-training.md) for the dev pipeline and [bench
 | OpenDocument odt/ods/odp | **Shipped** (0.3.2) | Own `content.xml`→IR parser (headings, tables with merged cells / repeats / clamps, section-per-sheet/slide), reusing the office chunker; embedded images via `Pictures/` |
 | Chart data (Office/ODF) | **Shipped** (0.3.2) | OOXML `charts/chartN.xml` cache; ODF embedded local table or cell-range refs resolved against the sheet → one GFM chunk per chart. Legacy `.doc/.xls/.ppt` (BIFF) charts and visual chart rendering are out of scope (see `architecture.md`) |
 | Engineering drawings / CAD | **Open** | Direction: 3 layers (text metadata / image / structural CAD model), native Rust render (DXF→`tiny-skia`, STEP→`truck`), delivered as an **MCP Apps** interactive artifact behind an opt-in `cargo` feature (render client-side, server stays lean) |
-| rtf, epub, eml/msg | **Open** | No extractors |
+| epub, eml/msg | **Open** | No extractors |
+| rtf | **Shipped** | Full `Extractor` impl (`src/extract/rtf.rs`), including chart extraction |
 
 ### Graph
 
@@ -169,7 +172,7 @@ traversal, not a complex graph fed to a weak model. Design captured in an intern
 
 | Item | Status | Notes |
 |------|--------|-------|
-| MCP server + tools | **Shipped** | **22** `#[tool]` fns default, **24** with `--features constraint` (added since "15": graph_doctor / graph_stats / graph_update / graph_generalize / get_source_file / …); stdio + streamable-http, profiles, traces, auto-generalize |
+| MCP server + tools | **Shipped** | **24** tools advertised by default, **26** with `--features constraint` (which un-gates `constraint_solve` and `graph_build` — the 26 `#[tool]` functions themselves are always compiled in; only those two stay gated at runtime); stdio + streamable-http, profiles, traces, auto-generalize |
 | `kb` CLI (search/grep/glob/read/graph) | **Partial** | Operator commands exist; no TUI/REPL, completion, or rich progress |
 | Install/deploy scripts | **Partial** | GitHub Releases + [install.md](install.md) + [deploy/](../deploy/) ansible/service — not apt/Homebrew/winget |
 | Human-friendly operator UX | **Open** | Progress bars, shell completion, browse/maintenance TUI |

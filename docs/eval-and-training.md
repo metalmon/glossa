@@ -9,7 +9,7 @@ toolkit. Corpus operators can skip most of this — see [getting-started.md](get
 glossa measures not a bare LLM but an **agent with tools** (`search`, `grep`, `glob`, `read`,
 graph, …). The `kbx` toolkit builds a thin query-side reasoning layer over an indexed corpus,
 synthesizes grounded `(question, answer)` cases from it, optimizes the answer prompt, and scores
-the reader — graph-on vs graph-off, optionally graded by an LLM judge. It needs no external
+the reader, optionally graded by an LLM judge. It needs no external
 gateway: everything is driven by a per-workspace `lab.toml` (a model endpoint per role).
 
 ```mermaid
@@ -46,6 +46,10 @@ flowchart TB
 Default work corpus: **`kb-test/`** (git-ignored). The `kbx` pipeline runs over any indexed
 corpus. Build or rebuild the search index **before** eval or training (not per question):
 
+`kbx` takes only a positional `[PATH]` per subcommand — no `--root`/`--state-dir`/`--config`. In a
+split-state deployment (corpus on a network share, `.glossa` on local disk via `kb mcp
+--state-dir`), point every `kbx` command at the **state** directory, not the corpus root.
+
 ```bash
 ./target/release/kb index kb-test --force    # Windows: kb.exe
 ```
@@ -67,8 +71,11 @@ per role). Over an indexed corpus:
 | `kbx reason` | Phase 2 — synthesize the query-side reasoning layer |
 | `kbx train` | `(Q,A)` + GEPA optimization of the answer prompt (iteration-based progress bar) |
 | `kbx distil` | Densify the graph, emit `(Q,A)` golds, or enrich search aliases (stronger model) |
-| `kbx eval` | Score the reader (graph-on vs graph-off), optionally graded by an LLM judge |
+| `kbx eval run` | Score the reader over a dataset, optionally graded by an LLM judge |
+| `kbx eval fcr` | Run-free Full Chain Retrieval: does BM25 retrieval surface the whole gold source set? No reader/judge/GPU |
+| `kbx eval calibrate` | Sweep the verify-gate threshold over a run (or a dataset, run-free) |
 | `kbx export` | Build SFT / DPO fine-tuning datasets from captured trajectories |
+| `kbx bench extract` | Measure indexing/read cost on a corpus against a CI-built `kb` binary (see [benchmarks.md](benchmarks.md)) |
 
 Endpoints, sampling, retries, and the optional gates are all configured in `lab.toml` — see the
 self-documenting [template](../eval/templates/lab.toml). Notable capabilities:
@@ -99,9 +106,11 @@ self-documenting [template](../eval/templates/lab.toml). Notable capabilities:
   the reader loop instead of accepting it (eval + train).
 - **Customer-facing prediction runs** — `kbx eval run --no-gold` runs the reader over a question list
   WITHOUT scoring (skips the judge, keeps `answerable=false` cases, tolerates empty gold answers), so
-  a fresh unanswered question set can be run as-is. `--answers <path>` writes a flat question→answer
-  CSV (UTF-8 BOM so Excel opens Cyrillic, RFC-4180 quoting, a trailing blank `quality` column for the
-  reviewer) for handing to a customer to grade. With golds present the CSV also carries `gold` +
+  a fresh unanswered question set can be run as-is. `--answers <path>` writes a flat, `;`-separated
+  (not comma) question→answer CSV — UTF-8 BOM so Excel opens Cyrillic, an embedded quote doubled
+  RFC-4180-style but every field collapsed to one line (a newline inside a long answer is lost, not
+  carried in a multi-line quoted field), leading `id` column, trailing blank `quality` column for the
+  reviewer — for handing to a customer to grade. With golds present the CSV also carries `gold` +
   `verdict` columns (validate against gold and export the transcript in one run). A relative
   `--answers` path resolves under `runs/<tag>/` (never the indexed corpus); absolute is used as given.
 - **Evidence-grounded judge** — grades an answer against the retrieved source evidence, not only the gold string.
@@ -242,10 +251,10 @@ kbx nli check [PATH]                              # will the verifier run, or wh
 fp32, `--fp16` / `--int8` (mutually exclusive) fetch the half- or int8-weight variant. The chosen
 variant is always written locally as the canonical `model.onnx` (fp32 also brings `model.onnx.data`);
 `--repo` / `--file` override for a third-party model. `nli set` writes `[verify.nli]` (`model_dir`,
-`scorer`, optional `entail_index`, `device`, and — only if given — `[verify] mode`) into
-`ontology.toml`, preserving the rest of the file. `--device` is a single compute device
-(`cpu`|`cuda`|`directml`|`rocm`) with automatic CPU fallback. `nli check` reports the compiled engine
-and whether every precondition is met.
+`scorer`, optional `entail_index`, `device`, `gpu_id`, `gpu_mem_mb`, `batch_tokens`, and — only if
+given — `[verify] mode`) into `ontology.toml`, preserving the rest of the file. `--device` is a
+single compute device (`cpu`|`cuda`|`directml`|`rocm`) with automatic CPU fallback. `nli check`
+reports the compiled engine and whether every precondition is met.
 
 **Wiring the reranker** — the `kbx rerank` group mirrors `kbx nli` for the cross-encoder reranker:
 
@@ -257,7 +266,7 @@ kbx rerank check --model-dir <dir> [--device cuda]   # ... or an explicit dir, o
 ```
 
 `rerank set` writes `[rerank]` (`model_dir`, `scorer`, optional `pool_size` / `device` /
-`gpu_id` / `gpu_mem_mb`) into `ontology.toml`, preserving every other table. `rerank check`
+`gpu_id` / `gpu_mem_mb` / `batch_tokens`) into `ontology.toml`, preserving every other table. `rerank check`
 resolves that same config — like `nli check` and `rerank fit` do — so with no flags it probes the
 deployment retrieval will actually use, including the configured batch budget, which is part of the
 session's identity. Every flag overrides one piece of it, and a corpus whose `[rerank]` names a
@@ -287,11 +296,13 @@ is silently dropped:
 test** (correct = the reader declines / says it is not in the KB), scored as such by `kbx eval run`
 when a `[judge]` endpoint is configured.
 
-Such a case may leave `answer` **empty**: the judge never shows it a `GOLD` block (it grades by the
-abstention rubric instead), so there is no gold text to write and no need to invent a refusal
-sentence for the lexical metrics to chew on. A blank gold form earns no EM/F1 credit — including
-when the reader returned nothing — so the verdict comes from the judge, where it belongs. An
-`answerable=true` case with no answer is still a validation error.
+Such a case can write `answer = ""` — the key is required (there is no serde default; omitting it
+entirely is a TOML parse error), but its value may be the empty string. The judge never shows an
+empty-answer case a `GOLD` block (it grades by the abstention rubric instead), so there is no gold
+text to write and no need to invent a refusal sentence for the lexical metrics to chew on. A blank
+gold form earns no EM/F1 credit — including when the reader returned nothing — so the verdict comes
+from the judge, where it belongs. An `answerable=true` case with a blank `answer` is still a
+validation error.
 
 ---
 

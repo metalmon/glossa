@@ -1,6 +1,7 @@
 # glossa — benchmark log & progress toward SOTA
 
-Curated record of agent-eval runs (the `kbx eval` harness). Raw `eval-*.json` reports are git-ignored;
+Curated record of agent-eval runs (the `kbx eval` harness). Raw per-case JSON and each run's
+`report.md` land under `<state>/.glossa/kbx/runs/<tag>/` (git-ignored, like all of `.glossa/`);
 this file is the durable, human-readable history. One row per meaningful run. Append, don't rewrite.
 
 Two kinds of number live here, and they answer different questions. **Retrieval quality** (below) is
@@ -62,8 +63,9 @@ Same 50 questions, identical glossa retrieval; only the reader changes:
 
 ## Extraction cost — indexing and read, per corpus
 
-Produced by `just bench-baseline <path-to-ci-built-kb>` (`kbx bench extract`). One row per corpus
-per run; append, don't rewrite.
+Produced by `just bench-baseline <path-to-ci-built-kb> <corpus-a> <corpus-b>` (`kbx bench extract`
+under the hood, once per corpus plus a generated ladder). One row per corpus per run; append, don't
+rewrite.
 
 The two real corpora are private, so they appear as **corpus A** (38 mixed documents — 33 pdf,
 4 docx, 1 odt — largest 39.6 MiB) and **corpus B** (11 PDFs, largest 0.6 MiB). Their shapes are what
@@ -75,8 +77,10 @@ makes the numbers readable; their names are not.
   nobody ships measures the wrong thing. Its `kb --version` is in the row.
 - Corpora are measured as **copies**. `--force` rebuilds a corpus's index, and on a corpus whose
   manifest predates the current schema it migrates it as well, so the `Migration` column says which
-  side of that the row is. corpus A sits at schema 3 against a current 5: a row reading
-  `schema 3→5` measured migrated bodies; one reading `schema 5→5` measured a corpus already there.
+  side of that the row is. These rows were taken when the current schema was 5 (it is **8** now);
+  read `schema 3→5` as "migrated bodies" and `schema 5→5` as "a corpus already there" — the specific
+  numbers are a historical log, not a value to recompute, but a row reproduced today would read
+  `→8`.
 - **Peak RSS is Linux-only.** On Windows the cell reads `not measured`, not a zero: the Win32 route
   needs a new direct dependency, and polling a shell through a multi-minute run would steal CPU
   from the process being measured. On that platform the memory evidence is only indirect: the
@@ -296,8 +300,9 @@ it:
 **The tantivy commit is 52–80 ms and does not grow with the corpus at all.** Reference resolution is
 0 ms. The DF sidecar is 1–11 ms. Everything else in the tail — 11 s to 260 s of it — is the one
 thing left between the last file and process exit: the **graph generalization pass that `--force`
-runs by itself** after indexing (`src/main.rs:2016`: transitive closure, SIMILAR edges, communities,
-centrality).
+runs by itself** after indexing (`src/main.rs`'s call to
+`glossa::graph::generalize::apply::generalize` in the `Index` arm, mirrored in the `kb graph
+generalize` arm: transitive closure, SIMILAR edges, communities, centrality).
 
 Timed standalone with `kb graph generalize` (non-merge, exactly as `--force` invokes it):
 

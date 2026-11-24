@@ -3,8 +3,8 @@
 The e2e suite spawns the **real `kb` binary** and drives it over **real sockets** — raw HTTP/1.1
 (and, under the `tls` feature, real TLS) against a live `kb mcp --transport streamable-http` server.
 It exercises the prod-hardening features (Spec A multi-root + state-dir, Spec B freshness, Spec C
-serving/auth/limits/TLS/shutdown, Spec E config file) the way an operator or agent actually hits
-them, not through in-process shims.
+serving/auth/limits/TLS/shutdown, Spec E config file, Spec F a corpus on a network share with local
+`.glossa` state) the way an operator or agent actually hits them, not through in-process shims.
 
 ## Layout
 
@@ -16,6 +16,7 @@ them, not through in-process shims.
 | `tests/e2e_spec_c_serving.rs` | `/health` `/ready` `/metrics`, bearer auth, body-limit, startup interlock, graceful shutdown, rate-limit |
 | `tests/e2e_spec_c_tls.rs` | Native TLS + mTLS with a blocking rustls client |
 | `tests/e2e_spec_e_config.rs` | TOML `--config` drives the server; flag-over-file precedence; secret-in-file rejection |
+| `tests/e2e_spec_f_network_share.rs` | A corpus on a NETWORK SHARE with `.glossa` state on local disk; UNC path handling |
 
 Each test file starts with `#![cfg(feature = "e2e")]` (the TLS file with
 `#![cfg(all(feature = "e2e", feature = "tls"))]`) and includes the harness via:

@@ -28,7 +28,7 @@ often default to the small model — switch them to your strong/cloud endpoint h
 kbx distil --emit-golds teacher-qa.toml
 
 # 2. Let the strong model SOLVE those questions over the graph, capturing its full trajectories.
-kbx eval --dataset teacher-qa.toml --tag teacher --capture
+kbx eval run --dataset teacher-qa.toml --tag teacher --capture
 
 # 3. Export the correct teacher trajectories as an SFT dataset.
 kbx export --from teacher --format sft --out teacher-sft.jsonl
@@ -45,7 +45,7 @@ produces varied trajectories — some correct, some wrong — which is what DPO 
 
 ```bash
 # Capture N trajectories per question from the small reader.
-kbx eval --tag onpolicy --capture --samples 4
+kbx eval run --tag onpolicy --capture --samples 4
 
 # SFT from the trajectories the judge marked correct:
 kbx export --from onpolicy --format sft --out onpolicy-sft.jsonl
