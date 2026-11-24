@@ -443,6 +443,17 @@ at the wrong path silently splits your state:
   flags, files under secondary roots are not scanned by `--scan`. Plain `kb search` (BM25) covers
   every configured root; either restrict `--scan` to a single-root corpus or run it once per root.
 
+**`kb index` and `kb mcp` refuse outright, rather than silently splitting state.** If a later
+invocation drops `--root` so the corpus root resolves to the configured `--state-dir` itself (the
+natural mistake in this layout, since `--state-dir`/`GLOSSA_STATE_DIR` is sticky in the environment
+while the corpus root is not), and the index already there describes documents that do not exist
+under the state dir, the command refuses before touching anything: *"refusing to index the state
+directory as a corpus: ... Indexing would walk the state dir as the corpus and prune the real
+documents. Name the corpus itself: --root <corpus> --state-dir <state>."* The same check runs
+before the MCP server's `index` tool prunes through its startup-resolved roots. Name the corpus
+explicitly with `--root` to avoid it; if the directory really is meant to be both corpus and state
+dir, drop the redundant `--state-dir`.
+
 ## Graceful shutdown
 
 One signal stops the loop, drains the listener, and tears down sessions together:

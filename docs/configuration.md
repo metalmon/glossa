@@ -48,9 +48,11 @@ ignored) — set it via `--auth-token` or `GLOSSA_MCP_TOKEN` instead. See
 | `GLOSSA_VISION` | `false` | Env form of `--vision` — enable image output in `read`. |
 | `GLOSSA_SOURCE_FILE` | `false` | Env form of `--source-file` — enable the `get_source_file` tool. |
 
-`GLOSSA_NO_IMAGE` also exists as the env form of the deprecated `-N/--noimage` no-op flag; images
-are already off unless `--vision`/`GLOSSA_VISION` is set, so it has no effect and is not listed
-above as a knob to reach for.
+`GLOSSA_NO_IMAGE` also exists as the env form of `-N/--noimage`. It is **not** a no-op: it is a
+veto over `--vision`/`GLOSSA_VISION` — `--vision` with `GLOSSA_NO_IMAGE` set still leaves images
+off. It is not listed above as a knob to reach for because the flag is hidden and deprecated, but a
+leftover `GLOSSA_NO_IMAGE` in a service environment silently disables `--vision` with nothing in
+the startup output to say so — check it first if `--vision` appears to do nothing.
 
 Two retrieval-tuning env vars are corpus-level, not server-level: `GLOSSA_PPR_SIM_WEIGHT` and
 `GLOSSA_PPR_SPINE_WEIGHT` (plus `GLOSSA_PPR_BRIDGE`). They override the matching `[retrieval]`
@@ -146,7 +148,7 @@ built-in engine default. The matching env vars (where listed) override the file 
 | `sim_weight` | float ≥ 0 · default `0.1` | PPR transition weight of a mechanical `SIMILAR` edge relative to a reasoning edge (`1.0`). Lower = leaner similarity mass (suits a stronger reader); higher = heavier (suits a weaker reader). Env `GLOSSA_PPR_SIM_WEIGHT`. |
 | `spine_weight` | float ≥ 0 · default `1.0` | PPR transition weight of a reasoning-spine (`Chaining`-role) edge relative to a plain reasoning edge (`1.0`, a no-op). `> 1.0` boosts the spine so a load-bearing bridge edge isn't diluted by out-degree against grounding/descriptive edges. Env `GLOSSA_PPR_SPINE_WEIGHT`. |
 | `bridge` | `"off"` \| `"geomean"` · default `"off"` | Dual-seed combination mode for composed PPR (query-time seeding only). Env `GLOSSA_PPR_BRIDGE`. |
-| `search_limit` | integer > 0 · default unset | How many hits a `search` that names no `limit` returns — the depth the **reader** sees. Unset ⇒ 50 for the agent `search` tool, 100 for `kb search` (which prints to a human). `[rerank].pool_size` is a different knob: how deep the cross-encoder pools *behind* this, so pooling 200 to hand the reader 20 is a normal configuration. `kbx eval fcr` measures at this depth unless `--k` overrides it. Env `GLOSSA_SEARCH_LIMIT`. |
+| `search_limit` | integer > 0 · default unset | How many hits a `search` that names no `limit` returns — the depth the **reader** sees. Unset ⇒ 50, for both the agent `search` tool and `kb search` (one shared default — see `DEFAULT_SEARCH_LIMIT`). `[rerank].pool_size` is a different knob: how deep the cross-encoder pools *behind* this, so pooling 200 to hand the reader 20 is a normal configuration. `kbx eval fcr` measures at this depth unless `--k` overrides it. Env `GLOSSA_SEARCH_LIMIT`. |
 
 ### `[verify]` — answer-grounding gate
 

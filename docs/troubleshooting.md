@@ -48,6 +48,17 @@ corruption and lock contention. If multiple MCP instances share one `.glossa/`, 
 [security-and-operations.md](security-and-operations.md) and
 [deploy/mcp-server.md § Topology](deploy/mcp-server.md#topology-one-process-per-base--profile).
 
+## "refusing to index the state directory as a corpus"
+
+`kb index`/`kb mcp` refuse rather than run when the corpus root you gave resolves to the same
+directory as `--state-dir`/`GLOSSA_STATE_DIR`, and the index already there holds documents that
+don't exist under it — the shape you get by dropping `--root` from a split-layout command line
+(`--root <share> --state-dir <local>`), since the state dir stays set in the environment while the
+corpus root does not. Without the guard, indexing would walk the state dir as the corpus and prune
+the real documents out with no warning. Fix: pass `--root <corpus> --state-dir <state>` explicitly;
+if the directory really is both the corpus and the state dir, drop the redundant `--state-dir`. See
+[deploy/mcp-server.md § Separated corpus / state-dir mode](deploy/mcp-server.md#separated-corpus--state-dir-mode).
+
 ## A `.docx`/`.xlsx`/`.pptx` extracts poorly or comes back empty
 
 Known extraction limits, not a bug to work around with a different flag:

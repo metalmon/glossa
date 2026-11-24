@@ -209,7 +209,7 @@ Dedicated events are emitted on the `glossa::audit` tracing target (filter with
 
 | Field | Meaning |
 | --- | --- |
-| `category` | `auth`, `access`, `session` |
+| `category` | `auth`, `access`, `session`, `write` |
 | `action` | e.g. `bearer_reject`, `insecure_serve`, `tool_invoke`, `idle_expired` |
 | `outcome` | `denied`, `invoked`, `override`, … |
 | `source` | client IP for network events, else `-` |
@@ -225,6 +225,10 @@ integration lands — see the scorecard.
 - On a corpus with no ignore file, `kb index` seeds a default `.ignore` that **whitelists** the file
   types glossa can extract (documents, images, common text/code). Installers, archives and temp
   files are not read. Edit the file to tune it; an existing `.ignore`/`.gitignore` is never touched.
+  **The seeded list is frozen at seed time** — a corpus seeded on an older release never gets a type
+  a later release learns to extract, on any later binary, including `kb index --force`: the file is
+  dropped by `*` before any extractor is asked, with no error. Add the line by hand (`!*.rtf`, say)
+  to a corpus seeded before that type existed.
 - A corrupt/unreadable file is logged, skipped, and listed in the end-of-run error summary — it
   never aborts the index.
 
