@@ -67,7 +67,11 @@ kb ontology init ./my-corpus --template compliance --force
 ## The catalog
 
 Full name → description. `kb ontology show <name>` prints the actual types and
-relations.
+relations, and a `# STANDARD:` comment block at the top of each preset names the
+standard or framework it follows and maps that standard's vocabulary onto the
+preset's two-to-four types — read it before deciding which type your documents'
+terms land on. A preset that follows no named standard says so there rather than
+guessing one.
 
 ### Tier 1 — conformance & compliance
 
@@ -83,8 +87,8 @@ relations.
 | `data-privacy` | Records of processing (ROPA): data → legal basis → retention period → processor. |
 | `access-governance` | Access and segregation of duties: who may do what, forbidden role combinations, least privilege. |
 | `hr-compliance` | Mandatory personnel records per role (training, medicals, clearances) and their expiry. |
-| `risk-register` | Enterprise risk register: risk → root cause → mitigating control. |
-| `fmea` | Failure modes of a product or process and their controls (quality, reliability, safety). |
+| `risk-register` | Enterprise risk register: risk → root cause, consequence, mitigating control. |
+| `fmea` | Failure modes of a product or process with their effects, causes and controls (quality, reliability, safety). |
 | `policy` | Internal rulebook: policy → rule → exception, grounded in the text. |
 
 ### Tier 2 — operational knowledge

@@ -1,12 +1,25 @@
+# STANDARD: IEC 60812, failure modes and effects analysis (FMEA and FMECA); the same
+# four nouns carry the AIAG & VDA FMEA handbook's severity/occurrence/detection triple.
+# Reading documents written in that vocabulary, the terms land like this:
+#   failure mode, fault, loss of function            -> FailureMode
+#   effect of failure, end effect, consequence,
+#     severity (S) and its rating                    -> Effect
+#   failure cause, mechanism, occurrence (O)         -> Cause
+#   prevention control, detection control,
+#     detection (D), current controls                -> Control
+# So an RPN of S x O x D is read off the Effect, Cause and Control of one FailureMode.
 [meta]
 domain = "fmea"
-description = "Failure mode and effects analysis: failure mode -> cause -> control."
+description = "Failure mode and effects analysis: failure mode -> effect, cause, control."
 family = "risk"
 tier = 1
-aliases = ["reliability", "safety"]
+aliases = ["reliability", "safety", "fmeca", "effects-analysis"]
 
 [entities.FailureMode]
 id_prefix = "fm"
+props = []
+[entities.Effect]
+id_prefix = "eff"
 props = []
 [entities.Cause]
 id_prefix = "cau"
@@ -20,6 +33,15 @@ requires_grounding = true
 from = ["FailureMode"]
 to = ["Cause"]
 role = "chaining"
+# The "effects" half of the method. Its own spine below, NOT an extra hop appended to the
+# cause/control spine: a spine's relations are an ordered sequence every surviving node must
+# complete, so folding HAS_EFFECT into that one would doom every failure mode whose effect the
+# document leaves implicit. Effect stays UNGROUNDED - grounding is deliberately one node per
+# preset, and Control is the grounded terminal that `kbx reason` seeds from.
+[relations.HAS_EFFECT]
+from = ["FailureMode"]
+to = ["Effect"]
+role = "chaining"
 [relations.CONTROLLED_BY]
 from = ["FailureMode", "Cause"]
 to = ["Control"]
@@ -31,6 +53,7 @@ strict = true
 [reasoning]
 spines = [
   { anchor = "FailureMode", relations = ["CAUSED_BY", "CONTROLLED_BY"] },
+  { anchor = "FailureMode", relations = ["HAS_EFFECT"] },
 ]
 mentions = "MENTIONS"
 

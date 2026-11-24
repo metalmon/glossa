@@ -1,15 +1,27 @@
+# STANDARD: ISO 31000, risk management - guidelines; the same four nouns carry a COSO ERM
+# register.
+# Reading documents written in that vocabulary, the terms land like this:
+#   risk, risk event, risk statement, threat      -> Risk
+#   source of risk, root cause, driver            -> Cause
+#   consequence, impact, effect, severity rating  -> Consequence
+#   control, treatment, mitigation, response      -> Control
+# Likelihood sits on the Risk itself; the impact half of an inherent/residual rating is read
+# off the Consequence.
 [meta]
 domain = "risk-register"
-description = "Enterprise risk register: risk -> root cause -> mitigating control."
+description = "Enterprise risk register: risk -> cause, consequence, mitigating control."
 family = "risk"
 tier = 1
-aliases = ["erm"]
+aliases = ["erm", "iso31000", "risk-log"]
 
 [entities.Risk]
 id_prefix = "rsk"
 props = []
 [entities.Cause]
 id_prefix = "cau"
+props = []
+[entities.Consequence]
+id_prefix = "cns"
 props = []
 [entities.Control]
 id_prefix = "ctl"
@@ -19,6 +31,15 @@ requires_grounding = true
 [relations.CAUSED_BY]
 from = ["Risk"]
 to = ["Cause"]
+role = "chaining"
+# The impact half of a register. Its own spine below, NOT an extra hop appended to the
+# cause/control spine: a spine's relations are an ordered sequence every surviving node must
+# complete, so folding HAS_CONSEQUENCE into that one would doom every risk whose impact the
+# document leaves implicit. Consequence stays UNGROUNDED - grounding is deliberately one node
+# per preset, and Control is the grounded terminal that `kbx reason` seeds from.
+[relations.HAS_CONSEQUENCE]
+from = ["Risk"]
+to = ["Consequence"]
 role = "chaining"
 [relations.MITIGATED_BY]
 from = ["Cause"]
@@ -31,6 +52,7 @@ strict = true
 [reasoning]
 spines = [
   { anchor = "Risk", relations = ["CAUSED_BY", "MITIGATED_BY"] },
+  { anchor = "Risk", relations = ["HAS_CONSEQUENCE"] },
 ]
 closure = [["CAUSED_BY", "MITIGATED_BY", "MITIGATED_BY"]]
 mentions = "MENTIONS"
