@@ -2628,6 +2628,11 @@ fn main() -> anyhow::Result<()> {
                         anyhow::bail!("{reason}");
                     }
                 }
+                // Collect (bucket, reason) only when a guard actually refuses a REQUESTED bucket —
+                // each push below is gated on `prune_X && !force`, so a non-empty collection can
+                // only mean "this bucket was asked for and a guard said no". `prune_incomplete` has
+                // no guard, so it never contributes here (see the exit check after `prune()` below).
+                let mut refusals: Vec<(&'static str, String)> = Vec::new();
                 if prune_ungrounded && !force {
                     if let Some(reason) = glossa::graph::doctor::bucket_prune_risk(
                         report.ungrounded.len(),
@@ -2640,6 +2645,7 @@ fn main() -> anyhow::Result<()> {
                         glossa::cli_fmt::note(&format!(
                             "ungrounded prune REFUSED: {reason}\nre-run with --force to override."
                         ));
+                        refusals.push(("ungrounded", reason));
                     }
                 }
                 if prune_stale && !force {
@@ -2654,6 +2660,7 @@ fn main() -> anyhow::Result<()> {
                         glossa::cli_fmt::note(&format!(
                             "stale prune REFUSED: {reason}\nre-run with --force to override."
                         ));
+                        refusals.push(("stale", reason));
                     }
                 }
                 if prune_dangling && !force {
@@ -2664,6 +2671,7 @@ fn main() -> anyhow::Result<()> {
                         glossa::cli_fmt::note(&format!(
                             "dangling prune REFUSED: {reason}\nre-run with --force to override."
                         ));
+                        refusals.push(("dangling", reason));
                     }
                 }
                 if prune_incomplete || prune_ungrounded || prune_dangling || prune_stale {
@@ -2682,6 +2690,23 @@ fn main() -> anyhow::Result<()> {
                     glossa::cli_fmt::note(&format!(
                         "pruned: incomplete={inc} ungrounded={ung} dangling={dang} stale={stale}"
                     ));
+                } else if !refusals.is_empty() {
+                    // Every bucket that was actually requested got refused by a guard (the only
+                    // bucket exempt from this path is `prune_incomplete`, which has no guard and
+                    // so would have kept the `if` above true -- it is therefore never requested
+                    // here). A fully-refused prune is not a success: nothing the caller asked for
+                    // happened, and the only record of why was a stderr note no scheduler reads.
+                    let names: Vec<&str> = refusals.iter().map(|(name, _)| *name).collect();
+                    let details = refusals
+                        .iter()
+                        .map(|(name, reason)| format!("  - {name}: {reason}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    anyhow::bail!(
+                        "prune refused for every requested bucket ({}); re-run with --force to \
+                         override:\n{details}",
+                        names.join(", ")
+                    );
                 }
                 Ok(())
             }

@@ -173,3 +173,73 @@ fn doctor_reports_and_prunes() {
         .assert()
         .failure();
 }
+
+/// A fully-refused prune (every requested bucket turned down by its guard) exits non-zero and
+/// names the refused bucket — not success-with-a-stderr-note. The fixture has a single
+/// `requires_grounding` type (`Widget`) with one ungrounded node and NO node that is ever a live
+/// grounded terminal, so `bucket_prune_risk`'s "no live grounded terminal" trigger fires for the
+/// only bucket requested.
+#[test]
+fn doctor_prune_fully_refused_exits_nonzero() {
+    const ONT_NO_LIVE_TERMINAL: &str = r#"
+[entities.Widget]
+props = ["name"]
+requires_grounding = true
+[entities.Section]
+props = ["name"]
+[relations.MENTIONS]
+from = ["Widget"]
+to = ["Section"]
+[validation]
+strict = false
+"#;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".glossa")).unwrap();
+    std::fs::write(
+        dir.path().join(".glossa").join("ontology.toml"),
+        ONT_NO_LIVE_TERMINAL,
+    )
+    .unwrap();
+    let g = GraphStore::open(dir.path()).unwrap();
+    // No MENTIONS edge, so this is ungrounded; no other Widget exists to be a live terminal.
+    g.put_node(&node("widget:a", "Widget", "A", prov("doc_a.md", None)))
+        .unwrap();
+
+    // Refused: exits non-zero and names the bucket, not a silent success.
+    Command::cargo_bin("kb")
+        .unwrap()
+        .args([
+            "graph",
+            "doctor",
+            "--prune-ungrounded",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("ungrounded"));
+
+    // The node must still be there — nothing was pruned.
+    let g2 = GraphStore::open(dir.path()).unwrap();
+    assert!(
+        g2.get_node("widget:a").unwrap().is_some(),
+        "refused prune must not delete anything"
+    );
+
+    // --force bypasses the guard entirely and the delete goes through, exiting 0.
+    Command::cargo_bin("kb")
+        .unwrap()
+        .args([
+            "graph",
+            "doctor",
+            "--prune-ungrounded",
+            "--force",
+            dir.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(
+        g2.get_node("widget:a").unwrap().is_none(),
+        "--force must bypass the guard and prune"
+    );
+}

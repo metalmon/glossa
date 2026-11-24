@@ -8,6 +8,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **A `kb graph doctor --prune-*` that every guard refused exited 0.** `--prune-ungrounded`,
+  `--prune-dangling` and `--prune-stale` each have a mass-wipe guard that can refuse the bucket
+  (an ontology mismatch, a relinkable set, etc.) by flipping that flag back off and printing a
+  stderr note. When that left nothing to prune, the command still exited success — a scheduled
+  cleanup could silently stop deleting anything forever, and nothing but a note no cron job,
+  systemd timer or CI step reads would say so. `kb graph doctor` now exits non-zero, naming which
+  bucket(s) were refused and why, when every bucket the caller requested was refused this way.
+  A partial refusal — at least one requested bucket actually pruned — still exits 0, as does
+  `--prune-incomplete`, which has no guard. `--force` bypasses the guards entirely and is
+  unaffected.
+
 - **The graph/ontology and MCP documentation told agents to do impossible things.** Two audits
   checked ~170 assertions in `docs/graph-and-ontology.md`, `docs/ontology-presets.md`,
   `docs/graph-lifecycle.md`, `docs/graph-reasoning-directions.md`, `docs/concepts.md`, `docs/mcp.md`,
