@@ -2354,6 +2354,17 @@ fn main() -> anyhow::Result<()> {
                     }
                     None => auth_token,
                 };
+                // `-N`/`--noimage` (hidden, env `GLOSSA_NO_IMAGE`) is a veto over `--vision`, not a
+                // no-op — see ServerFlags::no_image. The veto staying in force is correct; what was
+                // missing is any log line, so a leftover GLOSSA_NO_IMAGE in a service environment
+                // silently defeated an explicit --vision with nothing in the startup output to say
+                // why.
+                if no_image && vision {
+                    ::tracing::warn!(
+                        "--vision requested but images are disabled by -N/--noimage or \
+                         GLOSSA_NO_IMAGE; images will stay off"
+                    );
+                }
                 let params = ServeParams {
                     roots: rr.roots,
                     state_base: rr.state_base,
