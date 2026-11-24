@@ -37,8 +37,8 @@ Replace `/path/to/my-documents` with your corpus root and use the installed `kb`
 kb mcp /path/to/my-documents --profile reader --transport stdio
 ```
 
-- **`reader`** — search, read, grep, glossary (recommended for Q&A agents).
-- **`editor`** — adds index, graph_upsert, graph_generalize (for agents that maintain the reasoning graph).
+- **`reader`** — `search`, `read`, `grep`, `glob`, `glossary`, `reach`, `sql`, `get_ontology`, `ls` (recommended for Q&A agents).
+- **`editor`** — adds `index`, `graph_upsert`, `graph_generalize`, the notebook writes and the low-level graph-navigation tools (for agents that maintain the reasoning graph). **This is the default** when `--profile` is omitted, so pass `--profile reader` explicitly for an answer-only server.
 
 ## Claude Desktop
 
@@ -110,9 +110,9 @@ Any client that supports **stdio MCP** can use the same `command` + `args` as Cl
 
 Once connected, the model can:
 
-1. **`search`** or **`grep`** — find relevant chunks (`[#n]` in results).
+1. **`search`** or **`grep`** — find relevant chunks. Each hit is one line beginning `path#n`; that leading token is the citation to carry into `read`.
 2. **`read(path, n)`** — open full chunk text.
-3. **`glossary` / `related`** — follow reasoning-graph chains (when graph is populated).
+3. **`glossary(name, query)`** — follow reasoning-graph chains (when the graph is populated). Both arguments are required. On `reader` this is the graph entry point, alongside `reach` and `sql`; the low-level `related` / `neighbors` / `resolve` tools are **editor-and-up only** and are not in a reader's tool list at all.
 
 Tool list: [mcp.md](mcp.md).
 

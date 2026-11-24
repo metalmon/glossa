@@ -8,6 +8,67 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **The graph/ontology and MCP documentation told agents to do impossible things.** Two audits
+  checked ~170 assertions in `docs/graph-and-ontology.md`, `docs/ontology-presets.md`,
+  `docs/graph-lifecycle.md`, `docs/graph-reasoning-directions.md`, `docs/concepts.md`, `docs/mcp.md`,
+  `docs/connect-to-agents.md`, `docs/integrations/zeroclaw.md`,
+  `docs/agent-workspace-contract.md` and the commented blocks of all 26 `templates/ontologies/*.toml`
+  against the source; 32 were wrong. These documents are read by agents, and the worst class is an
+  instruction an agent will follow, fail at, and then report as a defect in the product. Corrected
+  by class:
+
+  - **Instructions that could not succeed.** A node id shown as a readable slug when ids are an
+    eight-hex-digit hash and cannot be constructed from a label; a `kb graph path` command that does
+    not exist (`kb graph reach --from … --to … --no-bridge` replaced it); three entity types and two
+    relations in the support example that the ontology rejects (`Parameter`/`Product`/`Module`,
+    `Symptom --RESOLVED_BY--> Resolution`, and a `SETS` relation that exists nowhere in the tree); a
+    reader-profile walkthrough recommending `related`, which is editor-tier and absent from a
+    reader's tool list; `glossary`'s mandatory `query` argument presented as an optional refinement.
+  - **Grounding described with the wrong mechanism.** The write-time gate is on a node's
+    `source_path`, not on a `MENTIONS` edge — the edge is *derived* from the path — so an agent that
+    prepared a `MENTIONS` and omitted the path had its node silently dropped and concluded grounding
+    was broken. The call is also per-item, not atomic: a partial batch is the common outcome and
+    resending the whole thing duplicates what landed.
+  - **A substrate promised richer than the one indexing builds.** Three docs advertised a structural
+    layer with terms, `MENTIONS` and `CO_OCCURS`. Indexing writes exactly `Document`/`Section` plus
+    `CONTAINS`/`NEXT`/`PREV`/`PARENT`/`CHILD`/`REFERENCES` — the last three undocumented anywhere.
+    Each doc now states what is and is not built, and says plainly that a new corpus's graph is all
+    file names and headings until a reasoning layer exists, and that `graph dump` (a semantic-layer
+    export) is empty until then. That gap was the root of "the graph looks broken".
+  - **Flags and surfaces that do not behave as described.** `--no-graph` is not "search + read
+    only": nine tools survive it, the notebook *writes* among them, `graph_stats` carries no graph
+    gate and still answers, and it silently removes `purge` from `full`. `-N`/`--noimage` is not a
+    no-op but a veto over `--vision`, bound to `GLOSSA_NO_IMAGE` and hidden from `--help`. `verify`
+    needs *both* threshold buckets. The default profile — `editor`, the write-capable one — was
+    stated nowhere. `graph_doctor` has no `relink` argument, so the repair workflow the lifecycle doc
+    is built around is terminal-only. The agent's prune set is four buckets, not three.
+  - **A result format that never appears.** Three sites told agents to look for `[#n]` in search
+    results. The real line is `path#n · heading · snippet`, and that leading token is the citation the
+    tool description tells them to copy verbatim.
+  - **Stale guidance repeated 26 times.** Every preset's `[retrieval]` block still said `search`
+    defaults to 50 for the agent and 100 for `kb search`; the two were unified at 50 in v0.5.3.
+    `docs/graph-reasoning-directions.md` was written around the retired `kb-train enrich` binary and
+    now names today's `kbx build` + `kbx reason`.
+  - **Six shipped presets cannot be reasoned.** `access-governance`, `audit`, `data-privacy`,
+    `decision-log`, `okr` and `vendor` ground the subject of their spine, so `kbx reason` and
+    `kbx distil --densify` refuse to run on them. The lifecycle walkthrough presented `kbx reason` as
+    universal, and nothing told a user following it that the preset, not their command, was the
+    cause. Now stated in both docs and in a header comment in each of those six preset files.
+  - **Notes in search, stated in full.** `docs/agent-workspace-contract.md` said living under
+    `.glossa` means the agent "can never index its own notes as documents". The corpus walker half is
+    true, but notes go into the same tantivy index by a separate path as chunks tagged
+    `file_type = "note"` and do appear in `search` — measured, above the real document. Both halves
+    are now stated, with the `note` label in the result line and `search_filtered`'s `file_type`
+    filter for callers who want them out. The behaviour is intended and unchanged.
+  - **One paragraph documented to the model a field the code hides from it.** `raw: true` is
+    deliberately unadvertised — a reader that could set it would escape the retrieval anti-loop — so
+    that paragraph is now addressed to host integrators, and distinguished from `get_source_file`'s
+    unrelated, advertised `raw`.
+
+  Also: `kb graph doctor --help` described `--force` as overriding the dangling prune alone; it
+  overrides the guards on every `--prune-*` bucket. Documentation and comments only — no behaviour
+  changed.
+
 - **Every install script and install doc asked GitHub for an archive that does not exist.** Release
   assets are named `glossa-{version}-{target}-{engine}`, but all three installers
   (`deploy/windows/install-service.ps1`, `deploy/macos/install-service.sh`,

@@ -6,11 +6,27 @@ glossa separates **structural** graph data (auto-built from documents) from **re
 
 | Layer | Source | Examples |
 |-------|--------|----------|
-| Structural | Index pipeline | Document, Section, CONTAINS, MENTIONS |
-| Reasoning | Agent `graph_upsert` | Symptom, Cause, Resolution, CAUSED_BY, RESOLVED_BY |
+| Structural | Index pipeline | `Document`, `Section`; `CONTAINS`, `NEXT`, `PREV`, `PARENT`, `CHILD`, `REFERENCES` |
+| Reasoning | Agent `graph_upsert` | Symptom, Cause, Resolution; `CAUSED_BY`, `RESOLVED_BY`, `MENTIONS` |
 | Derived | `graph generalize` | SIMILAR, closure edges, community metadata |
 
 Structural nodes bypass ontology validation. Reasoning nodes and edges are validated against `.glossa/ontology.toml`.
+
+**What indexing actually builds — and what it does not.** The structural layer is exactly the two
+node types and six edge types above. In particular:
+
+- **`MENTIONS` is a reasoning edge, not a structural one.** Indexing never writes it. It appears
+  only where `graph_upsert` derives it from a node's `source_path`, or where an authored or imported
+  edge declares it.
+- **`Term` and `Topic` nodes, and `CO_OCCURS` edges, are not built.** They are declared in the
+  validation allowlists, and `CO_OCCURS` is a recognised core edge, but nothing in the tree writes
+  one: there is no lexical indexer. See [ROADMAP.md](ROADMAP.md).
+
+The practical consequence: **a freshly indexed corpus with no reasoning layer has a graph whose
+every node label is a file path or a heading.** `glossary`, `neighbors` and PPR seeding have no
+domain vocabulary to work with until an agent (or `kbx build` + `kbx reason`) writes reasoning
+nodes, and `graph dump` exports nothing at all. That is the expected state of a new corpus, not a
+broken graph.
 
 ## Ontology file
 
@@ -41,17 +57,30 @@ from a reference implementation:
 | Cause | `cau` | Root cause |
 | Resolution | `res` | Fix or procedure |
 | Task | `tsk` | How-to intent |
-| Parameter, Product, Module, … | (none) | Domain nouns |
+
+Those four are **all** of it. The support ontology is a thin reasoning skeleton: domain nouns —
+products, modules, parameters, versions, standards — are deliberately *not* node types. They live
+in the indexed documents, and the graph holds only the reasoning path. Because the file sets
+`[validation] strict = true`, upserting a `Parameter` or a `Product` is rejected outright
+(`unknown entity type 'Parameter' (strict)`).
 
 ### Relations (reasoning spine)
 
 ```
 Symptom --CAUSED_BY--> Cause
-Symptom/Cause/Task --RESOLVED_BY--> Resolution
-Resolution --SETS--> Parameter
+Cause/Task --RESOLVED_BY--> Resolution
 ```
 
-`CAUSED_BY` accepts **Symptom → Cause** only (not Task → Cause). Invalid endpoint pairs are rejected at upsert time.
+Those two are the whole spine. Both are the complete `from`/`to` sets:
+
+- `CAUSED_BY` accepts **Symptom → Cause** only (not Task → Cause).
+- `RESOLVED_BY` accepts **Cause → Resolution** and **Task → Resolution** only. **`Symptom →
+  Resolution` is not legal** — a symptom reaches a resolution through its cause, in two hops. The
+  upsert is rejected with `relation 'RESOLVED_BY' endpoints Symptom->Resolution not allowed`.
+
+Invalid endpoint pairs are rejected at upsert time. `get_ontology` →
+`relations.<edge_type>` is the authoritative `from`/`to` list for whatever ontology a corpus
+actually runs.
 
 ### Strict validation
 
@@ -77,10 +106,23 @@ requires_grounding = true
 
 Grounding is **transitive** — on a spine only the grounding node (e.g. `Resolution`) needs a direct `MENTIONS`; the others ground through it — so the flag goes on that one type. It is enforced two ways:
 
-- **Write time** — `graph_upsert` rejects the whole call if a `requires_grounding` node has no `MENTIONS` (in the batch or already in the graph), naming the node and the edge to add. Document-agnostic: the `MENTIONS` may cite any indexed document, not only the node's `source_path`.
-- **Standing** — `graph generalize` reports required nodes that lost a *live* `MENTIONS` (none, or one whose target section was removed) as `ungrounded=<n>` plus a re-ground list. This is a **separate bucket** from off-spine `prune_candidates`: re-ground them, or delete with `--prune-ungrounded` (destructive, CLI only).
+- **Write time** — the gate is on the node's **`source_path`**, not on a `MENTIONS` edge. A node of
+  a `requires_grounding` type whose `source_path` is empty is **dropped**, with a message naming it
+  and asking for the `path#n` of the section it is grounded in. Supplying a `MENTIONS` edge instead
+  does **not** satisfy the gate: the `MENTIONS` edge is *derived from* `source_path`, not the other
+  way round, so a grounded node needs no hand-written `MENTIONS` at all — give it
+  `source_path: "manual.md#4"` and the edge is written for you.
+- **Per item, not per call.** A grounding violation drops *that node* and lets the rest of the batch
+  through; the response then reads `N item(s) dropped (the rest WERE written) — fix and resend only
+  these: …`. Resend only the named items. `REJECTED — nothing written` appears only when the whole
+  batch failed, and that is the only case where resending everything is right.
+- **Standing** — `graph doctor` is what reports a required node that lost a *live* `MENTIONS`
+  (none, or one whose target section was removed), as the `ungrounded` bucket plus a re-ground list.
+  It is a **separate bucket** from off-spine `incomplete`: re-ground them (`--relink` repoints
+  relocated documents non-destructively), or delete with `--prune-ungrounded` (destructive).
+  `graph generalize` no longer reports this — hygiene moved to the doctor.
 
-**Grounding convention.** Document-extracted concrete nouns — a `Product` or `Parameter` named in source text — are marked `requires_grounding = true`. Each grounds to its own `MENTIONS` span. By contrast, synthesized reasoning nodes like a broad `Symptom` label or a `Task` intent carry no direct `MENTIONS` edge; they ground *transitively* through the grounding terminal of their reasoning spine — e.g. a `Task` grounds via its `RESOLVED_BY` Resolution, which grounds through `MENTIONS`. Abstract carriers (`Literal` nodes in constraint graphs) and constraint-type nodes (`Range`, `Enum`, `Required`, etc.) are never grounded and never marked `requires_grounding = true`. Each preset marks exactly **one** grounded terminal/subject per reasoning shape — there is no separate `Evidence` or citation-proxy node type; that would be redundant with `MENTIONS`, since the cited section *is* the evidence. The `get_ontology` MCP tool advertises these requirements per entity so an enricher can prepare `MENTIONS` edges upfront, rather than waiting for a `graph_upsert` rejection.
+**Grounding convention.** Document-extracted concrete nouns — a `Product` in `product-catalog`, a `Step` in `sop` — are marked `requires_grounding = true`. Each grounds to its own `MENTIONS` span. By contrast, synthesized reasoning nodes like a broad `Symptom` label or a `Task` intent carry no direct `MENTIONS` edge; they ground *transitively* through the grounding terminal of their reasoning spine — e.g. a `Task` grounds via its `RESOLVED_BY` Resolution, which grounds through `MENTIONS`. Abstract carriers (`Literal` nodes in constraint graphs) and constraint-type nodes (`Range`, `Enum`, `Required`, etc.) are never grounded and never marked `requires_grounding = true`. Each preset marks exactly **one** grounded terminal/subject per reasoning shape — there is no separate `Evidence` or citation-proxy node type; that would be redundant with `MENTIONS`, since the cited section *is* the evidence. The `get_ontology` MCP tool advertises these requirements per entity, so an enricher can collect a `source_path` for every node that needs one before it writes, rather than discovering it from a dropped item.
 
 ### Terminal-as-sink (a backward-reasoning requirement)
 
@@ -94,7 +136,7 @@ rejects a Chaining edge whose `to` type is not an allowed sink, so an ontology w
 sits only on the `from` side of every Chaining relation can never have a reasoning chain written to
 it.
 
-In the support example this holds: `Symptom/Cause/Task --RESOLVED_BY--> Resolution` puts the
+In the support example this holds: `Cause/Task --RESOLVED_BY--> Resolution` puts the
 grounded `Resolution` on the `to` side, so it is a valid sink. An ontology that instead grounded the
 *subject* of its spine — the grounded type appearing only as the `from` of its relations — would
 satisfy grounding but not terminal-as-sink, and would reason nothing.
@@ -108,6 +150,14 @@ Both passes check this up front rather than silently emitting an empty layer:
 
 When authoring or adapting an ontology, make sure at least one grounded terminal is the `to` of a
 Chaining relation. See [troubleshooting.md](troubleshooting.md) if `kbx reason` reports zero nodes.
+
+**Six shipped presets are in the fail-loud bucket today.** `access-governance`, `audit`,
+`data-privacy`, `decision-log`, `okr` and `vendor` ground the *subject* of their spine, so their
+grounded type is never a Chaining sink. On a corpus indexed with one of them, `kbx reason` and
+`kbx distil --densify` stop with the terminal-as-sink error — the ontology is the cause, not the
+invocation. Everything else those presets support (structural indexing, retrieval, agent-authored
+`graph_upsert`, `glossary`, `sql`) works normally; only *backward* reasoning is unavailable. The
+violator set is pinned by a test, so it changes only deliberately.
 
 ### Valid-time
 
@@ -288,7 +338,10 @@ Inspect the four types of doubts before recomputing:
 kb graph doctor ./my-corpus    # report ungrounded, stale, incomplete, and dangling nodes
 ```
 
-See [Graph doctor](#graph-doctor) for healing workflows and the pruning options (`--prune-incomplete`, `--prune-ungrounded`, `--prune-dangling`, `--prune-stale`). Every prune is opt-in: `graph_doctor` is report-only unless a prune flag is passed — on the CLI and over MCP alike (the MCP tool takes the same `prune_*` booleans). Only the `dangling` mass-wipe override (`--force`) is CLI-only.
+See [Graph doctor](#graph-doctor) for healing workflows and the pruning options (`--prune-incomplete`, `--prune-ungrounded`, `--prune-dangling`, `--prune-stale`). Every prune is opt-in: `graph_doctor` is report-only unless a prune flag is passed — on the CLI and over MCP alike (the MCP tool takes the same `prune_*` booleans). Two things are CLI-only: the mass-wipe override (`--force`) and the non-destructive repair
+`--relink`. `graph_doctor`'s arguments are exactly the four `prune_*` booleans — there is **no
+`relink` argument over MCP**, so an agent can see the `relinkable` group in the report but cannot
+apply it; a human runs `kb graph doctor <path> --relink`.
 
 ### 4. Generalize
 
@@ -314,20 +367,31 @@ kb graph glossary "connection loss" ./my-corpus
 kb graph near sym:abc123 ./my-corpus
 kb graph ls -t Symptom ./my-corpus
 kb graph node sym:abc123 ./my-corpus                  # one node: type, label, provenance, outgoing edges
-kb graph path sym:abc123 res:def456 ./my-corpus       # bounded path between two node ids
+kb graph reach --from sym:abc123 --to res:def456 --no-bridge ./my-corpus   # bounded path between two node ids
 ```
 
-MCP equivalents: `graph_stats`, `glossary`, `neighbors`, `read`.
+There is **no `kb graph path`** command. `reach` replaced it: `--from` + `--to` with no
+`--relation` and `--no-bridge` is the plain shortest-path lookup `path` used to do, and dropping
+`--no-bridge` lets the answer cross document boundaries. `--to` is optional — omit it for
+discovery (walk a relation outward from one node).
+
+MCP equivalents: `graph_stats`, `glossary`, `neighbors`, `reach`, `read`.
 
 ### 6. Export, import, prune
 
 ```bash
-kb graph dump ./my-corpus -f json          # dump all nodes + outgoing edges (text/json/dot/graphml/html)
+kb graph dump ./my-corpus -f json          # dump the SEMANTIC layer + outgoing edges (text/json/dot/graphml/html)
 kb graph dump ./my-corpus -f html > kb.html # self-contained offline graph explorer (see below)
 kb graph import graph.json ./my-corpus     # MERGE the graph file into the existing graph (default; upsert, keeps prior content)
 kb graph import graph.json ./my-corpus --mode replace  # replace the semantic layer instead (prune the file's types first; file = source of truth)
 kb graph prune ./my-corpus -t Symptom      # delete all nodes of a type (and edges touching them)
 ```
+
+**`dump` is a semantic-layer export, not a whole-graph export.** It drops every node whose type is
+`Document`, `Section`, `Term` or `Topic`. On a corpus that has only the structural layer the output
+is therefore `{"exported_types": [], "nodes": [], "edges": []}` — and the `-f html` explorer is
+empty for the same reason. That is correct behaviour, not a broken export: use `kb graph stats` or
+`kb graph ls -t Section` to see the structural layer.
 
 **`-f html` — offline interactive explorer.** Emits one self-contained HTML file
 (the graph library and data are embedded; nothing is fetched at runtime, so it
@@ -376,7 +440,16 @@ Always call **`glossary`** before creating nodes to reuse existing ids.
 
 ## Id conventions
 
-With `id_prefix` in ontology, stable ids are derived from type + normalized label (e.g. `sym:poterya-svyazi`). Reference nodes in edges by id or label.
+With `id_prefix` in ontology, ids are `<id_prefix>:<hash>` — a short FNV-1a hash of the normalized
+label, eight lowercase hex digits (e.g. `sym:508eba78`), not a readable slug. They are **stable**
+(the same label always yields the same id, which is how upsert deduplicates) but **not
+constructible**: you cannot compute one from a label, so never hand-assemble an id. Get it from the
+upsert response, from `glossary`, `ls`, `near` or `sql`, and copy it verbatim. The readable text
+lives in the node's `label`, printed next to the id everywhere.
+
+Reference nodes in edges **by label** — `graph_upsert` takes labels and derives the ids — or by an
+id you were given. (`kb graph import` is the one exception: it preserves whatever ids the file
+carries, so an imported graph may hold ids in any shape.)
 
 **Label resolution is morphological, not exact.** `graph_upsert` tries an exact (normalized) label match first; an endpoint that matches nothing exactly falls back to the closest *morphological* match among existing nodes — deliberately, so a label written in a different grammatical form than the node carries still reaches it (an endpoint "connection loss" resolves to the node labelled "connection losses"). The consequence to know: **a fuzzy endpoint can bind to a different label than you wrote, i.e. to a different fact.** Every fuzzy rebinding is therefore reported in the upsert response under `Resolved by MORPHOLOGY, not an exact label` (capped per call), naming the endpoint and the node it bound to — verify each is the node you meant, or re-send with the exact label / the node id.
 
@@ -397,5 +470,5 @@ Shared implementation: [`src/graph/ops.rs`](../src/graph/ops.rs).
 ## Further reading
 
 - [architecture.md](architecture.md) — derived layer algorithms
-- [eval-and-training.md](eval-and-training.md) — enrich pipeline
+- [eval-and-training.md](eval-and-training.md) — the `kbx` reasoning-layer pipeline
 - [mcp.md](mcp.md) — tool profiles and upsert responses

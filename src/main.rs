@@ -587,9 +587,10 @@ enum GraphAction {
         /// Delete stale nodes (source drifted; last resort — prefer re-syncing / rebuilding).
         #[arg(long = "prune-stale")]
         prune_stale: bool,
-        /// Override the mass-wipe guard and force the dangling prune even when it looks like an
-        /// ontology mismatch (zero live terminals) or over half the reasoning layer. Human-only:
-        /// not exposed over MCP.
+        /// Override the guards on any --prune-* bucket: the ontology-mismatch refusal (zero live
+        /// terminals), the per-bucket mass-wipe guard (over half the reasoning layer), and the
+        /// refusal to prune ungrounded nodes while relinkable ones remain. Human-only: not
+        /// exposed over MCP.
         #[arg(long = "force")]
         force: bool,
         /// Apply the non-destructive relink plan: re-point relocated/relabeled docs' groundings

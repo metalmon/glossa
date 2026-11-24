@@ -14,15 +14,25 @@ Profiles control which tools are visible. They are **not** RBAC — all instance
 
 | Profile | Typical use | Disabled tools |
 |---------|-------------|----------------|
-| `reader` | Answer agents | `index`, graph writes (`graph_upsert`/`graph_delete`/`graph_update`/`graph_generalize`/`graph_stats`/`graph_doctor`/`graph_build`), `purge`, `note`, `del`, and the low-level graph-navigation tools `neighbors`, `related`, `resolve`, `constraint_solve` |
+| `reader` | Answer agents | `index`, the graph-authoring tools (`graph_upsert`/`graph_delete`/`graph_update`/`graph_generalize`/`graph_build`), the graph-admin tools (`graph_doctor`/`graph_stats`), `purge`, `note`, `del`, and the low-level graph-navigation tools `neighbors`, `related`, `resolve`, `constraint_solve` |
 | `editor` | Index + graph + notebook write | `purge` |
 | `full` | Admin | (none) |
 
-Reader's tool set is deliberately lean — a weak answer model chooses better from fewer tools. It keeps the reasoning-graph entry points it actually uses (`glossary`, `reach`, `sql`) plus corpus search/read; the low-level navigation tools (`neighbors`, `related`, `resolve`) that a reader rarely reaches for are withheld (their value is already surfaced in `glossary`'s composed section). Reader also keeps **notebook read** (`ls` to list notes; note content is read with the regular `read` tool).
+The profile flag has a **default**: `kb mcp <path>` with no `--profile` starts **`editor`**, which is write-capable (index, graph authoring, notebook writes). Pass `--profile reader` explicitly for an answer-only server.
 
-`--no-graph` hides all graph and index tools (search + read only) for eval control arms.
+Two of the tools reader hides are not writes. `graph_doctor` is report-only unless a `prune_*` flag is set (see its row below), and `graph_stats` only counts nodes and edges. They are withheld from reader because a lean answer tool set reads better, not because they mutate anything.
 
-Image output is **off by default** and opt-in via `--vision` (or `GLOSSA_VISION=1`). Without it, `read` strips `page_image` and `include_images` from its schema and never returns `Content::image`. This is off by default because a figure-heavy page's base64 image payload can overflow the stdio JSON-RPC frame and drop the connection; enabling `--vision` is safe on `--transport streamable-http`. When enabled, all images are served as JPEG (embedded PNGs re-encoded, real JPEGs passed through). `-N` / `--noimage` is a deprecated no-op kept for compatibility (images are already off unless `--vision` is set).
+Reader's tool set is deliberately lean — a weak answer model chooses better from fewer tools. It keeps the reasoning-graph entry points it actually uses (`glossary`, `reach`, `sql`) plus corpus search/read, `get_ontology`, and **notebook read** (`ls` to list notes; note content is read with the regular `read` tool). The low-level navigation tools (`neighbors`, `related`, `resolve`) that a reader rarely reaches for are withheld — their value is already surfaced in `glossary`'s composed section. The full reader list is `get_ontology`, `glob`, `glossary`, `grep`, `ls`, `reach`, `read`, `search`, `sql` (plus `get_source_file` and `verify` when their gates are open).
+
+`--no-graph` closes the graph gate. It is narrower than "search + read only" in two directions, so do not treat it as a read-only switch:
+
+- **It still leaves nine tools standing** on `editor`/`full` — `search`, `read`, `grep`, `glob`, `get_ontology`, `graph_stats`, and the notebook tools `ls`, `note`, `del`. The notebook **writes** survive, so an eval control arm built on `--no-graph` alone is not read-only; pair it with `--no-default-features` (no notebook) or `--profile reader` for that.
+- **`graph_stats` is registered with no gate at all**, so it survives `--no-graph` and still answers from the graph. The graph is not unqueryable, only mostly unreachable.
+- It also **removes `purge` from `full`**, because `purge` carries the graph gate. The "Disabled tools: (none)" row above describes `full` without `--no-graph`.
+
+What `--no-graph` does hide: `index`, `resolve`, `neighbors`, `related`, `glossary`, `reach`, `sql`, `purge` and all the `graph_*` tools except `graph_stats`.
+
+Image output is **off by default** and opt-in via `--vision` (or `GLOSSA_VISION=1`). Without it, `read` strips `page_image` and `include_images` from its schema and never returns `Content::image`. This is off by default because a figure-heavy page's base64 image payload can overflow the stdio JSON-RPC frame and drop the connection; enabling `--vision` is safe on `--transport streamable-http`. When enabled, all images are served as JPEG (embedded PNGs re-encoded, real JPEGs passed through). `-N` / `--noimage` is **not** a no-op: it is a veto over `--vision`. `--vision --noimage` leaves images off. It is also bound to an environment variable, `GLOSSA_NO_IMAGE`, and hidden from `kb mcp --help`, so a leftover `GLOSSA_NO_IMAGE` in a service environment silently disables `--vision` with nothing in the startup output to say so. If `--vision` appears to do nothing, check that variable first.
 
 Original-file delivery (`get_source_file`) is likewise **off by default** and opt-in via `--source-file` (or `GLOSSA_SOURCE_FILE=1`). Many clients can't consume the returned file resource, so the tool is withheld unless a client that uses it opts in.
 
@@ -32,15 +42,15 @@ Original-file delivery (`get_source_file`) is likewise **off by default** and op
 
 | Tool | reader | editor | full | Purpose |
 |------|:------:|:------:|:----:|---------|
-| `search` | ✓ | ✓ | ✓ | BM25 keyword search; returns `[#n] path · snippet`. An index that cannot be opened or searched answers with **`isError: true`**; zero hits is a normal answer (see [Failures vs non-applicable](#failures-vs-non-applicable)) |
+| `search` | ✓ | ✓ | ✓ | BM25 keyword search; each hit is one line, `path#n · heading · snippet` (the heading segment is omitted when the chunk has none). The leading `path#n` is the citation token — copy it exactly; it is what `read` and a node's `source_path` take. An index that cannot be opened or searched answers with **`isError: true`**; zero hits is a normal answer (see [Failures vs non-applicable](#failures-vs-non-applicable)) |
 | `grep` | ✓ | ✓ | ✓ | Regex/literal over extracted text. An index walk that fails answers with **`isError: true`**; zero matches, and a pattern the regex engine refuses (the reply says to set `fixed:true`), are normal answers |
 | `glob` | ✓ | ✓ | ✓ | List documents by path glob. An index walk that fails answers with **`isError: true`**; no matching document, and a glob the matcher refuses (the reply gives the syntax), are normal answers |
 | `read` | ✓ | ✓ | ✓ | Read chunk `#n`, graph node evidence, or a notebook note (path from `ls`). Image output is off unless the server was started with `--vision`; then `page_image: true` returns PDF page `n` as a 200 DPI JPEG for vision models, and embedded/`<img>` images are returned alongside the text (all as JPEG). Without `--vision`, the image params are removed from the schema and responses are text only. A `page_image` call on a PDF page that will not render answers with **`isError: true`** — and carries the chunk's text in that same response, since the text comes from the index rather than the file (see [Failures vs non-applicable](#failures-vs-non-applicable)) |
 | `get_source_file` | ✓† | ✓† | ✓† | Deliver the original source file behind a citation (`path`, PDF page `n`) as an embedded resource blob for the client to preview/download — for source attribution, not reading. Whole file when ≤ cap (default 10 MB); a larger PDF returns just the cited page as its own PDF. A file the index has and the disk cannot produce answers with **`isError: true`** (see [Failures vs non-applicable](#failures-vs-non-applicable)). **† Off by default; opt in with `--source-file`** |
-| `glossary` | ✓ | ✓ | ✓ | Resolve concept → reasoning chain + anchors. Pass `query` (the full question) to rank the composed neighborhood by what the question actually needs |
+| `glossary` | ✓ | ✓ | ✓ | Resolve concept → reasoning chain + anchors. **Both `name` and `query` are required** — `name` is the concept, `query` is the full question, and the composed neighborhood is ranked by what that question needs. A call with `name` alone fails deserialization |
 | `reach` | ✓ | ✓ | ✓ | Cross-document reasoning bridge — walk a relation from a node (discovery), or add a candidate to verify the connection. Replaces the old `path` tool (`bridge: false` = in-document connectivity only) |
 | `sql` | ✓ | ✓ | ✓ | Read-only SQL SELECT over the reasoning graph — for a ranking or extreme ('which / earliest / largest / first'). Call with an empty query to get the schema and this graph's real edge/node vocabulary |
-| `verify` | ✓‡ | ✓‡ | ✓‡ | Answer-grounding gate: pass the final `answer` and the `chunk_paths` it cites; returns serve/abstain. **‡ Advertised in every profile but withheld until the corpus both enables the gate (`[verify].enabled`) and has a calibrated threshold — an uncalibrated gate can only ever abstain, so the route is not served** |
+| `verify` | ✓‡ | ✓‡ | ✓‡ | Answer-grounding gate: pass the final `answer` and the `chunk_paths` it cites; returns serve/abstain. **‡ Advertised in every profile but withheld until the corpus both enables the gate (`[verify].enabled`) and is calibrated in *both* buckets — `[verify.ac.threshold]` (or the legacy `[verify.threshold]`) must carry a `single` **and** a `multi` value; one alone leaves the tool withheld. An uncalibrated gate can only ever abstain, so the route is not served** |
 | `related` | | ✓ | ✓ | SIMILAR / COMMUNITY siblings after glossary |
 | `neighbors` | | ✓ | ✓ | A node's direct structural edges (typed, 1-hop, with direction) |
 | `resolve` | | ✓ | ✓ | Entity resolution by name |
@@ -94,7 +104,18 @@ corrected:
   matching a `glob` mask: the agent asked whether the corpus holds something and learned that it
   does not. That is true, and it is an answer — erroring would teach a reader to distrust it.
 - An out-of-range chunk number: `read` clamps to the valid range and says so in the response.
-- A path that does not resolve: the reply carries did-you-mean hints.
+- A path that does not resolve: the reply says so and *may* carry did-you-mean hints. The hints are
+  conditional, not guaranteed — nothing is offered for a basename under four characters, and
+  otherwise only a substring match (`*<base>*`) or an overlap of at least two word tokens
+  qualifies. There is no edit-distance search, so an ordinary one-character typo (`nots.md` for
+  `notes.md`) gets the bare "check the path" reply. **No hint is not evidence that no such document
+  exists** — fall back to `glob` or `search`.
+- A path that exists on disk but was never indexed: the reply says exactly that
+  (`… exists on disk but is not indexed — \`read\` serves indexed documents only`) and points at
+  the ignore rules, deliberately *not* at a typo. This is the third not-found arm and the only one
+  where re-reading the path is wasted effort.
+- Notebook-lock contention: `REJECTED — another process is editing the notebook — retry` is
+  content, because retrying is the correct response.
 - A `grep` pattern the regex engine refuses: the reply says to set `fixed:true` or to simplify to
   one or two distinctive words. A `glob` the matcher refuses: the reply gives the glob syntax.
   Both name something the agent can change about its next call, and erroring on a fixable pattern
@@ -115,7 +136,7 @@ Source of truth: `tools::ToolOut` and its one classifier `tool_failure` in
 
 ## Typical agent workflow
 
-1. **`search`** or **`grep`** — find relevant chunks (`[#n]` in results).
+1. **`search`** or **`grep`** — find relevant chunks. Each hit's leading `path#n` token is the one to carry forward; copy it, do not reassemble it.
 2. **`read(path, n)`** — open full chunk text (with `--vision`, embedded office images are returned as JPEG vision content; `page_image: true` renders a PDF page as a JPEG for hard-to-parse tables/layout).
 3. **`glossary("concept", query)`** — jump to the reasoning graph; get the cause → resolution chain with `read` anchors, plus a composed neighborhood ranked by `query` (pass the full question).
 4. **`reach(from, relation)`** — close a multi-hop: walk the relation from a node, crossing document boundaries, or add a candidate to verify the connection.
@@ -128,15 +149,19 @@ Responses are human-readable for the model:
 
 - **`Written:`** — node ids and resolved edges persisted
 - **`Merged:`** — duplicate labels merged into existing nodes
-- **`REJECTED — nothing written`** — validation failed (ontology, missing chunk, bad endpoints); fix and retry
+- **`N item(s) dropped (the rest WERE written)`** — the batch was **partially** applied. Fix and resend only the items it names; resending the whole batch duplicates work that already landed
+- **`REJECTED — nothing written`** — the whole call failed (ontology, missing chunk, bad endpoints, duplicate handle); this is the only outcome where resending everything is correct
+- **`Resolved by MORPHOLOGY, not an exact label`** — an endpoint label matched no node exactly and was bound to the closest morphological neighbour. Check each line is the node you meant
 
-Reference endpoints by **node id** (e.g. `sym:...`) or by label. Do not paste ids into `label` fields.
+Reference endpoints by **label** — the tool takes labels and derives the ids — or by a **node id** you were handed (`sym:…`; ids are hashes, so never assemble one yourself). Do not paste ids into `label` fields.
 
 ## Retrieval anti-loop (`--dedup`)
 
 Off by default. Start the server with `--dedup` (env `GLOSSA_MCP_DEDUP`, truthy = on) to enable per-session anti-loop signals on the retrieval tools. When a reader re-fetches results it has already seen, the response carries a neutral repeat/streak/plateau marker — or, for a governed repeat, a next-best-action recovery response — in place of the duplicate body, curbing context bloat for a weak reasoning loop. With dedup off (`config::defaults::DEDUP`), retrieval responses pass straight through unchanged and the session tracker is never consulted.
 
-A per-call `raw: true` bypasses the anti-loop even when dedup is enabled: display and programmatic fetches always receive the full body and never touch the tracker. Each streamable-http session gets its own tracker, so one client's history never governs another's.
+**For host integrators only:** a per-call `raw: true` bypasses the anti-loop even when dedup is enabled — display and programmatic fetches receive the full body and never touch the tracker. The field is deliberately **not advertised** in any retrieval tool's schema, because a governed reader that could set it would escape the anti-loop; it is set by the host application, not by the model. A model should not send it, and a schema-respecting client cannot. (`get_source_file` has its own, separate, *advertised* `raw` — that one controls original-file delivery and is unrelated.)
+
+Each streamable-http session gets its own tracker, so one client's history never governs another's.
 
 ## Transports
 

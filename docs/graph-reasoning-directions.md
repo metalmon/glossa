@@ -2,7 +2,13 @@
 
 Status as of **2026-07-03**. Companion to [ROADMAP.md](ROADMAP.md), focused on **where the reasoning graph is heading** as a matter of inference method, not features.
 
-For what ships today see [architecture.md](architecture.md) (graph layers) and [graph-and-ontology.md](graph-and-ontology.md) (ontology, enrich). For the dev loop see [eval-and-training.md](eval-and-training.md).
+> **Naming note.** This document was written when the abduction pass was a separate `kb-train
+> enrich` binary. That binary is retired; the pass it describes is today `kbx build` (harvest
+> grounded terminals) followed by `kbx reason` (synthesize the query side backward from them).
+> Read every "`enrich`" below as "`kbx build` + `kbx reason`" — the inference method is the same,
+> the command is not. There is no `enrich` command to run.
+
+For what ships today see [architecture.md](architecture.md) (graph layers) and [graph-and-ontology.md](graph-and-ontology.md) (ontology, grounding). For the dev loop see [eval-and-training.md](eval-and-training.md).
 
 Legend: **Shipped** = in a release today; **Partial** = exists but incomplete; **Open** = not built.
 
@@ -14,15 +20,15 @@ It is tempting to describe the pipeline as "deduction + induction". It is actual
 
 | Inference mode | What it is | Where glossa does it today | Status |
 |----------------|-----------|----------------------------|--------|
-| **Abduction** | infer the best explanation for an observation | `enrich` reverse-traces question → answer into a Symptom → Cause → Resolution chain (diagnosis) | **Partial** |
+| **Abduction** | infer the best explanation for an observation | `kbx build` + `kbx reason` reverse-trace question → answer into a Symptom → Cause → Resolution chain (diagnosis) | **Partial** |
 | **Deduction** | derive consequences from rules | `graph generalize` transitive closure over ontology composition rules; `constraint_solve` validate | **Shipped** |
 | **Induction** | generalize from accumulated instances | SIMILAR links, community detection, centrality; GEPA over accumulated episodes | **Shipped** |
 
-And the dev loop `enrich → generalize → eval/GEPA` is, structurally, the **hypothetico-deductive method**: abduction proposes a hypothesis, deduction derives testable consequences, induction checks them against data.
+And the dev loop `kbx build/reason → generalize → eval/GEPA` is, structurally, the **hypothetico-deductive method**: abduction proposes a hypothesis, deduction derives testable consequences, induction checks them against data.
 
 ```mermaid
 flowchart LR
-  obs[Solved cases / episodes] -->|abduction: enrich| hyp[Reasoning chains in graph]
+  obs[Solved cases / episodes] -->|abduction: kbx build + kbx reason| hyp[Reasoning chains in graph]
   hyp -->|deduction: generalize| pred[Derived edges & predicted retrievals]
   pred -->|induction: eval + GEPA| test[Scored against gold]
   test -->|refined prompt / graph| obs
@@ -34,7 +40,7 @@ Naming this explicitly is itself useful: every proposed direction below is "make
 
 ## What is under-used today
 
-- **Abduction is a side effect of `enrich`, not an inference mode at query time.** At inference the agent just walks `related`; there is no explicit "best explanation" ranking.
+- **Abduction is a side effect of the batch build (`kbx build` + `kbx reason`), not an inference mode at query time.** At inference the agent just walks `related`; there is no explicit "best explanation" ranking.
 - **`confidence` is stored on every node/edge but not used as a probability.** Provenance carries a confidence field; nothing updates it (Bayesian updating) or reasons over it (posterior ranking).
 - **SIMILAR is surface-level.** Label Jaccard + shared evidence — lexical overlap, not relational structure.
 - **The ontology is monotonic and strict.** No notion of defaults, exceptions, or retraction.
@@ -51,7 +57,7 @@ Each item: the idea, the glossa hook it reuses, why it should be effective, and 
 
 **Idea.** Formalize diagnosis as set cover (Reggia's parsimonious covering theory): given a set of symptoms, return the **minimal set of causes** that explains all of them, ranked by explanatory power (coverage, parsimony, confidence).
 
-**Hook.** The Symptom → Cause → Resolution spine already exists from `enrich`; this adds a solver over that subgraph, analogous to how `constraint_solve` reads a constraint subgraph.
+**Hook.** The Symptom → Cause → Resolution spine already exists from `kbx reason`; this adds a solver over that subgraph, analogous to how `constraint_solve` reads a constraint subgraph.
 
 **Why effective.** Directly serves the support use case: turns "walk related cases" into "here is the smallest explanation that accounts for everything you reported," with alternatives ranked. Also gives eval a crisper target than free-form chains.
 
@@ -99,7 +105,7 @@ For retrieval, note that BM25 already has a probabilistic-relevance heritage (Bi
 
 **Idea.** Mine frequent causal/relational patterns in the graph and **propose new relation types and rules** (ILP), instead of hand-writing every ontology relation.
 
-**Hook.** The graph is already a labeled relational dataset with provenance; enrich keeps filling it.
+**Hook.** The graph is already a labeled relational dataset with provenance; `kbx build` + `kbx reason` keep filling it.
 
 **Why effective.** Closes another self-improvement loop — the graph teaches its own schema — matching the theme that the KB grounds its own optimization. Reduces the hand-authoring bottleneck in `ontology.toml`.
 
@@ -145,6 +151,7 @@ This extends the existing ROADMAP item *Graph → "Induction/deduction ontology"
 ## Related
 
 - [architecture.md](architecture.md) — graph layers (structural / reasoning / derived)
-- [graph-and-ontology.md](graph-and-ontology.md) — ontology overlay and enrich
+- [graph-and-ontology.md](graph-and-ontology.md) — ontology overlay and grounding
+- [graph-lifecycle.md](graph-lifecycle.md) — the `kbx build` + `kbx reason` build today
 - [eval-and-training.md](eval-and-training.md) — the abduction→deduction→induction dev loop in practice
 - [ROADMAP.md](ROADMAP.md) — backlog and product tracks

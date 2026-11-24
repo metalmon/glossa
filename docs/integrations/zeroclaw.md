@@ -57,8 +57,10 @@ ZeroClaw prefixes tools with the server name. glossa tools appear as:
 | `glossary` | `glossa__glossary` |
 | `reach` | `glossa__reach` |
 | `sql` | `glossa__sql` |
+| `get_ontology` | `glossa__get_ontology` |
+| `ls` | `glossa__ls` |
 
-With **`reader`** profile, write tools (`graph_upsert`, `index`, …) and the low-level graph-navigation tools (`neighbors`, `related`, `resolve`) are hidden from the tool list — a reader gets `glossary`, `reach`, `sql` plus corpus search/read.
+With **`reader`** profile, write tools (`graph_upsert`, `index`, …) and the low-level graph-navigation tools (`neighbors`, `related`, `resolve`) are hidden from the tool list. The full reader set is nine tools: `search`, `read`, `grep`, `glob`, `glossary`, `reach`, `sql`, `get_ontology` and `ls` (notebook listing — reading a note uses the ordinary `read`). `--profile reader` is not the default; without the flag `kb mcp` starts `editor`.
 
 ## Auto-approve read tools
 
@@ -74,8 +76,14 @@ auto_approve = [
   "glossa__glossary",
   "glossa__reach",
   "glossa__sql",
+  "glossa__get_ontology",
+  "glossa__ls",
 ]
 ```
+
+All nine reader tools are read-only, so the list above covers the whole profile. Leaving
+`glossa__get_ontology` or `glossa__ls` out does not make them unavailable — it only means they
+still prompt.
 
 Use **`editor`** profile and approve write tools only if you trust the agent to modify the reasoning graph:
 

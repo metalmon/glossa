@@ -22,7 +22,14 @@ Corpus (indexed, read-only) and **notebook** (agent notes under `.glossa/notes/`
 
 `.csp` files are limit tables (tab-separated rows, first line = column headers). `note` validates them on write: the reply echoes parsed columns and row count, and may add brief observations about grid shape (long headers, sentence-like cells); a malformed table (empty header cell, ragged row) is rejected without writing. Any other extension is a free-form note.
 
-Storage: `<corpus>/.glossa/notes/<document>/…` where `<document>` is the full indexed path (with extension). Living under `.glossa` keeps notes out of the corpus indexer's walk — the agent can never index its own notes as documents.
+Storage: `<corpus>/.glossa/notes/<document>/…` where `<document>` is the full indexed path (with extension).
+
+**Notes are not corpus documents, but they are indexed, and they do appear in `search`.** Two halves, both true:
+
+- Living under `.glossa` keeps notes out of the corpus indexer's **walk**. They are never picked up as documents, never chunked like one, and never counted in the corpus.
+- They are nonetheless written into the **same tantivy index**, by a separate path, as a single chunk tagged `file_type = "note"`. So a note is retrievable beside corpus documents: a `search` whose terms a note contains can return that note, and it can outrank the real document — a note is short and dense, which BM25 rewards.
+
+This is intended. A note the agent wrote is meant to be findable later, and `search` is how it finds things. The practical consequence to keep in mind when reading results: a hit's label segment says `note`, so a note is identifiable on sight, and its path is `<document>/<file>` rather than a corpus path. Code that needs to exclude them can: `search_filtered` takes a `file_type` filter.
 
 Write operations (`note`, `del`) are serialized across MCP editor processes via `.glossa/notebook.lock`.
 

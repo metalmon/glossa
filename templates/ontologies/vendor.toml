@@ -1,3 +1,8 @@
+# NOTE: this preset grounds the SUBJECT of its spine, so its grounded type is never the `to`
+# side of a Chaining relation. `kbx reason` and `kbx distil --densify` therefore refuse to run
+# on it (terminal-as-sink) — author the reasoning layer with `graph_upsert`/`kb graph import`,
+# or move a grounded type onto the `to` side of a Chaining relation in your own copy.
+# Everything else (indexing, search, glossary, sql, doctor) works normally.
 [meta]
 domain = "vendor"
 description = "Vendor management: contracts, SLAs, third-party risk, and supply chains."
@@ -52,7 +57,8 @@ mentions = "MENTIONS"
 # ── [retrieval] — search depth and graph-walk weights ────────────────────────
 # [retrieval]
 # How many hits a `search` with no explicit limit returns — the depth the READER
-# sees. Unset: 50 for the agent tool, 100 for `kb search` (it prints to a human).
+# sees. Unset: 50, for the agent tool and `kb search` alike — they must
+# agree, or the CLI and the agent would rerank different candidate pools.
 # Env GLOSSA_SEARCH_LIMIT.
 # search_limit = 50
 #

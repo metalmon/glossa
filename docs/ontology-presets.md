@@ -105,9 +105,24 @@ relations.
 | `competency` | Competency matrix: a role requires a skill, a person has a skill. |
 | `org-roles` | Organisational structure and responsibility matrix (RACI). |
 
-> No preset fits? Index without `--ontology` — you still get the full structural
-> layer (documents, sections, terms, `MENTIONS`/`CO_OCCURS`), which is the
-> generic knowledge-base case. Add a reasoning overlay later whenever you like.
+> No preset fits? Index without `--ontology` — you still get the structural
+> layer (`Document` and `Section` nodes, linked by `CONTAINS`, `NEXT`, `PREV`,
+> `PARENT`, `CHILD` and `REFERENCES`) plus full BM25 search, `grep`, `glob` and
+> `read`, which is the generic knowledge-base case. Note that indexing builds no
+> term layer: `Term`/`Topic` nodes and `CO_OCCURS` edges are declared but never
+> written, and `MENTIONS` comes from the reasoning layer, not from indexing. Add
+> a reasoning overlay later whenever you like.
+
+### Six presets are not backward-reason-capable
+
+`access-governance`, `audit`, `data-privacy`, `decision-log`, `okr` and `vendor` ground the
+*subject* of their spine rather than its terminal, so their grounded type never appears on the `to`
+side of a Chaining relation. `kbx reason` and `kbx distil --densify` refuse to run on them, loudly,
+rather than emitting an empty layer. Everything else works: structural indexing, search, `read`,
+agent-authored `graph_upsert`, `glossary`, `sql`, the doctor. Only the batch *backward*-reasoning
+build is unavailable — author the graph directly, or move a grounded type onto the `to` side of a
+Chaining relation in your own copy. Details:
+[terminal-as-sink](graph-and-ontology.md#terminal-as-sink-a-backward-reasoning-requirement).
 
 ## Customizing a preset
 
@@ -133,9 +148,10 @@ itself — context and entities stay in the documents, reached by search/read.
 Each shape marks exactly one node type with `requires_grounding = true`: the
 concrete, document-quoting terminal (a `Resolution`, a `Step`, a `Field`).
 There is no separate citation-proxy node — the cited section, via `MENTIONS`,
-*is* the evidence. `graph_upsert` then rejects a grounded node unless it has a
-`MENTIONS` edge to a source section, and `kb graph generalize` surfaces any
-that later lose their grounding. See
+*is* the evidence. `graph_upsert` then drops a grounded node unless it carries a
+`source_path` — the `path#n` token of the section it quotes, from which the
+`MENTIONS` edge is derived — and `kb graph doctor` (not `generalize`, which no
+longer reports hygiene) surfaces any that later lose their grounding. See
 [Grounding](graph-and-ontology.md#grounding) for the mechanics.
 
 ## Valid-time

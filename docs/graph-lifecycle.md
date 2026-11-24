@@ -72,6 +72,14 @@ kb graph doctor                   # should be clean on a freshly built graph
 > Building the reasoning layer is a terminal (`kbx`) workflow. An agent cannot trigger the batch
 > build over the MCP wire — but it can author the graph incrementally itself (next).
 
+**Six presets cannot run `kbx reason` at all.** `access-governance`, `audit`, `data-privacy`,
+`decision-log`, `okr` and `vendor` ground the subject of their spine rather than its terminal, so
+backward reasoning has no sink to aim at and both `kbx reason` and `kbx distil --densify` stop with
+a terminal-as-sink error. That is a property of the preset, not of your invocation — if you hit it,
+either author the graph directly (next section) or adapt the ontology so a grounded type sits on
+the `to` side of a Chaining relation. See
+[graph-and-ontology.md](graph-and-ontology.md#terminal-as-sink-a-backward-reasoning-requirement).
+
 ### Alternative — author the graph directly
 
 Instead of (or alongside) the `kbx` pipeline you can write nodes and edges directly:
@@ -96,7 +104,7 @@ The report lists four kinds of doubt:
 
 | Doubt | What it means | What it asks of you |
 |---|---|---|
-| `ungrounded` | An answer node lost its link to a source section. | Re-ground it, prune it if the source is gone, or — if the document just moved/relabeled — `kb graph doctor --relink` (see below). |
+| `ungrounded` | An answer node lost its link to a source section. | Re-ground it, prune it if the source is gone, or — if the document just moved/relabeled — `kb graph doctor --relink` (see below; terminal-only — `graph_doctor` has no `relink` argument). |
 | `stale` | An answer's source **document was edited** since it was built. | **Re-ground** (re-build that doc); `--prune-stale` only as a last resort. |
 | `incomplete` | A node sits on no complete reasoning chain. | Finish the chain, or prune it. |
 | `dangling` | A query-side node can no longer reach any live answer (its terminal went stale/ungrounded/deleted). | Fix/restore the terminal, or prune the orphaned branch. |
@@ -322,9 +330,10 @@ Two operations are deliberately **terminal-only** because they are high-impact:
 | Build reasoning layer (batch) | ✅ `kbx build` + `kbx reason` | — (author incrementally via `graph_upsert`) |
 | Author a node/edge | ✅ `kb graph import` (file) | ✅ `graph_upsert` |
 | Diagnose health | ✅ `kb graph doctor` | ✅ `graph_doctor` |
-| Prune doubtful nodes | ✅ doctor `--prune-*` | ✅ `graph_doctor` `prune_ungrounded`/`prune_incomplete`/`prune_dangling` |
+| Prune doubtful nodes | ✅ doctor `--prune-*` | ✅ `graph_doctor` `prune_ungrounded`/`prune_incomplete`/`prune_dangling`/`prune_stale` |
+| Re-ground relocated docs | ✅ doctor `--relink` | — (terminal-only; the agent sees the `relinkable` group but cannot apply it) |
 | Clean-slate a type / merge dups | ✅ `prune -t` / `generalize --merge` | — (by design) |
-| Inspect | ✅ `stats`/`ls`/`node`/`glossary`/`reach`/`sql` | ✅ `graph_stats`/`glossary`/`reach`/`sql`/… |
+| Inspect | ✅ `stats`/`ls`/`node`/`glossary`/`reach`/`query` | ✅ `graph_stats`/`glossary`/`reach`/`sql`/… |
 
 Rule of thumb: **an agent maintains its own authored nodes** (create, edit, delete, diagnose, and
 — once shipped — prune what the doctor flags); **the blunt, corpus-wide operations stay in the

@@ -22,6 +22,9 @@ state:
 | `ontology.toml` | Optional domain overlay constraining the reasoning graph (see below) |
 | `notes/` | Agent notebook — free-form and `.csp` limit-table notes, kept out of the corpus walk |
 | `traces/` | Per-call MCP trace logs, when the server is started with `--trace` |
+| `nodes/`, `nodes.sig` | Search index over graph node labels, plus its staleness signature |
+| `ppr_transition.*` | Memory-mapped CSR transition cache for PPR (`.csr`/`.fst`/`.idtab`, a `.json` descriptor and a build lock), rebuilt when the graph changes |
+| `dirsig` | Per-directory signatures, so a freshen scan can skip subtrees that have not changed |
 | lock files | Cooperative cross-process locks (`index.lock`, `generalize.lock`, `notebook.lock`, …) |
 
 `.glossa/` is **rebuildable**: deleting it loses only derived state, never source documents;
@@ -61,8 +64,10 @@ glossa maintains two different structures over the same corpus:
   `grep` (regex/literal over extracted text). No graph, no reasoning — just ranked or exact text
   matching.
 - **Knowledge graph** — a SQLite-backed reasoning graph (`graph.sqlite`) with three layers:
-  - **Structural** (automatic) — `Document`/`Section` nodes and `CONTAINS`/`MENTIONS`/`NEXT`/`PREV`
-    edges, built during indexing.
+  - **Structural** (automatic) — `Document`/`Section` nodes and
+    `CONTAINS`/`NEXT`/`PREV`/`PARENT`/`CHILD`/`REFERENCES` edges, built during indexing. That is
+    the whole of it: indexing writes no `MENTIONS` edge (it belongs to the reasoning layer) and no
+    `Term`/`Topic` nodes or `CO_OCCURS` edges (declared, never built).
   - **Reasoning** (agent-authored) — domain nodes (e.g. `Symptom` → `Cause` → `Resolution`) and
     typed edges an agent or the `kbx` pipeline writes via `graph_upsert`, validated against the
     ontology.

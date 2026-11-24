@@ -55,7 +55,8 @@ mentions = "MENTIONS"
 # ── [retrieval] — search depth and graph-walk weights ────────────────────────
 # [retrieval]
 # How many hits a `search` with no explicit limit returns — the depth the READER
-# sees. Unset: 50 for the agent tool, 100 for `kb search` (it prints to a human).
+# sees. Unset: 50, for the agent tool and `kb search` alike — they must
+# agree, or the CLI and the agent would rerank different candidate pools.
 # Env GLOSSA_SEARCH_LIMIT.
 # search_limit = 50
 #
