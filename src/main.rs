@@ -3156,8 +3156,10 @@ mod cli_root_wiring_tests {
         // A typo used to silently resolve to `Profile::Reader` (glossa::mcp::Profile::parse's old
         // fallback) with no diagnostic. `ProfileArg` is a clap::ValueEnum now, so clap itself
         // refuses the value at parse time and names the valid ones.
-        let err = Cli::try_parse_from(["kb", "mcp", "somecorpus", "--profile", "edtior"])
-            .expect_err("invalid --profile must be rejected, not silently defaulted");
+        let Err(err) = Cli::try_parse_from(["kb", "mcp", "somecorpus", "--profile", "edtior"])
+        else {
+            panic!("invalid --profile must be rejected, not silently defaulted");
+        };
         let msg = err.to_string();
         assert!(
             msg.contains("edtior")
