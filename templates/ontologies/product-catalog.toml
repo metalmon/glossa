@@ -1,9 +1,16 @@
+# STANDARD: commonly aligned with product- and service-catalog practice; no standard
+# number applies.
+# Reading documents written in that vocabulary, the terms land like this:
+#   product, offering, SKU, service, model -> Product
+#   feature, capability, function, module  -> Feature
+#   plan, tier, package, edition, bundle   -> Plan
+#   successor product, end-of-life swap    -> REPLACES
 [meta]
 domain = "product-catalog"
 description = "Product catalog: product -> feature -> plan, feature dependencies, product replacement."
 family = "product"
 tier = 2
-aliases = ["offering", "pricing"]
+aliases = ["offering", "pricing", "catalog", "sku"]
 
 [entities.Product]
 id_prefix = "prd"

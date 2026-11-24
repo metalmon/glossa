@@ -1,10 +1,17 @@
+# STANDARD: commonly aligned with product conformity-assessment and type-approval
+# practice (declaration of conformity, notified-body testing). No standard number is
+# cited here deliberately: the practice spans several, and a wrong one would mislead.
+# Reading documents written in that vocabulary, the terms land like this:
+#   product, item, type, model under assessment            -> Product
+#   technical regulation, directive, essential requirement -> TechReg
+#   test, examination, evaluation, test report             -> Test
 [meta]
 domain = "certification"
 description = "Product conformity assessment: product -> technical regulation -> test, grounded and time-bound in the text."
 note = "Test.valid_from/valid_to state when the test (e.g. a test result or certificate) actually holds in the world, i.e. its validity/expiry period; this is distinct from provenance (when the test was recorded or filed). Never conflate the two."
 family = "compliance"
 tier = 1
-aliases = ["conformity"]
+aliases = ["conformity", "type-approval", "ce-marking"]
 
 [entities.Product]
 id_prefix = "prd"

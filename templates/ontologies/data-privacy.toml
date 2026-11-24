@@ -3,13 +3,20 @@
 # on it (terminal-as-sink) — author the reasoning layer with `graph_upsert`/`kb graph import`,
 # or move a grounded type onto the `to` side of a Chaining relation in your own copy.
 # Everything else (indexing, search, glossary, sql, doctor) works normally.
+# STANDARD: GDPR Article 30, records of processing activities.
+# Reading documents written in that vocabulary, the terms land like this:
+#   category of personal data, data subject category -> DataAsset
+#   purpose of processing                            -> Purpose
+#   lawful basis (consent, contract, legal duty...)  -> LegalBasis
+#   processor, sub-processor, recipient, transfer    -> Processor
+#   retention period, storage limitation             -> the CONSTRAINED_BY / HAS_MAX attribute
 [meta]
 domain = "data-privacy"
 description = "Records of processing (ROPA): data -> legal basis -> retention -> processor."
 note = "DataAsset.valid_from/valid_to state when the processing activity actually holds in the world (e.g. the period a data category is collected under a given basis); this is distinct from provenance (when the ROPA entry was recorded or last edited). Never conflate the two."
 family = "compliance"
 tier = 1
-aliases = ["ropa", "gdpr", "pii"]
+aliases = ["ropa", "gdpr", "pii", "privacy", "data-protection"]
 
 [entities.DataAsset]   # a category of personal data being processed
 id_prefix = "dat"

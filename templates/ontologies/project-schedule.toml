@@ -1,9 +1,16 @@
+# STANDARD: commonly aligned with PMBOK schedule management and the precedence
+# diagramming method; no standard number applies.
+# Reading documents written in that vocabulary, the terms land like this:
+#   milestone, gate, stage end                     -> Milestone
+#   activity, task, work package, WBS element      -> Task
+#   predecessor, finish-to-start dependency        -> DEPENDS_ON
+#   blocker, constraint, what a slip holds up      -> BLOCKS
 [meta]
 domain = "project-schedule"
 description = "Project schedule: milestone -> task, with task dependencies and blockers."
 family = "project"
 tier = 2
-aliases = ["plan", "gantt"]
+aliases = ["plan", "gantt", "wbs", "milestones"]
 
 [entities.Milestone]
 id_prefix = "mst"

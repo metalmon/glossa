@@ -1,10 +1,17 @@
+# STANDARD: commonly aligned with regulatory change management / horizon-scanning
+# practice; no standard number applies.
+# Reading documents written in that vocabulary, the terms land like this:
+#   standard, regulation, normative document, edition -> Standard
+#   requirement, clause, provision                    -> Requirement
+#   impacted process, document, product, system       -> Impacted
+#   supersession, withdrawal, replacement, amendment  -> SUPERSEDES
 [meta]
 domain = "reg-change"
 description = "Regulatory change watch: standard supersession chains and their downstream impact."
 note = "Requirement.valid_from/valid_to state when the requirement actually applies/is in force in the world (e.g. the effective period of a given revision); this is distinct from provenance (when the requirement was recorded). Never conflate the two."
 family = "compliance"
 tier = 1
-aliases = ["regwatch"]
+aliases = ["regwatch", "horizon-scanning", "supersession"]
 
 [entities.Requirement]
 id_prefix = "req"

@@ -1,9 +1,15 @@
+# STANDARD: commonly aligned with service-design journey-mapping practice; no standard
+# number applies.
+# Reading documents written in that vocabulary, the terms land like this:
+#   journey stage, phase, step of the journey  -> Stage
+#   touchpoint, channel, interaction, moment   -> Touchpoint
+#   pain point, friction, drop-off, complaint  -> PainPoint
 [meta]
 domain = "customer-journey"
 description = "Customer journey mapping: stage -> touchpoint, and pain points along the way."
 family = "cx"
 tier = 2
-aliases = ["journey-map", "cx"]
+aliases = ["journey-map", "cx", "touchpoints", "service-design"]
 
 [entities.Stage]
 id_prefix = "stg"

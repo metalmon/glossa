@@ -1,10 +1,17 @@
+# STANDARD: commonly aligned with contract lifecycle management (CLM) practice; no
+# standard number applies.
+# Reading documents written in that vocabulary, the terms land like this:
+#   clause, provision, article, section            -> Clause
+#   obligation, covenant, commitment, undertaking  -> Obligation
+#   playbook position, fallback, standard position -> PlaybookPosition
+#   deviation, redline, departure from playbook    -> DEVIATES_FROM
 [meta]
 domain = "contract"
 description = "Contract lifecycle management: clause -> obligation, deviations from playbook."
 note = "Obligation.valid_from/valid_to state when the obligation actually binds in the world (e.g. an amended term's effective period); this is distinct from provenance (when the clause was drafted, signed, or last edited). Never conflate the two."
 family = "compliance"
 tier = 1
-aliases = ["legal", "clm"]
+aliases = ["legal", "clm", "contract-management", "obligations"]
 
 [entities.Clause]
 id_prefix = "cls"

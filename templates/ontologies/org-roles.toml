@@ -1,9 +1,16 @@
+# STANDARD: commonly aligned with the RACI responsibility assignment matrix and with the
+# ISO 9001 requirement to assign organizational roles, responsibilities and authorities.
+# Reading documents written in that vocabulary, the terms land like this:
+#   role, position, post, job title     -> Role
+#   team, department, function, unit    -> Team
+#   process, activity, deliverable      -> Process
+#   the A (accountable) / R (responsible) of a RACI cell -> ACCOUNTABLE_FOR
 [meta]
 domain = "org-roles"
 description = "Organisational structure and responsibility matrix (RACI)."
 family = "hr"
 tier = 2
-aliases = ["org", "raci"]
+aliases = ["org", "raci", "responsibility-matrix", "org-chart"]
 
 [entities.Role]
 id_prefix = "rol"

@@ -3,12 +3,17 @@
 # on it (terminal-as-sink) — author the reasoning layer with `graph_upsert`/`kb graph import`,
 # or move a grounded type onto the `to` side of a Chaining relation in your own copy.
 # Everything else (indexing, search, glossary, sql, doctor) works normally.
+# STANDARD: commonly aligned with the COSO Internal Control - Integrated Framework and
+# with the control/risk pairing of ISO/IEC 27001; COBIT uses the same two nouns.
+# Reading documents written in that vocabulary, the terms land like this:
+#   control activity, safeguard, countermeasure, control objective -> Control
+#   risk, threat, exposure, what the control mitigates             -> Risk
 [meta]
 domain = "audit"
 description = "Controls audit / GRC: control -> mitigated risk, grounded in the text."
 family = "compliance"
 tier = 1
-aliases = ["controls", "grc"]
+aliases = ["controls", "grc", "internal-audit", "coso", "sox"]
 
 [entities.Control]
 id_prefix = "ctl"

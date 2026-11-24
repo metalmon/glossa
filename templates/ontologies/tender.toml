@@ -1,9 +1,14 @@
+# STANDARD: commonly aligned with competitive-procurement / RFP response practice; no
+# standard number applies.
+# Reading documents written in that vocabulary, the terms land like this:
+#   requirement, question, line item, lot of an ITT -> TenderRequirement
+#   response, bid answer, compliance statement      -> Response
 [meta]
 domain = "tender"
 description = "RFP/bid response tracking: requirement -> response, grounded in the text."
 family = "compliance"
 tier = 1
-aliases = ["rfp", "bid"]
+aliases = ["rfp", "bid", "itt", "proposal"]
 
 [entities.TenderRequirement]
 id_prefix = "req"

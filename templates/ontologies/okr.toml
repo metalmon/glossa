@@ -3,12 +3,18 @@
 # on it (terminal-as-sink) — author the reasoning layer with `graph_upsert`/`kb graph import`,
 # or move a grounded type onto the `to` side of a Chaining relation in your own copy.
 # Everything else (indexing, search, glossary, sql, doctor) works normally.
+# STANDARD: commonly aligned with OKR (objectives and key results) practice; no standard
+# number applies.
+# Reading documents written in that vocabulary, the terms land like this:
+#   objective, goal, strategic priority    -> Objective
+#   key result, metric, target, KPI        -> KeyResult
+#   initiative, project, epic, bet, action -> Initiative
 [meta]
 domain = "okr"
 description = "Objectives and key results: objective -> key result -> advancing initiative."
 family = "strategy"
 tier = 2
-aliases = ["goals"]
+aliases = ["goals", "objectives", "key-results"]
 
 [entities.Objective]
 id_prefix = "obj"

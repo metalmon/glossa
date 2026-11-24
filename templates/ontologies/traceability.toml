@@ -1,9 +1,16 @@
+# STANDARD: ISO 9001 (quality management systems) - the requirement traced through design
+# output to verification. A requirements traceability matrix in any other discipline reads
+# the same way.
+# Reading documents written in that vocabulary, the terms land like this:
+#   requirement, user need, specification input -> Requirement
+#   design output, drawing, specification       -> Design
+#   verification or validation test, test case  -> Test
 [meta]
 domain = "traceability"
 description = "Requirements traceability matrix (QMS/ISO 9001): requirement -> design -> verifying test."
 family = "traceability"
 tier = 2
-aliases = ["qms", "iso9001", "rtm"]
+aliases = ["qms", "iso9001", "rtm", "requirements-traceability", "verification"]
 
 [entities.Requirement]
 id_prefix = "req"

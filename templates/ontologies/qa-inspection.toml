@@ -1,9 +1,18 @@
+# STANDARD: commonly aligned with incoming-inspection and acceptance-sampling practice.
+# No standard number is cited here deliberately - the sampling plan and the specification
+# come from different documents, and naming the wrong one would mislead.
+# Reading documents written in that vocabulary, the terms land like this:
+#   lot, batch, consignment, delivery              -> Lot
+#   inspection characteristic, measured parameter,
+#     quality attribute                            -> Parameter
+#   specification limit, tolerance, acceptance
+#     criterion, permitted grade list              -> the CONSTRAINED_BY attribute
 [meta]
 domain = "qa-inspection"
 description = "Incoming quality control: lot -> measured parameter -> constraint (range/enum)."
 family = "compliance"
 tier = 1
-aliases = ["incoming", "iqc"]
+aliases = ["incoming", "iqc", "acceptance-sampling", "goods-receipt"]
 
 [entities.Lot]
 id_prefix = "lot"

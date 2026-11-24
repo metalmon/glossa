@@ -1,9 +1,16 @@
+# STANDARD: commonly aligned with the ISO 9001 competence requirement and with
+# competency-framework / skills-matrix practice.
+# Reading documents written in that vocabulary, the terms land like this:
+#   job role, position, grade                        -> Role
+#   competency, capability, proficiency, skill level  -> Skill
+#   employee, jobholder, postholder                  -> Person
+#   prerequisite competency, feeder skill            -> PREREQUISITE_OF
 [meta]
 domain = "competency"
 description = "Competency / skills management: role -> required skill, person -> held skill, skill prerequisites."
 family = "hr"
 tier = 2
-aliases = ["skills", "l&d"]
+aliases = ["skills", "l&d", "competency-matrix", "skills-matrix"]
 
 [entities.Role]
 id_prefix = "rol"

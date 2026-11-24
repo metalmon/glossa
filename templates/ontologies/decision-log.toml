@@ -3,12 +3,19 @@
 # on it (terminal-as-sink) — author the reasoning layer with `graph_upsert`/`kb graph import`,
 # or move a grounded type onto the `to` side of a Chaining relation in your own copy.
 # Everything else (indexing, search, glossary, sql, doctor) works normally.
+# STANDARD: commonly aligned with architecture decision record (ADR) practice; no
+# standard number applies.
+# Reading documents written in that vocabulary, the terms land like this:
+#   decision, ADR, "Decision" section, resolution  -> Decision
+#   considered option, alternative, candidate      -> Option
+#   decision driver, force, criterion, constraint  -> Criterion
+#   the chosen option vs the ones merely weighed   -> CHOOSES vs CONSIDERED
 [meta]
 domain = "decision-log"
 description = "Architecture/decision records: decision -> chosen and considered options -> driving criteria."
 family = "decision"
 tier = 2
-aliases = ["adr"]
+aliases = ["adr", "decision-record", "architecture-decision"]
 
 [entities.Decision]
 id_prefix = "dec"

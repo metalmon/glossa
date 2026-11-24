@@ -1,9 +1,15 @@
+# STANDARD: commonly aligned with ITIL incident and problem management.
+# Reading documents written in that vocabulary, the terms land like this:
+#   incident, symptom, ticket subject, error  -> Symptom
+#   root cause, known error, problem record   -> Cause
+#   resolution, workaround, fix, KB article   -> Resolution
+#   service request, how-to question          -> Task
 [meta]
 domain = "support"
 description = "Troubleshooting plus documentation search: symptom -> cause -> resolution."
 family = "causal"
 tier = 2
-aliases = ["troubleshooting", "helpdesk"]
+aliases = ["troubleshooting", "helpdesk", "itil", "incident"]
 
 [entities.Symptom]    # an observed problem / question class (keep BROAD)
 id_prefix = "sym"

@@ -1,9 +1,15 @@
+# STANDARD: none. The before/after pair is Allen's interval relations; no management
+# standard governs a chronology.
+# Reading documents written in that vocabulary, the terms land like this:
+#   event, occurrence, incident, dated entry -> Event
+#   earlier than / later than                -> BEFORE / AFTER
+#   led to, triggered, resulted in           -> CAUSED
 [meta]
 domain = "timeline"
 description = "Event timeline / chronology: temporal ordering and causal links between events."
 family = "temporal"
 tier = 2
-aliases = ["chronology", "history"]
+aliases = ["chronology", "history", "events", "sequence-of-events"]
 
 [entities.Event]
 id_prefix = "evt"

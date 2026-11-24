@@ -1,9 +1,15 @@
+# STANDARD: commonly aligned with the ISO 9001 treatment of documented information -
+# procedures and work instructions.
+# Reading documents written in that vocabulary, the terms land like this:
+#   procedure, SOP, work instruction, runbook -> Procedure
+#   step, operation, action, clause of a step -> Step
+#   sequence, order, "then", numbering        -> NEXT
 [meta]
 domain = "sop"
 description = "Standard operating procedures: procedure -> ordered steps."
 family = "procedural"
 tier = 2
-aliases = ["howto", "runbook", "onboarding"]
+aliases = ["howto", "runbook", "onboarding", "work-instruction", "procedures"]
 
 [entities.Procedure]
 id_prefix = "prc"

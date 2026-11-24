@@ -1,9 +1,16 @@
+# STANDARD: commonly aligned with the governance policy hierarchy that ISO/IEC 27001 and
+# most internal handbooks share (policy -> rule or standard -> waiver); no standard number
+# fixes the three levels, so none is cited.
+# Reading documents written in that vocabulary, the terms land like this:
+#   policy, handbook chapter, charter        -> Policy
+#   rule, standard, requirement, clause      -> Rule
+#   exception, waiver, derogation, exemption -> Exception
 [meta]
 domain = "policy"
 description = "Policy / handbook management: policy -> rule -> exception."
 family = "governance"
 tier = 1
-aliases = ["handbook", "regulation"]
+aliases = ["handbook", "regulation", "policies", "waiver"]
 
 [entities.Policy]
 id_prefix = "pol"

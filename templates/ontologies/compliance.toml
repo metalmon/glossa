@@ -1,3 +1,10 @@
+# STANDARD: none. This preset is generic document-conformance checking, not a named
+# framework - whichever standard or specification supplies the requirements, it is read
+# as NormativeRequirement and the document under check as Field.
+# Reading documents written in that vocabulary, the terms land like this:
+#   requirement, clause, rule, provision pulled from a spec -> NormativeRequirement
+#   checked parameter, attribute, field of the document     -> Field
+#   permitted range / pattern / enumeration / mandatory     -> the CONSTRAINED_BY attribute
 [meta]
 domain = "compliance"
 description = "Check a document against normative requirements: requirement -> constrained field, grounded in the text."

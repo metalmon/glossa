@@ -3,12 +3,20 @@
 # on it (terminal-as-sink) — author the reasoning layer with `graph_upsert`/`kb graph import`,
 # or move a grounded type onto the `to` side of a Chaining relation in your own copy.
 # Everything else (indexing, search, glossary, sql, doctor) works normally.
+# STANDARD: commonly aligned with third-party risk management (TPRM) practice; no
+# standard number applies.
+# Reading documents written in that vocabulary, the terms land like this:
+#   supplier, third party, subservice organization -> Vendor
+#   service, scope of supply, deliverable          -> Service
+#   contract, MSA, framework agreement, order      -> Contract
+#   SLA, service-level target, KPI, credit regime  -> Sla
+#   fourth party, sub-processor, subcontractor     -> SUBCONTRACTS
 [meta]
 domain = "vendor"
 description = "Vendor management: contracts, SLAs, third-party risk, and supply chains."
 family = "procurement"
 tier = 2
-aliases = ["tprm", "supply-chain", "procurement"]
+aliases = ["tprm", "supply-chain", "procurement", "third-party-risk", "slas"]
 
 [entities.Vendor]
 id_prefix = "ven"

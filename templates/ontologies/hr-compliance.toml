@@ -1,10 +1,18 @@
+# STANDARD: commonly aligned with ISO 45001, occupational health and safety management
+# systems, and with labour-law recordkeeping generally.
+# Reading documents written in that vocabulary, the terms land like this:
+#   job role, worker category, occupation       -> Role
+#   required record, certificate, training log,
+#     medical examination, induction, licence   -> Record
+#   validity period, renewal interval, due date -> the CONSTRAINED_BY / HAS_MAX attribute
+#   reissued or replaced record                 -> SUPERSEDES
 [meta]
 domain = "hr-compliance"
 description = "HR / EHS / labor compliance: role -> required record -> value constraints."
 note = "Record.valid_from/valid_to state when the record holds true in the world (e.g. a certification's effective period); this is distinct from provenance (when the record was filed or last edited). Never conflate the two."
 family = "compliance"
 tier = 1
-aliases = ["ehs", "labor"]
+aliases = ["ehs", "labor", "iso45001", "ohs"]
 
 [entities.Role]
 id_prefix = "rol"

@@ -3,12 +3,19 @@
 # on it (terminal-as-sink) — author the reasoning layer with `graph_upsert`/`kb graph import`,
 # or move a grounded type onto the `to` side of a Chaining relation in your own copy.
 # Everything else (indexing, search, glossary, sql, doctor) works normally.
+# STANDARD: commonly aligned with ISO/IEC 27001 access-control requirements and the
+# role-based access control (RBAC) model; segregation of duties as tested under SOX.
+# Reading documents written in that vocabulary, the terms land like this:
+#   role, job function, security group            -> Role
+#   permission, privilege, entitlement, right     -> Permission
+#   access grant, entitlement assignment, request -> Grant
+#   SoD conflict, toxic combination               -> CONFLICTS_WITH
 [meta]
 domain = "access-governance"
 description = "Access governance / segregation of duties: role grants, assignments, and conflicting permission combos."
 family = "compliance"
 tier = 1
-aliases = ["sod", "iam-gov"]
+aliases = ["sod", "iam-gov", "rbac", "entitlements"]
 
 [entities.Role]
 id_prefix = "rol"
