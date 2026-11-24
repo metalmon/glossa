@@ -38,7 +38,7 @@ Each document is split into **chunks** with stable locations:
 - PDF: one chunk per page (`p.N`); blank pages are indexed with an empty body so every physical page `1..N` is addressable via `read(path, n)`
 - Plain text: streaming segments
 
-Every chunk carries a corpus-relative path and location string. Search and `read` use `[#n]` chunk numbers; graph MENTIONS edges anchor reasoning nodes to `(path, #n)`.
+Every chunk carries a corpus-relative path and location string. Search and `read` address a chunk by its number `n`, written `path#n` — the leading token of every `search` hit line (`path#n · heading · snippet`) and the value a reasoning node's `source_path` takes, from which its `MENTIONS` edge is derived.
 
 Provenance on graph nodes records `source_path`, optional range, file signature, origin (`index` | `agent` | `auto-generalized`), confidence, and timestamp.
 
