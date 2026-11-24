@@ -41,16 +41,6 @@ pub enum Profile {
     Full,
 }
 
-impl Profile {
-    pub fn parse(s: &str) -> Profile {
-        match s {
-            "editor" => Profile::Editor,
-            "full" => Profile::Full,
-            _ => Profile::Reader,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct GlossaServer {
     /// The corpus roots this server reads from (content: search/grep/read/glossary evidence).

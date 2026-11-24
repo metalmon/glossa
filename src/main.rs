@@ -364,8 +364,8 @@ enum Cmd {
         /// Knowledge-base directory to serve (default: nearest indexed root, else the current dir).
         path: Option<PathBuf>,
         /// Tool profile: reader | editor | full.
-        #[arg(short = 'p', long, default_value = "editor")]
-        profile: String,
+        #[arg(short = 'p', long, value_enum, default_value = "editor")]
+        profile: ProfileArg,
         /// Log every tool call to <root>/.glossa/traces/*.jsonl (for the eval harness).
         #[arg(short = 't', long)]
         trace: bool,
@@ -464,6 +464,29 @@ enum Cmd {
         #[arg(long = "service-name", hide = true, env = "GLOSSA_SERVICE_NAME")]
         service_name: Option<String>,
     },
+}
+
+/// Tool profile for `kb mcp` (reader | editor | full). A `clap::ValueEnum` so an invalid
+/// `--profile` is a clap parse error naming the bad value and the valid ones, instead of
+/// `glossa::mcp::Profile::parse`'s old silent fallback to `reader`.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum ProfileArg {
+    /// Answer-only: hides index, graph authoring/navigation, admin, and notebook writes.
+    Reader,
+    /// Index + graph authoring + notebook writes (default).
+    Editor,
+    /// Admin — every tool, including `purge`.
+    Full,
+}
+
+impl From<ProfileArg> for glossa::mcp::Profile {
+    fn from(p: ProfileArg) -> Self {
+        match p {
+            ProfileArg::Reader => Self::Reader,
+            ProfileArg::Editor => Self::Editor,
+            ProfileArg::Full => Self::Full,
+        }
+    }
 }
 
 /// MCP transport for `kb mcp`.
@@ -2334,7 +2357,7 @@ fn main() -> anyhow::Result<()> {
                 let params = ServeParams {
                     roots: rr.roots,
                     state_base: rr.state_base,
-                    profile: glossa::mcp::Profile::parse(&profile),
+                    profile: glossa::mcp::Profile::from(profile),
                     trace,
                     no_graph,
                     // Images are opt-in via --vision; the legacy --noimage still forces them off.
@@ -3114,6 +3137,41 @@ mod cli_root_wiring_tests {
                 action: None, path, ..
             } => assert_eq!(path.as_deref(), Some(std::path::Path::new("somecorpus"))),
             _ => panic!("expected Mcp serve (action=None)"),
+        }
+    }
+
+    #[test]
+    fn mcp_profile_rejects_invalid_value_instead_of_defaulting_to_reader() {
+        // A typo used to silently resolve to `Profile::Reader` (glossa::mcp::Profile::parse's old
+        // fallback) with no diagnostic. `ProfileArg` is a clap::ValueEnum now, so clap itself
+        // refuses the value at parse time and names the valid ones.
+        let err = Cli::try_parse_from(["kb", "mcp", "somecorpus", "--profile", "edtior"])
+            .expect_err("invalid --profile must be rejected, not silently defaulted");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("edtior")
+                && msg.contains("reader")
+                && msg.contains("editor")
+                && msg.contains("full"),
+            "error should name the bad value and the three valid ones, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn mcp_profile_accepts_the_three_valid_values() {
+        for (arg, want) in [
+            ("reader", ProfileArg::Reader),
+            ("editor", ProfileArg::Editor),
+            ("full", ProfileArg::Full),
+        ] {
+            let cli = Cli::try_parse_from(["kb", "mcp", "somecorpus", "--profile", arg]).unwrap();
+            match cli.cmd {
+                Cmd::Mcp { profile, .. } => assert_eq!(
+                    glossa::mcp::Profile::from(profile),
+                    glossa::mcp::Profile::from(want)
+                ),
+                _ => panic!("expected Mcp serve"),
+            }
         }
     }
 
