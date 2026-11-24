@@ -1,4 +1,3 @@
-use anyhow::Context;
 use clap::{Parser, Subcommand};
 use glossa::query::{compile, QueryOpts};
 use glossa::search::search_chunks;
@@ -2575,23 +2574,9 @@ fn main() -> anyhow::Result<()> {
                 }
                 if relink && !report.relink.relinkable.is_empty() {
                     // Non-destructive, but back up the DB first anyway — this rewrites edges/nodes
-                    // in place and there's no undo command yet. Namespace the backup with an epoch
-                    // timestamp so a second `--relink` run doesn't silently overwrite the previous
-                    // run's backup -- each run keeps its own.
-                    let epoch = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    let gdir = rr.state_base.join(".glossa");
-                    for ext in ["", "-wal", "-shm"] {
-                        let src = gdir.join(format!("graph.sqlite{ext}"));
-                        if src.exists() {
-                            let dst = gdir.join(format!("graph.sqlite{ext}.pre-relink-{epoch}"));
-                            std::fs::copy(&src, &dst).with_context(|| {
-                                format!("backup {src:?} -> {dst:?} before --relink")
-                            })?;
-                        }
-                    }
+                    // in place and there's no undo command yet. Shared with the MCP `graph_doctor`
+                    // relink so neither entry point can drift into running without a restore point.
+                    glossa::graph::doctor::backup_before_relink(&rr.state_base)?;
                     let applied = glossa::graph::doctor::apply_relink(&g, &report.relink)?;
                     // Bar was already `finish_and_clear()`ed before the report print above, so this
                     // inc is bookkeeping only (the "relink" phase completing) -- it draws nothing,

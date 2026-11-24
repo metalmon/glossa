@@ -32,6 +32,14 @@
         "boolean",
         "null"
       ]
+    },
+    "relink": {
+      "default": null,
+      "description": "apply the non-destructive repair: re-point the groundings (MENTIONS + provenance) of relocated or relabeled documents — the report's `relinkable` group — onto their live targets, deleting nothing. Backs up graph.sqlite first. Cannot be combined with any prune_* in one call. Default false (report-only)",
+      "type": [
+        "boolean",
+        "null"
+      ]
     }
   },
   "type": "object"

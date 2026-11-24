@@ -297,6 +297,33 @@ pub fn relink_prune_conflict(
     relink && (prune_incomplete || prune_ungrounded || prune_dangling || prune_stale)
 }
 
+/// Copy `graph.sqlite` (and its `-wal` / `-shm` siblings, when present) aside under
+/// `<state_base>/.glossa` before a relink is applied. [`apply_relink`] rewrites edges and
+/// provenance IN PLACE and there is no undo command yet, so every caller that applies a plan —
+/// `kb graph doctor --relink` and the MCP `graph_doctor` tool's `relink` — takes a restore point
+/// first. It lives here, beside `apply_relink`, rather than in either caller's wrapper: a copy of
+/// this loop per entry point is how one path ends up protected and the other quietly not.
+///
+/// The backup is namespaced with an epoch timestamp so a second relink run keeps its own copy
+/// instead of overwriting the previous run's.
+pub fn backup_before_relink(state_base: &std::path::Path) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let gdir = state_base.join(".glossa");
+    for ext in ["", "-wal", "-shm"] {
+        let src = gdir.join(format!("graph.sqlite{ext}"));
+        if src.exists() {
+            let dst = gdir.join(format!("graph.sqlite{ext}.pre-relink-{epoch}"));
+            std::fs::copy(&src, &dst)
+                .with_context(|| format!("backup {src:?} -> {dst:?} before relink"))?;
+        }
+    }
+    Ok(())
+}
+
 /// Apply a `RelinkPlan` (as computed into `DoctorReport.relink` by [`doctor`]) to the store:
 /// non-destructively re-point each relinkable reasoning node's `MENTIONS` edge from its dead target
 /// to the live structural node `classify_relink` matched it to, and keep provenance's `source_path`

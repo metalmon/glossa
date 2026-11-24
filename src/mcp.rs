@@ -868,6 +868,14 @@ struct DoctorArgs {
         description = "also delete stale nodes (source drifted; last resort — prefer re-syncing/rebuilding the source); default false (report-only)"
     )]
     prune_stale: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "crate::json_util::deserialize_opt_bool_loose"
+    )]
+    #[schemars(
+        description = "apply the non-destructive repair: re-point the groundings (MENTIONS + provenance) of relocated or relabeled documents — the report's `relinkable` group — onto their live targets, deleting nothing. Backs up graph.sqlite first. Cannot be combined with any prune_* in one call. Default false (report-only)"
+    )]
+    relink: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2183,20 +2191,51 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Diagnose graph health: the four doubts — ungrounded nodes (a requires-grounding node with no live MENTIONS), stale nodes (the source file backing a node has changed since it was recorded), incomplete nodes (off-spine / degenerate, on no complete reasoning chain), and dangling nodes (a query-side node whose chain reaches no live grounded terminal). Report-only by default — pass prune_incomplete/prune_ungrounded/prune_dangling/prune_stale (each opt-in, last resort — prefer re-grounding, restoring the terminal, or re-syncing/rebuilding the source over deleting) to also delete that bucket; the response then includes the pruned counts."
+        description = "Diagnose graph health: the four doubts — ungrounded nodes (a requires-grounding node with no live MENTIONS), stale nodes (the source file backing a node has changed since it was recorded), incomplete nodes (off-spine / degenerate, on no complete reasoning chain), and dangling nodes (a query-side node whose chain reaches no live grounded terminal). Report-only by default. relink is the non-destructive repair: it re-points the groundings (MENTIONS + provenance) of relocated or relabeled documents — the report's `relinkable` group — onto the live structural nodes they now live under, so nodes that only LOOK ungrounded stop being reported as such. It deletes nothing and backs up graph.sqlite first. It never touches the `ambiguous` group (two live candidates) or the `orphans` group (no candidate at all) — those need a human, which is why some nodes still remain reported after a successful relink. relink cannot be combined with any prune_* in one call and such a call is refused: the prune is computed from the report taken BEFORE relink ran, so it would delete the very nodes relink just re-grounded. The right order is relink alone first, then a separate graph_doctor call to prune what genuinely remains. The deletions — prune_incomplete / prune_ungrounded / prune_dangling / prune_stale, each opt-in — are a last resort: prefer relink, restoring the terminal, or re-syncing/rebuilding the source over deleting. The response includes the relinked and pruned counts."
     )]
     async fn graph_doctor(
         &self,
         Parameters(a): Parameters<DoctorArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let g = GraphStore::open(&self.state_base).map_err(internal)?;
-        let ont = self.ontology();
-        let report = crate::graph::doctor::doctor(&g, &ont, &self.roots).map_err(internal)?;
-        let mut out = crate::graph::ops::fmt_doctor_report(&report);
+        let relink = a.relink.unwrap_or(false);
         let prune_incomplete = a.prune_incomplete.unwrap_or(false);
         let mut prune_ungrounded = a.prune_ungrounded.unwrap_or(false);
         let mut prune_dangling = a.prune_dangling.unwrap_or(false);
         let mut prune_stale = a.prune_stale.unwrap_or(false);
+        // Refuse the combo BEFORE any work — opening the store, diagnosing, backing up, relinking
+        // or pruning. Same predicate the CLI refuses on (`relink_prune_conflict`), so the two entry
+        // points cannot drift on the rule: a prune in the same call runs against the report taken
+        // before relink, and would delete exactly the nodes relink just re-grounded.
+        if crate::graph::doctor::relink_prune_conflict(
+            relink,
+            prune_incomplete,
+            prune_ungrounded,
+            prune_dangling,
+            prune_stale,
+        ) {
+            return Err(McpError::invalid_params(
+                "relink cannot be combined with any prune_* in one call: relink re-grounds nodes \
+                 that the prune (computed from the report taken before relink ran) would then \
+                 delete. Call graph_doctor with relink alone first, then call it again to prune \
+                 what genuinely remains.",
+                None,
+            ));
+        }
+        let g = GraphStore::open(&self.state_base).map_err(internal)?;
+        let ont = self.ontology();
+        let report = crate::graph::doctor::doctor(&g, &ont, &self.roots).map_err(internal)?;
+        let mut out = crate::graph::ops::fmt_doctor_report(&report);
+        if relink && !report.relink.relinkable.is_empty() {
+            // Non-destructive, but `apply_relink` rewrites edges/provenance in place and there is
+            // no undo command — take the same restore point the CLI takes, via the same function.
+            crate::graph::doctor::backup_before_relink(&self.state_base).map_err(internal)?;
+            let applied =
+                crate::graph::doctor::apply_relink(&g, &report.relink).map_err(internal)?;
+            out.push_str(&format!(
+                "relinked: repointed={} duplicates_dropped={}\n",
+                applied.repointed, applied.dropped
+            ));
+        }
         // Mass-wipe guards (ontology-mismatch symptom): refuse a destructive bucket that would wipe
         // the reasoning layer wholesale. Same checks the CLI applies; MCP never force-overrides.
         let mut refusals: Vec<String> = Vec::new();
@@ -4882,5 +4921,246 @@ mod tests {
         let ids = search_signal_ids(&hits);
         assert_eq!(ids, vec!["d.pdf#1".to_string(), "d.pdf#2".to_string()]);
         assert_ne!(ids[0], ids[1], "distinct ord must yield distinct ids");
+    }
+
+    // ---- graph_doctor's non-destructive repair (`relink`) over MCP -------------------------
+    //
+    // The CLI has had `--relink` since the doctor shipped; MCP had only the four prunes, so an
+    // agent told to "prefer re-grounding over deleting" had no tool to do it with. These pin the
+    // MCP half: the plan is applied and counted, the relink+prune combo is refused by the SAME
+    // predicate the CLI refuses on, the shared backup is taken, and the two groups that need a
+    // human (`ambiguous`, `orphans`) are left exactly as they were.
+
+    /// The same ontology `tests/graph_doctor_it.rs` uses — proven to parse, so `self.ontology()`
+    /// cannot silently fall back to the default (which would classify nothing as grounding-required
+    /// and quietly empty the relink plan this test is about).
+    const RELINK_ONT: &str = r#"
+[entities.Symptom]
+props = ["name"]
+[entities.Cause]
+props = ["name"]
+[entities.Resolution]
+props = ["name"]
+requires_grounding = true
+[entities.Section]
+props = ["name"]
+[relations.CAUSED_BY]
+from = ["Symptom"]
+to = ["Cause"]
+[relations.RESOLVED_BY]
+from = ["Cause", "Symptom"]
+to = ["Resolution"]
+[relations.MENTIONS]
+from = ["Symptom", "Resolution"]
+to = ["Section"]
+[validation]
+strict = false
+[reasoning]
+spines = [{ anchor = "Symptom", relations = ["CAUSED_BY", "RESOLVED_BY"] }]
+"#;
+
+    /// One graph carrying all three relink outcomes at once:
+    /// * `res:a` MENTIONS the dead `m.pdf#1`, whose filename#section tail matches exactly ONE live
+    ///   node (`plc/m.pdf#1`) — the relocated/relabeled doc, i.e. **relinkable**;
+    /// * `res:b` MENTIONS the dead `x.pdf#1`, whose tail matches TWO live nodes — **ambiguous**;
+    /// * `res:c` MENTIONS the dead `z.pdf#9`, whose tail matches nothing live — **orphan**.
+    ///
+    /// Seeded through `put_node`/`put_edge` rather than `upsert`: a MENTIONS edge to a target that
+    /// has no node is exactly the shape doctor/relink exist to repair, and `upsert`'s edge
+    /// validation would reject it (the same bypass `graph::doctor`'s own tests use).
+    fn seed_relink_graph(base: &std::path::Path) {
+        use crate::graph::store::{Edge, Node, Provenance};
+        std::fs::create_dir_all(base.join(".glossa")).unwrap();
+        std::fs::write(base.join(".glossa").join("ontology.toml"), RELINK_ONT).unwrap();
+        let prov = |p: &str| Provenance {
+            source_path: p.into(),
+            range: None,
+            file_sig: None,
+            origin: "agent".into(),
+            confidence: 0.9,
+            created_at: 1,
+        };
+        let g = GraphStore::open(base).unwrap();
+        for (id, ty, src) in [
+            ("res:a", "Resolution", "m.pdf"),
+            ("res:b", "Resolution", "x.pdf"),
+            ("res:c", "Resolution", "z.pdf"),
+            ("plc/m.pdf#1", "Section", "plc/m.pdf"),
+            ("a/x.pdf#1", "Section", "a/x.pdf"),
+            ("b/x.pdf#1", "Section", "b/x.pdf"),
+        ] {
+            g.put_node(&Node {
+                id: id.into(),
+                node_type: ty.into(),
+                label: id.into(),
+                aliases: vec![],
+                prov: prov(src),
+            })
+            .unwrap();
+        }
+        for (from, to, src) in [
+            ("res:a", "m.pdf#1", "m.pdf"),
+            ("res:b", "x.pdf#1", "x.pdf"),
+            ("res:c", "z.pdf#9", "z.pdf"),
+        ] {
+            g.put_edge(&Edge {
+                from: from.into(),
+                to: to.into(),
+                edge_type: crate::graph::MENTIONS.into(),
+                prov: prov(src),
+            })
+            .unwrap();
+        }
+    }
+
+    fn relink_args(relink: bool) -> DoctorArgs {
+        DoctorArgs {
+            prune_incomplete: None,
+            prune_ungrounded: None,
+            prune_dangling: None,
+            prune_stale: None,
+            relink: Some(relink),
+        }
+    }
+
+    fn text_of(r: &CallToolResult) -> String {
+        r.content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn graph_doctor_relink_applies_the_plan_and_reports_the_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_relink_graph(dir.path());
+        let srv = GlossaServer::new_for_test(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        );
+        let out = text_of(
+            &srv.graph_doctor(Parameters(relink_args(true)))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            out.contains("relinked: repointed=1 duplicates_dropped=0"),
+            "the response must report apply_relink's own counts: {out}"
+        );
+        let edges = GraphStore::open(dir.path()).unwrap().all_edges().unwrap();
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.from == "res:a" && e.to == "plc/m.pdf#1"),
+            "res:a's grounding must now point at the live node"
+        );
+        assert!(
+            !edges.iter().any(|e| e.to == "m.pdf#1"),
+            "the dead target must be gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_doctor_refuses_relink_combined_with_any_prune() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_relink_graph(dir.path());
+        let srv = GlossaServer::new_for_test(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        );
+        // Each prune flag, one at a time: `relink_prune_conflict` must reject all four.
+        for i in 0..4 {
+            let mut args = relink_args(true);
+            match i {
+                0 => args.prune_incomplete = Some(true),
+                1 => args.prune_ungrounded = Some(true),
+                2 => args.prune_dangling = Some(true),
+                _ => args.prune_stale = Some(true),
+            }
+            let err = srv
+                .graph_doctor(Parameters(args))
+                .await
+                .expect_err("relink + a prune in one call must be refused");
+            assert!(
+                err.message.contains("relink alone first"),
+                "the refusal must name the right order (flag {i}): {}",
+                err.message
+            );
+        }
+        // The refusal happens before any work, so nothing was relinked or deleted.
+        let edges = GraphStore::open(dir.path()).unwrap().all_edges().unwrap();
+        assert_eq!(edges.len(), 3, "a refused call must change nothing");
+        assert!(edges.iter().any(|e| e.to == "m.pdf#1"));
+    }
+
+    #[tokio::test]
+    async fn graph_doctor_relink_backs_up_the_graph_first() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_relink_graph(dir.path());
+        let srv = GlossaServer::new_for_test(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        );
+        let _ = srv
+            .graph_doctor(Parameters(relink_args(true)))
+            .await
+            .unwrap();
+        // `backup_before_relink` is shared with the CLI; assert its artifact, not the call.
+        let backups: Vec<String> = std::fs::read_dir(dir.path().join(".glossa"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("graph.sqlite.pre-relink-"))
+            .collect();
+        assert_eq!(
+            backups.len(),
+            1,
+            "relink over MCP must leave exactly one restore point (there is no undo command): \
+             saw {backups:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_doctor_relink_leaves_ambiguous_and_orphans_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_relink_graph(dir.path());
+        let srv = GlossaServer::new_for_test(
+            dir.path().to_path_buf(),
+            Profile::Editor,
+            false,
+            ServerFlags::default(),
+        );
+        let _ = srv
+            .graph_doctor(Parameters(relink_args(true)))
+            .await
+            .unwrap();
+        let g = GraphStore::open(dir.path()).unwrap();
+        let edges = g.all_edges().unwrap();
+        // res:b is ambiguous (two live candidates) and res:c is an orphan (none): both keep their
+        // dead edge, and their provenance is not rewritten either.
+        assert!(
+            edges.iter().any(|e| e.from == "res:b" && e.to == "x.pdf#1"),
+            "the ambiguous node's edge must survive a relink"
+        );
+        assert!(
+            edges.iter().any(|e| e.from == "res:c" && e.to == "z.pdf#9"),
+            "the orphan's edge must survive a relink"
+        );
+        assert_eq!(
+            g.get_node("res:b").unwrap().unwrap().prov.source_path,
+            "x.pdf"
+        );
+        assert_eq!(
+            g.get_node("res:c").unwrap().unwrap().prov.source_path,
+            "z.pdf"
+        );
+        assert_eq!(edges.len(), 3, "relink deletes nothing here");
     }
 }
