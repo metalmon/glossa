@@ -13,7 +13,11 @@ pub const TARGET: &str = "glossa::audit";
 
 /// Emit one security-audit event.
 ///
-/// - `category`: the security class — `"auth"`, `"access"`, `"admin"`.
+/// - `category`: the security class. Every category actually emitted, with its one action:
+///   `"auth"` (`bearer_reject`), `"access"` (`insecure_serve`), `"write"` (`tool_invoke`),
+///   `"session"` (`idle_expired`). There is no `"admin"` category — this list named one for a
+///   while and no call site ever emitted it, which is how a log consumer ends up filtering on a
+///   string that cannot appear.
 /// - `action`: the specific event — `"bearer_reject"`, `"tool_invoke"`, …
 /// - `outcome`: `"ok"`, `"denied"`, `"error"`, `"invoked"`.
 /// - `source`: where it came from — a client IP for network events, else `"-"`.
