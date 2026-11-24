@@ -2562,16 +2562,6 @@ fn main() -> anyhow::Result<()> {
                 pb.inc(1);
                 pb.finish_and_clear();
                 print!("{}", glossa::graph::ops::fmt_doctor_report(&report));
-                // Relocated/relabeled docs are not orphans — refuse a `--prune-ungrounded` that
-                // would destroy their (recoverable) reasoning nodes until `--relink` has run, or
-                // the human overrides with `--force`.
-                if prune_ungrounded && !report.relink.relinkable.is_empty() && !force {
-                    anyhow::bail!(
-                        "{} nodes are relocated docs, not orphans — run `kb graph doctor --relink` \
-                         first (or --force to prune anyway)",
-                        report.relink.relinkable.len()
-                    );
-                }
                 if relink && !report.relink.relinkable.is_empty() {
                     // Non-destructive, but back up the DB first anyway — this rewrites edges/nodes
                     // in place and there's no undo command yet. Shared with the MCP `graph_doctor`

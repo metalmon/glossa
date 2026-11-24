@@ -466,6 +466,21 @@ pub fn bucket_prune_risk(
     if bucket_len == 0 {
         return None;
     }
+    // Repairable-first: an `ungrounded` node classified `relinkable` would stop being ungrounded
+    // under a plain, non-destructive `relink` — it's a relocated/relabeled doc, not a genuine
+    // orphan. Deleting the bucket now would permanently discard exactly what relink would have
+    // saved for free, so refuse until relink has had its turn. Gated on `relinkable` ONLY:
+    // `ambiguous` and `orphans` are deliberately untouched by `relink` (see `classify_relink`), so
+    // a graph whose every ungrounded node falls in those two groups must stay prunable here, or
+    // the caller would have no way forward at all.
+    if bucket == "ungrounded" && !report.relink.relinkable.is_empty() {
+        return Some(format!(
+            "{} of the {bucket_len} ungrounded node(s) are relinkable — relocated/relabeled docs, \
+             not genuine orphans. Run `kb graph doctor --relink` (CLI) or `graph_doctor` with \
+             `relink: true` (MCP) alone first, then re-run doctor to prune what genuinely remains.",
+            report.relink.relinkable.len()
+        ));
+    }
     let structural: HashSet<String> = ont.structural().into_iter().collect();
     let non_structural = g
         .all_nodes()
@@ -1183,6 +1198,110 @@ strict = false
                 "message must name the {bucket} bucket"
             );
         }
+    }
+
+    #[test]
+    fn bucket_prune_risk_refuses_ungrounded_while_relinkable_is_non_empty() {
+        // Same shape as `apply_relink_repoints_the_simple_case`: res:a's MENTIONS points at a dead
+        // key ("m.pdf#1") that a LIVE structural node ("plc/m.pdf#1") matches by filename+section —
+        // classify_relink puts it in `relinkable`, not `orphans`. A prune of `ungrounded` must be
+        // refused: relink would fix this node for free.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let g = GraphStore::open(root).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        g.put_node(&node("res:a", "Resolution", "A res", prov("m.pdf", None)))
+            .unwrap();
+        g.put_node(&node(
+            "plc/m.pdf#1",
+            "Section",
+            "sec 1",
+            prov("plc/m.pdf", None),
+        ))
+        .unwrap();
+        g.put_edge(&edge("res:a", "MENTIONS", "m.pdf#1", prov("m.pdf", None)))
+            .unwrap();
+
+        let rep = doctor(&g, &ont, &single_root(root)).unwrap();
+        assert_eq!(rep.ungrounded.len(), 1, "res:a must be reported ungrounded");
+        assert_eq!(
+            rep.relink.relinkable.len(),
+            1,
+            "res:a must classify as relinkable, not an orphan"
+        );
+
+        let risk = bucket_prune_risk(rep.ungrounded.len(), "ungrounded", &rep, &g, &ont);
+        let msg = risk.unwrap_or_else(|| {
+            panic!("a non-empty relinkable group must refuse the ungrounded prune")
+        });
+        assert!(
+            msg.contains("relinkable") && msg.contains("relink"),
+            "refusal must name relink as the next action: {msg}"
+        );
+    }
+
+    #[test]
+    fn bucket_prune_risk_permits_ungrounded_when_all_are_orphans() {
+        // res:orphan's MENTIONS points at a dead key with NO live structural node sharing its
+        // filename+section tail — classify_relink puts it in `orphans`, which `relink` never
+        // touches. The repairable-first refusal must NOT fire here, or the caller would have no
+        // way forward (relink can't help, prune is the only remaining fix).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let g = GraphStore::open(root).unwrap();
+        let ont = Ontology::parse(ONT).unwrap();
+
+        // A healthy, live-grounded chain so live_terminal_count > 0 and non_structural is large
+        // enough that the mass-wipe proportion guard doesn't also fire for an unrelated reason.
+        g.put_node(&node(
+            "res:ok",
+            "Resolution",
+            "OK res",
+            prov("doc.md", None),
+        ))
+        .unwrap();
+        g.put_node(&node("doc/sec#1", "Section", "sec 1", prov("doc.md", None)))
+            .unwrap();
+        g.put_edge(&edge(
+            "res:ok",
+            "MENTIONS",
+            "doc/sec#1",
+            prov("doc.md", None),
+        ))
+        .unwrap();
+
+        g.put_node(&node(
+            "res:orphan",
+            "Resolution",
+            "Orphan res",
+            prov("other.pdf", None),
+        ))
+        .unwrap();
+        g.put_edge(&edge(
+            "res:orphan",
+            "MENTIONS",
+            "nope.pdf#9",
+            prov("other.pdf", None),
+        ))
+        .unwrap();
+
+        let rep = doctor(&g, &ont, &single_root(root)).unwrap();
+        assert_eq!(rep.ungrounded.len(), 1, "only res:orphan is ungrounded");
+        assert!(
+            rep.relink.relinkable.is_empty(),
+            "nothing should be relinkable here"
+        );
+        assert!(
+            rep.relink.orphans.iter().any(|id| id == "res:orphan"),
+            "res:orphan must classify as an orphan, not relinkable"
+        );
+
+        let risk = bucket_prune_risk(rep.ungrounded.len(), "ungrounded", &rep, &g, &ont);
+        assert!(
+            risk.is_none(),
+            "an orphan-only ungrounded bucket must stay prunable: {risk:?}"
+        );
     }
 
     #[test]
