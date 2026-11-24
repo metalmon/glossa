@@ -95,8 +95,12 @@ pub fn next_best_action(
         out.push_str(&format!("\n[{tool}]\n{snip}\n"));
     };
     if name != "search" {
-        let (body, _) = crate::tools::search(idx, glossa_dir, term, 12, None, None, trace, None);
-        fold("search", &body, &mut any, &mut out);
+        let (out_s, _) = crate::tools::search(idx, glossa_dir, term, 12, None, None, trace, None);
+        // A search that failed in the store has nothing to recover WITH: folding its error note in
+        // would read to the model as a probe that returned text.
+        if !out_s.error {
+            fold("search", &out_s.text, &mut any, &mut out);
+        }
     }
     if let Some(g) = graph {
         if name != "glossary" {

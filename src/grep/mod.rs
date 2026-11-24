@@ -396,6 +396,28 @@ fn honor_regex_intent(pattern: &str, opts: &GrepOpts) -> GrepOpts {
     o
 }
 
+/// Does this query COMPILE? Runs exactly the engine builds [`grep`] performs before it touches the
+/// index — the pattern matcher and the `glob`/`scope` path filters — and nothing else.
+///
+/// `tools::grep` probes with this to tell a REJECTED QUERY from a broken store: both come back
+/// from `grep` as one flat `Err`, but a pattern the regex engine refuses is something the agent
+/// can rewrite (and the reply says how), while an index that will not walk is not. Keep in step
+/// with `grep`'s prologue below — `query_compiles_agrees_with_grep` fails if they drift.
+pub(crate) fn query_compiles(pattern: &str, opts: &GrepOpts) -> anyhow::Result<()> {
+    if pattern.trim().is_empty() {
+        return Ok(());
+    }
+    let (pattern, opts) = prepare(pattern, opts);
+    build_matcher(&pattern, &opts)?;
+    if let Some(g) = &opts.glob {
+        compile_glob(g)?;
+    }
+    if let Some(s) = &opts.scope {
+        compile_glob(&path_to_glob(s))?;
+    }
+    Ok(())
+}
+
 pub fn grep(idx: &DocIndex, pattern: &str, opts: &GrepOpts) -> anyhow::Result<Vec<GrepHit>> {
     if pattern.trim().is_empty() {
         return Ok(Vec::new());
@@ -527,6 +549,38 @@ mod tests {
             .collect();
         idx.write_chunks(&cs).unwrap();
         (dir, idx)
+    }
+
+    /// [`query_compiles`] exists to answer "would `grep` have refused this query before it reached
+    /// the index?", so the two must agree: whatever one rejects, the other must too. They are
+    /// separate copies of the same three engine builds, and this is the guard against their
+    /// drifting — a compile `grep` gained and the probe did not would send a store failure back as
+    /// rewrite advice, and the reverse would error on a query that in fact runs.
+    #[test]
+    fn query_compiles_agrees_with_grep() {
+        let (_d, idx) = idx_with(&[("a.md", "S1", "md", "alpha beta")]);
+        let bad_glob = GrepOpts {
+            glob: Some("a[".into()),
+            ..Default::default()
+        };
+        let bad_scope = GrepOpts {
+            scope: Some("a[".into()),
+            ..Default::default()
+        };
+        for (pattern, opts) in [
+            ("alpha", GrepOpts::default()),  // runs
+            ("", GrepOpts::default()),       // empty: both tolerate it
+            ("(", GrepOpts::default()),      // unbalanced group
+            ("a{2,1}", GrepOpts::default()), // invalid repetition
+            ("alpha", bad_glob),             // unclosed class in the -g filter
+            ("alpha", bad_scope),            // ... and in the scope filter
+        ] {
+            assert_eq!(
+                query_compiles(pattern, &opts).is_err(),
+                grep(&idx, pattern, &opts).is_err(),
+                "probe and grep disagree on {pattern:?} / {opts:?}"
+            );
+        }
     }
 
     fn assert_same_hits(pattern: &str, opts: &GrepOpts, idx: &DocIndex) {

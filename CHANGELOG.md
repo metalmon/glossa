@@ -8,6 +8,28 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **A failed `search`, `grep` or `glob` now reports as a tool error too.** The file-backed half of
+  this shipped first (below); the three retrieval tools still flattened their failure into the
+  reply body — `search error: …`, `grep error: …`, `glob error: …` came back with
+  `isError: false`, which is the same defect: an agent cannot tell a broken index from an answer.
+  An index that cannot be opened or searched, and a chunk walk that fails under `grep`/`glob`, now
+  set `isError`. **The message text is unchanged.**
+
+  **An empty result is still an answer, not an error** — zero `search` hits, zero `grep` matches,
+  no document matching a `glob` mask. An agent that searches for something absent has learned
+  something true about the corpus.
+
+  So is a pattern the engines refuse: a `grep` regex that will not compile still answers with
+  "set `fixed:true` or simplify to one or two distinctive words", and a malformed `glob` still
+  answers with the glob syntax. Both name something the agent can change about its next call, so
+  `grep` and `glob` now check the query's own compiles *before* the index walk — previously a bad
+  regex and a broken store came back as the same flat error. Erroring on a fixable pattern is what
+  makes a small model loop instead of rewriting it.
+
+  One classifier now draws the line for all four text tools (`tools::tool_failure`), and
+  `docs/mcp.md`'s "Failures vs non-applicable" enumerates both sides; it had claimed this of
+  `search` before the code did.
+
 - **A file-backed tool failure now reports as a tool error, not as content.** `read(page_image:
   true)` and `get_source_file` used to answer an unreachable or unrenderable file with an ordinary
   content string (`page_image: failed to render <path>#<n>`, `source file for <path> is not

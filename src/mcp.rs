@@ -1488,6 +1488,21 @@ impl GraphUpdateArgs {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Map a text-only tool result onto a `CallToolResult`, carrying its broken/answered flag across.
+///
+/// The same line `read_common` draws, for the three tools that have no images to ride along: a
+/// store that failed goes back with `isError` because content is indistinguishable from an answer,
+/// while an empty result and a rejected query are answers and stay successful content. See
+/// `tools::ToolOut`.
+fn text_result(out: crate::tools::ToolOut) -> CallToolResult {
+    let content = vec![Content::text(out.text)];
+    if out.error {
+        CallToolResult::error(content)
+    } else {
+        CallToolResult::success(content)
+    }
+}
+
 fn read_common(
     root: &std::path::Path,
     idx: &crate::index::store::DocIndex,
@@ -1504,7 +1519,7 @@ fn read_common(
     // A file-backed failure (a PDF page that would not render) goes back with `isError`, never as
     // plain content: content is indistinguishable from an answer, and a weak reader quotes the
     // failure note to the user as one. The chunk text rides along inside that error — see
-    // `tools::ReadOut`.
+    // `tools::ToolOut`.
     let is_error = out.error;
     let mut content = Vec::new();
     // Images ride out as JPEG: base64-PNG is what overflows the stdio JSON-RPC frame on
@@ -1596,7 +1611,7 @@ impl GlossaServer {
         let h = self.handle().map_err(internal)?;
         let key = format!("search:{a:?}");
         let glossa_dir = self.state_base.join(".glossa");
-        let (body, hits) = crate::tools::search(
+        let (mut out, hits) = crate::tools::search(
             &h.idx(),
             &glossa_dir,
             &a.query,
@@ -1608,15 +1623,15 @@ impl GlossaServer {
             a.scope.as_deref(),
         );
         let ids: Vec<String> = search_signal_ids(&hits);
-        let body = self.apply_signals(
+        out.text = self.apply_signals(
             "search",
             &key,
             ids,
             a.raw.unwrap_or(false),
             Some(a.query.as_str()),
-            body,
+            out.text,
         );
-        Ok(CallToolResult::success(vec![Content::text(body)]))
+        Ok(text_result(out))
     }
 
     // keep in sync with registry::DESC_READ (see search's comment above for why this is a literal).
@@ -2328,15 +2343,13 @@ impl GlossaServer {
             path: a.path,
             scope: a.scope,
         };
-        Ok(CallToolResult::success(vec![Content::text(
-            crate::tools::grep(
-                &self.state_base,
-                &idx,
-                &a.pattern,
-                &opts.with_default_context(),
-                &self.trace,
-            ),
-        )]))
+        Ok(text_result(crate::tools::grep(
+            &self.state_base,
+            &idx,
+            &a.pattern,
+            &opts.with_default_context(),
+            &self.trace,
+        )))
     }
 
     // keep in sync with registry::DESC_GLOB (see search's comment above for why this is a literal).
@@ -2347,9 +2360,11 @@ impl GlossaServer {
         self.freshen_now().await;
         let idx = crate::index::store::DocIndex::open_or_create_at(&self.roots, &self.state_base)
             .map_err(internal)?;
-        Ok(CallToolResult::success(vec![Content::text(
-            crate::tools::glob(&idx, &a.pattern, &self.trace),
-        )]))
+        Ok(text_result(crate::tools::glob(
+            &idx,
+            &a.pattern,
+            &self.trace,
+        )))
     }
 
     #[cfg_attr(not(feature = "notebook"), allow(dead_code))]
@@ -3387,6 +3402,32 @@ mod tests {
         let rendered = format!("{:?}", out.content);
         assert!(rendered.contains("failed to render"), "{rendered}");
         assert!(rendered.contains("glossa sample"), "{rendered}");
+    }
+
+    /// `search`, `grep` and `glob` all hand their result back through `text_result`, so this is
+    /// the whole mapping from `ToolOut.error` to `isError` for the three of them: a store that
+    /// failed goes back as a tool error, and an empty result or a rejected pattern as plain
+    /// content. Which arms set the flag is pinned next to those arms, in
+    /// `tools::tests::a_failed_search_grep_or_glob_is_a_tool_error_not_an_answer` and its two
+    /// content-side companions.
+    #[test]
+    fn a_failed_text_tool_maps_to_is_error() {
+        let failed = text_result(crate::tools::ToolOut {
+            text: "search error: index closed".into(),
+            images: Vec::new(),
+            error: true,
+        });
+        assert_eq!(failed.is_error, Some(true), "{failed:?}");
+        assert_eq!(failed.content.len(), 1);
+
+        for text in ["(no results)", "(no documents match — …)", "grep error: …"] {
+            let answered = text_result(crate::tools::ToolOut {
+                text: text.into(),
+                images: Vec::new(),
+                error: false,
+            });
+            assert_eq!(answered.is_error, Some(false), "{answered:?}");
+        }
     }
 
     /// The same contract on the other half of `get_source_file`: the reply the tool handler hands

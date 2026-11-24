@@ -32,9 +32,9 @@ Original-file delivery (`get_source_file`) is likewise **off by default** and op
 
 | Tool | reader | editor | full | Purpose |
 |------|:------:|:------:|:----:|---------|
-| `search` | ✓ | ✓ | ✓ | BM25 keyword search; returns `[#n] path · snippet` |
-| `grep` | ✓ | ✓ | ✓ | Regex/literal over extracted text |
-| `glob` | ✓ | ✓ | ✓ | List documents by path glob |
+| `search` | ✓ | ✓ | ✓ | BM25 keyword search; returns `[#n] path · snippet`. An index that cannot be opened or searched answers with **`isError: true`**; zero hits is a normal answer (see [Failures vs non-applicable](#failures-vs-non-applicable)) |
+| `grep` | ✓ | ✓ | ✓ | Regex/literal over extracted text. An index walk that fails answers with **`isError: true`**; zero matches, and a pattern the regex engine refuses (the reply says to set `fixed:true`), are normal answers |
+| `glob` | ✓ | ✓ | ✓ | List documents by path glob. An index walk that fails answers with **`isError: true`**; no matching document, and a glob the matcher refuses (the reply gives the syntax), are normal answers |
 | `read` | ✓ | ✓ | ✓ | Read chunk `#n`, graph node evidence, or a notebook note (path from `ls`). Image output is off unless the server was started with `--vision`; then `page_image: true` returns PDF page `n` as a 200 DPI JPEG for vision models, and embedded/`<img>` images are returned alongside the text (all as JPEG). Without `--vision`, the image params are removed from the schema and responses are text only. A `page_image` call on a PDF page that will not render answers with **`isError: true`** — and carries the chunk's text in that same response, since the text comes from the index rather than the file (see [Failures vs non-applicable](#failures-vs-non-applicable)) |
 | `get_source_file` | ✓† | ✓† | ✓† | Deliver the original source file behind a citation (`path`, PDF page `n`) as an embedded resource blob for the client to preview/download — for source attribution, not reading. Whole file when ≤ cap (default 10 MB); a larger PDF returns just the cited page as its own PDF. A file the index has and the disk cannot produce answers with **`isError: true`** (see [Failures vs non-applicable](#failures-vs-non-applicable)). **† Off by default; opt in with `--source-file`** |
 | `glossary` | ✓ | ✓ | ✓ | Resolve concept → reasoning chain + anchors. Pass `query` (the full question) to rank the composed neighborhood by what the question actually needs |
@@ -65,12 +65,12 @@ Source of truth: [`src/mcp.rs`](../src/mcp.rs).
 
 ## Failures vs non-applicable
 
-A tool that **failed** answers with `isError: true`; a tool that simply **does not apply** answers
-normally. The distinction matters because a failure returned as ordinary content is
-indistinguishable from an answer, and a weak reader will relay the note to the user as one.
+A tool that **failed** answers with `isError: true`. A tool that simply **does not apply**, that
+found **nothing**, or that can be **asked again better** answers normally. The distinction matters
+because a failure returned as ordinary content is indistinguishable from an answer, and a weak
+reader will relay the note to the user as one.
 
-`isError: true` — the file or the index could not produce what was asked for, and rephrasing the
-call will not help:
+`isError: true` — the store could not do what was asked, and rephrasing the call will not help:
 
 - `read(page_image: true)` on a PDF page that will not render (the file moved, was truncated, or
   the renderer cannot draw it). **The response also carries the chunk's text**, because the text
@@ -79,20 +79,39 @@ call will not help:
   every call — the text is what keeps it readable.
 - `get_source_file` on a file the index has and the disk will not read. No fallback here: the file
   *is* the output, so the response is the error note alone.
-- A tantivy search or chunk-range lookup that returns an error.
+- A `read` chunk-range lookup or chunk fetch that comes back an error, and the index probe behind a
+  graph node's evidence set: a thin-but-confident evidence list is worse than a loud failure.
+- `search` when the index cannot be opened or searched, or the query cannot be turned into
+  something runnable.
+- `grep` and `glob` when the index walk itself fails. The query's own compiles are checked first
+  (see the next list), so what reaches here is the store, not the pattern.
 
-Ordinary (successful) content — the tool does not apply, or the call can be corrected:
+Ordinary (successful) content — the tool does not apply, found nothing, or the call can be
+corrected:
 
 - `page_image` on a non-PDF or on a graph node: there is no page image to give.
+- **An empty result.** Zero `search` hits (`(no results)`), zero `grep` matches, no document
+  matching a `glob` mask: the agent asked whether the corpus holds something and learned that it
+  does not. That is true, and it is an answer — erroring would teach a reader to distrust it.
 - An out-of-range chunk number: `read` clamps to the valid range and says so in the response.
 - A path that does not resolve: the reply carries did-you-mean hints.
+- A `grep` pattern the regex engine refuses: the reply says to set `fixed:true` or to simplify to
+  one or two distinctive words. A `glob` the matcher refuses: the reply gives the glob syntax.
+  Both name something the agent can change about its next call, and erroring on a fixable pattern
+  is what makes a small model loop instead of rewriting it.
 - A reasoning node passed to `get_source_file`: it backs evidence in several documents, not one
   file, and the reply says to pass a document path instead.
 - An over-cap file: the reply asks for a specific PDF page.
 - A corpus started without `--source-file`: the tool is absent from the advertised list, so no
   call reaches it at all.
 
-The message text of each case is stable; `isError` is the part that tells failure from value.
+The line, then, is not "did text come back" but **who can act on it**: a failure the agent cannot
+route around is an error, and anything it can either use or retry differently is content. The
+message text of each case is stable; `isError` is the part that tells failure from value.
+
+Source of truth: `tools::ToolOut` and its one classifier `tool_failure` in
+[`src/tools/mod.rs`](../src/tools/mod.rs), mapped to `isError` by `text_result` / `read_common` /
+`source_file_result` in [`src/mcp.rs`](../src/mcp.rs).
 
 ## Typical agent workflow
 

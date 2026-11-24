@@ -285,7 +285,7 @@ fn grep_top_k(idx: &DocIndex, pattern: &str, k: usize) -> Vec<glossa::grep::Grep
 }
 
 fn glob_paths(idx: &DocIndex, pattern: &str) -> Vec<String> {
-    let text = glossa::tools::glob(idx, pattern, &TraceLog::disabled());
+    let text = glossa::tools::glob(idx, pattern, &TraceLog::disabled()).text;
     crate::train_examples::parse_glob_paths(&text)
         .into_iter()
         .filter_map(|p| idx.canonical_document_path(&p))

@@ -285,14 +285,17 @@ pub fn run_search(
     trace: &TraceLog,
     scope: Option<&str>,
 ) -> (String, Vec<String>) {
-    let (body, hits) =
+    // The eval harness has no error channel to the model — a tool result is one string — so a
+    // broken store arrives here as its message text, exactly as before. The MCP surface is where
+    // the `isError` flag matters.
+    let (out, hits) =
         glossa::tools::search(idx, glossa_dir, query, limit, glob, file_type, trace, scope);
-    (body, hits.iter().map(|h| h.location.clone()).collect())
+    (out.text, hits.iter().map(|h| h.location.clone()).collect())
 }
 
 /// List documents matching a shell glob; one `path  (N chunks)` per line.
 pub fn run_glob(idx: &DocIndex, pattern: &str, trace: &TraceLog) -> (String, Vec<String>) {
-    let body = glossa::tools::glob(idx, pattern, trace);
+    let body = glossa::tools::glob(idx, pattern, trace).text;
     (body, Vec::new())
 }
 
@@ -333,7 +336,7 @@ pub fn run_grep(
     trace: &TraceLog,
 ) -> (String, Vec<String>) {
     (
-        glossa::tools::grep(root, idx, pattern, &opts, trace),
+        glossa::tools::grep(root, idx, pattern, &opts, trace).text,
         Vec::new(),
     )
 }

@@ -150,7 +150,7 @@ fn hit_json(h: &RankedHit) -> serde_json::Value {
 /// BM25 search (optionally scoped), routed through the config-gated rerank stage
 /// (`retrieve::rerank::retrieve`): with no `[rerank]` config under `glossa_dir` this is plain BM25,
 /// byte-identical to before; with it configured, the hits carry the rerank score. Returns (model
-/// text, hits for the caller's scoring). `scope` (when `Some`) is the friendly "restrict to one
+/// text + whether the store failed, hits for the caller's scoring). `scope` (when `Some`) is the friendly "restrict to one
 /// document" filter (bare path or glob, via `DocIndex::search_filtered`'s `scope` param) — a
 /// SEPARATE, ANDed filter alongside the existing raw ripgrep `glob`, not a replacement for it.
 #[allow(clippy::too_many_arguments)]
@@ -163,7 +163,7 @@ pub fn search(
     file_type: Option<&str>,
     trace: &TraceLog,
     scope: Option<&str>,
-) -> (String, Vec<RankedHit>) {
+) -> (ToolOut, Vec<RankedHit>) {
     match crate::retrieve::rerank::retrieve(
         idx,
         glossa_dir,
@@ -191,6 +191,8 @@ pub fn search(
                     json!({"pool": info.pool, "returned": hits.len(), "applied": false, "fallback": reason}),
                 );
             }
+            // Zero hits is an ANSWER, not a failure: the agent asked whether the corpus says
+            // something and learned that it does not. Only the `Err` arm below is broken.
             let body = if hits.is_empty() {
                 "(no results)".to_string()
             } else {
@@ -199,9 +201,12 @@ pub fn search(
                     .collect::<Vec<_>>()
                     .join("\n")
             };
-            (body, hits)
+            (tool_answer(body), hits)
         }
-        Err(e) => (format!("search error: {e}"), Vec::new()),
+        // The index could not be opened, searched, or the query could not be turned into something
+        // runnable. There is no better-phrased call: the store failed, so this reports `isError`
+        // rather than handing the agent a note that reads like a result.
+        Err(e) => (tool_failure(format!("search error: {e}")), Vec::new()),
     }
 }
 
@@ -218,7 +223,9 @@ fn grep_notebook_body(rel: &str, body: &str, pattern: &str, opts: &GrepOpts) -> 
     let (pattern, opts) = crate::grep::prepare(pattern, opts);
     let matcher = match crate::grep::build_matcher(&pattern, &opts) {
         Ok(m) => m,
-        Err(e) => return format!("grep error: {e}"),
+        // A pattern the regex engine refuses, same as the corpus grep below: the agent can
+        // rewrite it, so this says how instead of erroring.
+        Err(e) => return rejected_grep_pattern(&e.to_string()),
     };
     let hits: Vec<String> = body
         .lines()
@@ -232,6 +239,20 @@ fn grep_notebook_body(rel: &str, body: &str, pattern: &str, opts: &GrepOpts) -> 
     }
 }
 
+/// What a `glob` reply appends when it has no paths to show — on an empty result and on a pattern
+/// the matcher refused alike, since in both cases the next call is the agent's to fix.
+const GLOB_SYNTAX_HINT: &str = " — ripgrep -g glob syntax: use * or **/* or *.{pdf,md}; matches PATHS not content; use search or grep for text";
+
+/// A pattern the regex engine would not take. A REJECTED QUERY, not a broken store: it names the
+/// two things the agent can change about its next call, so it goes back as plain content —
+/// erroring on a fixable pattern is what makes a small model loop instead of rewriting it.
+fn rejected_grep_pattern(e: &str) -> String {
+    format!(
+        "grep error: {e}\nThat pattern failed as a regex. Set fixed:true to match it as a \
+         literal string, or simplify it to one or two distinctive words."
+    )
+}
+
 /// ripgrep-style literal/regex search; model text only. Also serves notebook files
 /// (feature-gated): a doc-scoped `opts.path` like `<doc>/<file>` is probed against the agent's
 /// on-disk notebook before falling through to the corpus grep below.
@@ -241,7 +262,7 @@ pub fn grep(
     pattern: &str,
     opts: &GrepOpts,
     trace: &TraceLog,
-) -> String {
+) -> ToolOut {
     #[cfg(feature = "notebook")]
     if let Some(p) = opts.path.as_deref() {
         if looks_like_notebook_path(p) {
@@ -251,9 +272,15 @@ pub fn grep(
                     json!({ "notebook": p, "pattern": pattern }),
                     json!({ "notebook": rel }),
                 );
-                return grep_notebook_body(&rel, &body, pattern, opts);
+                return tool_answer(grep_notebook_body(&rel, &body, pattern, opts));
             }
         }
+    }
+    // Probe the query's own compiles first, because `grep` flattens them and the index walk into
+    // one `Err`: a pattern (or `glob`/`scope` filter) the engines refuse is a rejected query the
+    // agent can rewrite, so it stays content — only what survives this probe is a broken store.
+    if let Err(e) = crate::grep::query_compiles(pattern, opts) {
+        return tool_answer(rejected_grep_pattern(&e.to_string()));
     }
     match crate::grep::grep(idx, pattern, opts) {
         Ok(hits) => {
@@ -268,7 +295,8 @@ pub fn grep(
                 json!({"pattern": pattern}),
                 json!({"hits": hits.len(), "paths": paths}),
             );
-            if hits.is_empty() {
+            // Zero matches is an answer: the string is not in the corpus. Content, with a nudge.
+            tool_answer(if hits.is_empty() {
                 // Feedback in the glossary/sql spirit: a weak model tends to over-build the
                 // pattern (long `.*`/`|` regex) and match nothing. Steer it back to a simple literal
                 // instead of leaving it to guess why zero came back.
@@ -282,26 +310,33 @@ pub fn grep(
                     .map(|h| h.display_line())
                     .collect::<Vec<_>>()
                     .join("\n")
-            }
+            })
         }
-        Err(e) => format!(
-            "grep error: {e}\nThat pattern failed as a regex. Set fixed:true to match it as a \
-             literal string, or simplify it to one or two distinctive words."
-        ),
+        // The query compiled (probed above), so this is the index walk failing — broken, no
+        // rephrasing helps.
+        Err(e) => tool_failure(format!("grep error: {e}")),
     }
 }
 
-/// A read result: the chunk text (with prev/next footer) plus the file's images for vision models.
+/// What a text-returning tool produced: the model text, plus (for `read`) the file's images for
+/// vision models. Shared by `read`, `search`, `grep` and `glob`; `images` is empty for the three
+/// that never carry one.
 ///
 /// `error` says the call FAILED rather than returned a value, so the MCP layer can set `isError`.
-/// It is reserved for a file the index promises and the disk cannot produce (today: a PDF page that
-/// will not render) — a failure returned as plain content is indistinguishable from an answer, and a
-/// weak reader relays it as one. A tool that simply does not apply (`page_image` on a non-PDF or on
-/// a reasoning node) is NOT an error: the call is answered, just not with an image. Nor are the
-/// tolerant arms — an out-of-range chunk clamps, a mangled path gets did-you-mean hints — which are
-/// deliberately recoverable in-band (erroring there is what makes a small model loop).
+/// It is reserved for the store failing to do what was asked: a file the index promises and the
+/// disk cannot produce (a PDF page that will not render), or a tantivy/index operation that came
+/// back `Err`. A failure returned as plain content is indistinguishable from an answer, and a weak
+/// reader relays it as one.
+///
+/// Two neighbouring shapes are NOT errors. A tool that simply does not apply (`page_image` on a
+/// non-PDF or on a reasoning node) is answered, just not with an image — and an EMPTY result is an
+/// answer too: zero hits, zero matches, no document matching a glob all say something true about
+/// the corpus. Nor are the tolerant arms — an out-of-range chunk clamps, a mangled path gets
+/// did-you-mean hints, a pattern the regex engine refuses comes back with how to rewrite it — each
+/// of which names something the agent can change about its next call; erroring there is what makes
+/// a small model loop.
 #[derive(Default)]
-pub struct ReadOut {
+pub struct ToolOut {
     pub text: String,
     pub images: Vec<crate::read::DocImage>,
     pub error: bool,
@@ -372,22 +407,35 @@ fn resolve_node_handle(
 /// chunk; reading a Symptom also pulls the Cause/Resolution evidence one hop along the chain.
 /// An index failure while collecting a node's evidence is reported, not absorbed — see the comment
 /// in [`gather_mentions`] for why a thin-but-confident evidence set is the worst outcome.
-fn evidence_error(e: anyhow::Error) -> ReadOut {
-    read_failure(format!("read error: {e}"))
+fn evidence_error(e: anyhow::Error) -> ToolOut {
+    tool_failure(format!("read error: {e}"))
 }
 
-/// A read the INDEX could not perform — a tantivy search or range lookup that returned `Err`.
+/// A call the STORE could not perform — a tantivy search, an index walk or a range lookup that
+/// returned `Err`. The one classifier for all four text tools (`read`, `search`, `grep`, `glob`):
+/// the line sits in the same place for each, so it is drawn once here.
 ///
 /// Broken, by the same line `get_source_file` draws: the guidance arms tell the agent how to ask
-/// again and succeed (a clamped ordinal, a mangled path with did-you-mean hints), while this one
-/// says the store itself failed and no rephrasing helps. Returned as content it reads exactly like
-/// an answer — the failure mode [`gather_mentions`] already names, where a thin-but-confident
-/// result is the worst of the three outcomes. The text is unchanged; only the flag is new.
-fn read_failure(text: String) -> ReadOut {
-    ReadOut {
+/// again and succeed (a clamped ordinal, a mangled path with did-you-mean hints, a regex to
+/// rewrite), while this one says the store itself failed and no rephrasing helps. Returned as
+/// content it reads exactly like an answer — the failure mode [`gather_mentions`] already names,
+/// where a thin-but-confident result is the worst of the three outcomes. The text is unchanged;
+/// only the flag is new.
+fn tool_failure(text: String) -> ToolOut {
+    ToolOut {
         text,
         images: Vec::new(),
         error: true,
+    }
+}
+
+/// Text the tool actually produced — a hit list, an empty-result note, a rewrite hint. Everything
+/// that is not [`tool_failure`] goes back through here, so the two are read side by side.
+fn tool_answer(text: String) -> ToolOut {
+    ToolOut {
+        text,
+        images: Vec::new(),
+        error: false,
     }
 }
 
@@ -395,7 +443,7 @@ fn read_node(
     idx: &DocIndex,
     g: &crate::graph::store::GraphStore,
     node: crate::graph::store::Node,
-) -> ReadOut {
+) -> ToolOut {
     let mut seen = std::collections::HashSet::new();
     let mut chunks: Vec<(String, String, u64)> = Vec::new();
     // the node's own evidence
@@ -479,7 +527,7 @@ fn read_node(
             crate::read::extract_images(&idx.doc_file(p), *ord, usize::MAX).unwrap_or_default(),
         );
     }
-    ReadOut {
+    ToolOut {
         text,
         images,
         error: false,
@@ -534,7 +582,7 @@ pub fn read(
     n: u64,
     page_image: bool,
     trace: &TraceLog,
-) -> ReadOut {
+) -> ToolOut {
     // The canonical copy-ready chunk reference every search/grep/read result leads with is the
     // single token `path#n`. A model that copies it verbatim passes it here as `path` with no
     // separate `n` — parse the trailing `#<digits>` anchor and prefer its ordinal over the `n`
@@ -551,7 +599,7 @@ pub fn read(
     #[cfg(feature = "notebook")]
     if looks_like_notebook_path(path) {
         if page_image {
-            return ReadOut {
+            return ToolOut {
                 text: format!("page_image is only supported for PDF (got {path})"),
                 ..Default::default()
             };
@@ -562,7 +610,7 @@ pub fn read(
                 json!({ "notebook": path }),
                 json!({ "notebook": rel }),
             );
-            return ReadOut {
+            return ToolOut {
                 text: format!("{rel}\n{body}"),
                 ..Default::default()
             };
@@ -575,7 +623,7 @@ pub fn read(
         if let Ok(Some(node)) = g.get_node(path) {
             if !crate::graph::STRUCTURAL_NODES.contains(&node.node_type.as_str()) {
                 if page_image {
-                    return ReadOut {
+                    return ToolOut {
                         text: format!("page_image is only supported for PDF (got {path})"),
                         ..Default::default()
                     };
@@ -596,7 +644,7 @@ pub fn read(
                     if !crate::graph::STRUCTURAL_NODES.contains(&node.node_type.as_str()) {
                         // Mirror the raw-node-id path above: a node render has no page image.
                         if page_image {
-                            return ReadOut {
+                            return ToolOut {
                                 text: format!("page_image is only supported for PDF (got {path})"),
                                 ..Default::default()
                             };
@@ -625,7 +673,7 @@ pub fn read(
                 let ord = n.clamp(1, max);
                 match idx.read_chunk_by_ord(path, ord) {
                     Ok(Some(c)) => (path.to_string(), c, ord),
-                    _ => return ReadOut {
+                    _ => return ToolOut {
                         text: format!("no chunk #{n} in {path} — this document has {max} chunks (read #1..#{max})"),
                         ..Default::default()
                     },
@@ -640,26 +688,26 @@ pub fn read(
                             Ok(Some(max)) => format!("no chunk #{n} in {real} — this document has {max} chunks (read #1..#{max})"),
                             _ => path_not_found(idx, path),
                         };
-                        return ReadOut {
+                        return ToolOut {
                             text,
                             ..Default::default()
                         };
                     }
                 },
                 None => {
-                    return ReadOut {
+                    return ToolOut {
                         text: path_not_found(idx, path),
                         ..Default::default()
                     }
                 }
             },
             Err(e) => {
-                return read_failure(format!(
+                return tool_failure(format!(
                     "no chunk #{n} in {path} (range lookup failed: {e})"
                 ))
             }
         },
-        Err(e) => return read_failure(format!("read error: {e}")),
+        Err(e) => return tool_failure(format!("read error: {e}")),
     };
     let path = path.as_str();
     trace.log("read", json!({"path": path, "n": n}), json!({"path": path}));
@@ -671,7 +719,7 @@ pub fn read(
             .unwrap_or("")
             .to_lowercase();
         if ext != "pdf" {
-            return ReadOut {
+            return ToolOut {
                 text: format!("page_image is only supported for PDF (got {path})"),
                 ..Default::default()
             };
@@ -694,7 +742,7 @@ pub fn read(
         // file, so we HAVE what the agent asked to read and dropping it bought nothing. The agent
         // gets the content it can use plus an unambiguous signal that the image did not come.
         if images.is_empty() {
-            return ReadOut {
+            return ToolOut {
                 text: format!(
                     "page_image: failed to render {path}#{resolved_ord} — returning the chunk text instead\n── {path}#{resolved_ord} ──\n{}",
                     format_chunk_body(resolved_ord, &chunk.body)
@@ -703,7 +751,7 @@ pub fn read(
                 error: true,
             };
         }
-        return ReadOut {
+        return ToolOut {
             text: format!("page_image {path}#{resolved_ord}"),
             images,
             error: false,
@@ -732,7 +780,7 @@ pub fn read(
     } else {
         String::new()
     };
-    ReadOut {
+    ToolOut {
         text: format!(
             "{clamp_note}── {path}#{resolved_ord} ──\n{}{}",
             body, footer
@@ -743,7 +791,14 @@ pub fn read(
 }
 
 /// List documents by path mask; model text only.
-pub fn glob(idx: &DocIndex, pattern: &str, trace: &TraceLog) -> String {
+pub fn glob(idx: &DocIndex, pattern: &str, trace: &TraceLog) -> ToolOut {
+    // Same split as grep: `glob_docs` flattens its own glob compile and the chunk walk into one
+    // `Err`, so compile the pattern here first. A glob the matcher refuses is a rejected query —
+    // the syntax note tells the agent how to write one — while a failed walk is a broken store.
+    // The recompile inside `glob_docs` costs one glob build.
+    if let Err(e) = crate::glob::compile_glob(pattern) {
+        return tool_answer(format!("glob error: {e}{GLOB_SYNTAX_HINT}"));
+    }
     match crate::glob::glob_docs(idx, pattern) {
         Ok(docs) => {
             let paths: Vec<&str> = docs.iter().map(|(p, _)| p.as_str()).collect();
@@ -752,16 +807,18 @@ pub fn glob(idx: &DocIndex, pattern: &str, trace: &TraceLog) -> String {
                 json!({"pattern": pattern}),
                 json!({"docs": docs.len(), "paths": paths}),
             );
-            if docs.is_empty() {
-                "(no documents match — ripgrep -g glob syntax: use * or **/* or *.{pdf,md}; matches PATHS not content; use search or grep for text)".to_string()
+            // No document matching the mask is an answer about the corpus, not a failure.
+            tool_answer(if docs.is_empty() {
+                format!("(no documents match{GLOB_SYNTAX_HINT})")
             } else {
                 docs.iter()
                     .map(|(p, n)| format!("{p}  ({n} chunks)"))
                     .collect::<Vec<_>>()
                     .join("\n")
-            }
+            })
         }
-        Err(e) => format!("glob error: {e}"),
+        // The pattern compiled above, so this is the chunk walk failing — broken.
+        Err(e) => tool_failure(format!("glob error: {e}")),
     }
 }
 
@@ -1994,7 +2051,7 @@ pub struct SourceBlob {
 /// error line (never base64); `file` is the deliverable when resolution succeeded within the cap.
 ///
 /// `error` says the call FAILED rather than returned a value, so the MCP layer can set `isError`.
-/// Unlike [`ReadOut`] there is nothing to fall back on here — the tool's whole output IS the file —
+/// Unlike [`ToolOut`] there is nothing to fall back on here — the tool's whole output IS the file —
 /// so a disk/render failure returns the note alone, but marked. The guidance arms stay plain
 /// content, because each one tells the agent how to ask again and succeed: a wrong path with
 /// did-you-mean hints, a reasoning node that backs several files, an over-cap file that wants a
@@ -2504,7 +2561,7 @@ mod tests {
 
     /// An index read that failed is broken, not a value — the same classification the file-backed
     /// failures get. `evidence_error` is the node-evidence site (`gather_mentions` returning Err);
-    /// `read_failure` is the classifier the two in-line index arms of `read` return through (a
+    /// `tool_failure` is the classifier the two in-line index arms of `read` return through (a
     /// range lookup and a chunk read that came back Err), neither of which can be staged portably
     /// without corrupting a live tantivy index.
     #[test]
@@ -2514,7 +2571,7 @@ mod tests {
         assert_eq!(out.text, "read error: searcher unavailable");
         assert!(out.images.is_empty());
 
-        let out = read_failure("no chunk #3 in a.pdf (range lookup failed: io)".into());
+        let out = tool_failure("no chunk #3 in a.pdf (range lookup failed: io)".into());
         assert!(out.error, "{}", out.text);
         assert_eq!(out.text, "no chunk #3 in a.pdf (range lookup failed: io)");
     }
@@ -2538,6 +2595,74 @@ mod tests {
             unknown.text
         );
         assert!(!unknown.error, "a wrong path is guidance, not a failure");
+    }
+
+    /// A store failure in `search`, `grep` or `glob` reports a tool error, not content — the same
+    /// classification `read` and `get_source_file` got, drawn by the same `tool_failure`.
+    ///
+    /// Staging a real tantivy `Err` means corrupting a live index, which is not portable across CI
+    /// runners, so the three sites are covered by construction: each `Err` arm is the single
+    /// expression `tool_failure(format!("<tool> error: {e}"))`, and this pins what that produces —
+    /// the message unchanged, the flag set. `text_result` in `src/mcp.rs` turns that flag into
+    /// `isError`, pinned there by `a_failed_text_tool_maps_to_is_error`.
+    #[test]
+    fn a_failed_search_grep_or_glob_is_a_tool_error_not_an_answer() {
+        for text in [
+            "search error: index closed",
+            "grep error: chunk walk failed",
+            "glob error: chunk walk failed",
+        ] {
+            let out = tool_failure(text.to_string());
+            assert!(out.error, "{}", out.text);
+            assert_eq!(out.text, text);
+            assert!(out.images.is_empty());
+        }
+    }
+
+    /// Zero results is an ANSWER: the agent asked whether the corpus holds something and learned
+    /// that it does not. The regression guard for the line above — the `isError` flag must not
+    /// leak from the broken arms onto the empty ones.
+    #[test]
+    fn an_empty_search_grep_or_glob_result_is_content_not_an_error() {
+        let (d, i) = idx();
+        let t = TraceLog::disabled();
+        let gd = tempfile::tempdir().unwrap(); // no [rerank] -> plain BM25
+
+        let (out, hits) = search(&i, gd.path(), "nonexistentzzz", 10, None, None, &t, None);
+        assert!(hits.is_empty());
+        assert!(!out.error, "zero hits is an answer: {}", out.text);
+        assert_eq!(out.text, "(no results)");
+
+        let out = grep(d.path(), &i, "nomatchzzz", &GrepOpts::default(), &t);
+        assert!(!out.error, "zero matches is an answer: {}", out.text);
+        assert!(out.text.starts_with("(no matches)"), "{}", out.text);
+
+        let out = glob(&i, "*nomatchzzz*", &t);
+        assert!(!out.error, "an empty mask is an answer: {}", out.text);
+        assert!(out.text.starts_with("(no documents match"), "{}", out.text);
+    }
+
+    /// A pattern the engines refuse is a REJECTED QUERY, not a broken store: the reply names what
+    /// to change about the next call (`fixed:true`, the glob syntax), so it stays content.
+    /// Erroring on a fixable pattern is what makes a small model loop instead of rewriting it.
+    ///
+    /// Both arms used to be flattened together with the real store failures — `grep` returned one
+    /// `Err` for a bad regex and for an index that would not walk, and `glob_docs` likewise — so
+    /// this is what the `query_compiles`/`compile_glob` probes buy.
+    #[test]
+    fn a_rejected_grep_or_glob_pattern_stays_content_not_an_error() {
+        let (d, i) = idx();
+        let t = TraceLog::disabled();
+
+        // An unbalanced group: no `fixed` flag, so it goes to the regex engine as written.
+        let out = grep(d.path(), &i, "(", &GrepOpts::default(), &t);
+        assert!(!out.error, "a rewritable pattern is guidance: {}", out.text);
+        assert!(out.text.contains("fixed:true"), "{}", out.text);
+
+        // An unclosed character class: globset refuses it.
+        let out = glob(&i, "a[", &t);
+        assert!(!out.error, "a rewritable glob is guidance: {}", out.text);
+        assert!(out.text.contains("glob syntax"), "{}", out.text);
     }
 
     /// The guidance arms stay successful content: each one tells the agent how to ask again.
@@ -2619,7 +2744,8 @@ mod tests {
             "quick.*purple.*elephant|elephant.*quick",
             &GrepOpts::default(),
             &TraceLog::disabled(),
-        );
+        )
+        .text;
         assert!(out.contains("no matches"), "still reports the miss: {out}");
         assert!(
             out.contains("fixed:true") && out.contains("distinctive"),
@@ -3945,9 +4071,9 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let gd = tempfile::tempdir().unwrap(); // no [rerank] -> plain BM25
         let (body, hits) = search(&i, gd.path(), "timeout", 10, None, None, &t, None);
         assert_eq!(hits.len(), 1);
-        assert!(body.starts_with("MODULE.pdf#1") && body.contains("timeout"));
+        assert!(body.text.starts_with("MODULE.pdf#1") && body.text.contains("timeout"));
         let (empty, _) = search(&i, gd.path(), "nonexistentzzz", 10, None, None, &t, None);
-        assert_eq!(empty, "(no results)");
+        assert_eq!(empty.text, "(no results)");
     }
 
     // T8: a glossa_dir with no [rerank] config keeps search on the BM25 path — hits non-empty and
@@ -3959,8 +4085,8 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let gd = tempfile::tempdir().unwrap(); // no ontology.toml -> [rerank] inactive
         let (body, hits) = search(&i, gd.path(), "timeout", 5, None, None, &t, None);
         assert!(!hits.is_empty());
-        assert!(body.contains('#')); // display_line format unchanged
-        assert!(body.starts_with("MODULE.pdf#1"));
+        assert!(body.text.contains('#')); // display_line format unchanged
+        assert!(body.text.starts_with("MODULE.pdf#1"));
     }
 
     #[test]
@@ -4000,6 +4126,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             &t,
             Some("docA.md"),
         );
+        let scoped_body = scoped_body.text;
         assert_eq!(scoped_hits.len(), 1, "{scoped_body}");
         assert!(scoped_body.starts_with("docA.md"), "{scoped_body}");
     }
@@ -4453,7 +4580,8 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             "nomatchzzz",
             &crate::grep::GrepOpts::default(),
             &t,
-        );
+        )
+        .text;
         assert!(
             no.starts_with("(no matches)"),
             "still reports the miss: {no}"
@@ -4462,8 +4590,12 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             no.contains("fixed:true"),
             "coaches toward a simpler literal: {no}"
         );
-        assert!(glob(&i, "*MODULE*", &t).contains("MODULE.pdf  (1 chunks)"));
-        assert!(glob(&i, "*nomatch*", &t).starts_with("(no documents match"));
+        assert!(glob(&i, "*MODULE*", &t)
+            .text
+            .contains("MODULE.pdf  (1 chunks)"));
+        assert!(glob(&i, "*nomatch*", &t)
+            .text
+            .starts_with("(no documents match"));
     }
 
     #[cfg(feature = "notebook")]
@@ -4486,7 +4618,7 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
             path: Some("some_std.docx/sizes.csp".into()),
             ..Default::default()
         };
-        let out = grep(dir.path(), &idx, "63", &opts, &TraceLog::disabled());
+        let out = grep(dir.path(), &idx, "63", &opts, &TraceLog::disabled()).text;
         assert!(
             out.contains("63"),
             "notebook grep should find the line; got: {out}"
@@ -4497,7 +4629,8 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         );
         // a non-matching pattern still renders "(no matches)", not an index error
         let none = grep(dir.path(), &idx, "nomatchzzz", &opts, &TraceLog::disabled());
-        assert_eq!(none, "(no matches)");
+        assert_eq!(none.text, "(no matches)");
+        assert!(!none.error, "a notebook grep with no match is an answer");
     }
 
     // ── graph tool tests ────────────────────────────────────────────────────
