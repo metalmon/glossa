@@ -245,6 +245,7 @@ kbx nli download --to <dir>                      # fetch fp32 from the default r
 kbx nli download --fp16 --to <dir>               # or --int8; saved locally as model.onnx
 kbx nli set --model-dir <dir> --scorer in_process [--mode nli] [--device cuda]
 kbx nli check [PATH]                              # will the verifier run, or why it fails open to AC?
+kbx nli fit [PATH]                                # measure the batch_tokens budget for this device
 ```
 
 `download` pulls a precision variant from the baked default repo when `--repo` is omitted: no flag ⇒
@@ -263,6 +264,7 @@ kbx rerank download [--fp16|--int8] --to <dir>   # fetch a variant (default repo
 kbx rerank set --model-dir <dir> --scorer in_process [--pool-size N] [--device cuda]
 kbx rerank check [PATH]                          # probes what [rerank] configures
 kbx rerank check --model-dir <dir> [--device cuda]   # ... or an explicit dir, overriding it
+kbx rerank fit [PATH]                            # measure the batch_tokens budget for this device
 ```
 
 `rerank set` writes `[rerank]` (`model_dir`, `scorer`, optional `pool_size` / `device` /
