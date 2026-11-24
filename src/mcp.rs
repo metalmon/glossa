@@ -1700,7 +1700,7 @@ impl GlossaServer {
     }
 
     #[tool(
-        description = "Deliver the ORIGINAL source file behind a citation to the user for source attribution — NOT for reading its text (use `read` for content). Pass the document `path` from a search/grep result and, for a PDF, the cited page `n`. Returns the file as an embedded resource the client can preview or download, plus a one-line note of what was delivered. A large PDF is delivered as just the cited page (still a real, text-bearing PDF); an oversize non-PDF, or an oversize ref with no page, returns guidance to cite a specific PDF page. Read-only; available in every profile. A DOCX is delivered as PDF by default (source format renders inconsistently across clients); pass `raw: true` to get the original .docx."
+        description = "Deliver the ORIGINAL source file behind a citation to the user for source attribution — NOT for reading its text (use `read` for content). Pass the document `path` from a search/grep result and, for a PDF, the cited page `n`. Returns the file as an embedded resource the client can preview or download, plus a one-line note of what was delivered. A large PDF is delivered as just the cited page (still a real, text-bearing PDF); an oversize non-PDF, or an oversize ref with no page, returns guidance to cite a specific PDF page. Read-only; available in every profile when the server is started with `--source-file`. A DOCX is delivered as PDF by default (source format renders inconsistently across clients); pass `raw: true` to get the original .docx."
     )]
     async fn get_source_file(
         &self,
