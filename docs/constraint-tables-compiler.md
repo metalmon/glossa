@@ -1,5 +1,11 @@
 # Constraint tables compiler
 
+> **Requires a `--features constraint` build.** `kb graph build` (and the mirrored MCP tool
+> `graph_build`) only exist in a binary built with `cargo build --features constraint`; no release
+> row enables that feature, so the pre-built `kb`/`kbi` binaries do not have it (`kb graph --help`
+> on a default build lists no `build` subcommand). This is a deliberate, kept-but-off-by-default
+> capability, not an oversight — build from source with the feature to follow this document.
+
 `kb graph build` dematerializes agent `.csp` limit tables under `.glossa/notes/<document>/` into a constraint graph via `graph_upsert`.
 
 The compiler is **ontology-driven**: it reads your corpus `ontology.toml` (entities, relations, constraint types, patterns, `[tables]`). It does **not** embed domain-specific type names. What it can emit is defined by a fixed **capability set** (this document) intersected with what your ontology declares.
@@ -14,17 +20,29 @@ Each capability maps to a `[patterns.*]` key in `ontology.toml`. The pattern doc
 
 | Capability | Pattern key | Required relations | Table signal | Status |
 |------------|-------------|-------------------|--------------|--------|
-| Independent enum | `independent_enum` | `CONSTRAINED_BY` (parameter → `Enum`) | Parameter column Y: values do not split by other parameter columns on the data | **v1** |
-| Conditional enum | `conditional_enum` | `CONSTRAINED_BY`, `IF_FIELD`, `IF_VALUE`, `HAS_CONSTRAINT` (→ `Enum`) | Y domain varies with trigger column X (FD on data) | **v1** |
-| Conditional range | `conditional_range` | above + inner `Range`, `HAS_MIN`, `HAS_MAX` | Per trigger group, Y is a numeric interval | **v2** |
-| Formula | `formula_cross_field` | `CONSTRAINED_BY` (→ `Formula`), `HAS_EXPRESSION` (→ `Literal`) | Constant expression per field: `compile_hints` `strategy = "formula"` and/or dedicated expression column | **v2** |
-| Regex | *(uses `Regex` constraint type)* | `CONSTRAINED_BY` (→ `Regex`), `HAS_PATTERN` (→ `Literal`) | `compile_hints` `strategy = "regex"` or pattern column | **v2** |
-| Provenance | `provenance` | `MENTIONS` (core edge) | Optional provenance column (`[tables.provenance_column]` or per-hint) with section ref | **v2** |
-| Combined constraints | `combined_constraints` | Multiple `CONSTRAINED_BY` on one parameter | Enum + Range on same field (intersection semantics in solver) | **v3** |
+| Independent enum | `independent_enum` | `CONSTRAINED_BY` (parameter → `Enum`) | Parameter column Y: values do not split by other parameter columns on the data | **v1 — implemented** |
+| Conditional enum | `conditional_enum` | `CONSTRAINED_BY`, `IF_FIELD`, `IF_VALUE`, `HAS_CONSTRAINT` (→ `Enum`) | Y domain varies with trigger column X (FD on data) | **v1 — implemented** |
+| Conditional range | `conditional_range` | above + inner `Range`, `HAS_MIN`, `HAS_MAX` | Per trigger group, Y is a numeric interval | **not implemented** (planned v2) |
+| Formula | `formula_cross_field` | `CONSTRAINED_BY` (→ `Formula`), `HAS_EXPRESSION` (→ `Literal`) | Constant expression per field: `compile_hints` `strategy = "formula"` and/or dedicated expression column | **not implemented** (planned v2) |
+| Regex | *(uses `Regex` constraint type)* | `CONSTRAINED_BY` (→ `Regex`), `HAS_PATTERN` (→ `Literal`) | `compile_hints` `strategy = "regex"` or pattern column | **not implemented** (planned v2) |
+| Provenance | `provenance` | `MENTIONS` (core edge) | Optional provenance column (`[tables.provenance_column]` or per-hint) with section ref | **not implemented** (planned v2) |
+| Combined constraints | `combined_constraints` | Multiple `CONSTRAINED_BY` on one parameter | Enum + Range on same field (intersection semantics in solver) | **not implemented** (planned v3) |
+
+Only the two **v1** rows can actually emit a graph today (`check_independent`/`check_conditional_enum`
+are the only functions in `src/tables/capabilities.rs` that can return `Ready`); every "not
+implemented" row above unconditionally returns `compiler_gap`, even when its pattern, relations,
+and constraint type are all correctly declared — the "v2"/"v3" label names a planned tier, not a
+working-but-newer one. See the formula example below, which shows this directly.
 
 Capabilities not listed here are **out of scope** for the table compiler (e.g. `Required` / `Forbidden` without tabular evidence). Phase-B agents may still add them via `graph_upsert`.
 
-### Example: formula from a table
+### Example: formula from a table (not implemented — shows the target shape)
+
+`formula_cross_field` is **not implemented** (see Status above): even with every required
+pattern/relation/constraint-type declared exactly as below, the compiler still reports
+`compiler_gap (planned v2)` for the field and emits nothing. The example below is the shape it is
+designed to emit once that lands, so an ontology author can wire the relations now and get a clean
+`compiler_gap` (rather than an `ontology_gap`) confirming everything else is in place.
 
 If the agent materializes:
 
@@ -41,9 +59,9 @@ strategy = "formula"
 expression_column = "Expression"
 ```
 
-the compiler emits `Field S ──CONSTRAINED_BY──► Formula ──HAS_EXPRESSION──► Literal("S = d * k")`.
+the compiler is designed to eventually emit `Field S ──CONSTRAINED_BY──► Formula ──HAS_EXPRESSION──► Literal("S = d * k")` — today it instead reports `capability formula_cross_field: compiler_gap (planned v2)` (see the scan output below) and emits no graph change for that field.
 
-If `formula_cross_field` or `HAS_EXPRESSION` is missing from the ontology, see [Reaction contract](#reaction-contract) below.
+If `formula_cross_field` or `HAS_EXPRESSION` is missing from the ontology instead, the scan reports `ontology_gap` rather than `compiler_gap` — see [Reaction contract](#reaction-contract) below.
 
 ---
 
@@ -77,7 +95,7 @@ For each capability, the compiler checks the ontology:
 |-------------|---------|
 | **ready** | Pattern declared (or implied by data/hint) and all required relations present with compatible endpoints |
 | **ontology_gap** | Pattern declared in ontology but a required relation or constraint type is missing |
-| **compiler_gap** | Data or hint requests a shape the compiler does not implement yet (capability status not v1/v2) |
+| **compiler_gap** | Data or hint requests a shape the compiler does not implement yet (a capability marked "not implemented" above) |
 
 The scan is printed in `CompileReport` (first lines), e.g.:
 
@@ -166,7 +184,7 @@ See [agent-workspace-contract.md](agent-workspace-contract.md) for notebook tool
 
 Post-step in the constraint eval harness runs the same function after a phase-A episode.
 
-MCP / eval agent tool: **`graph_build(doc)`** — same compile, compiler-style OK/FAILED output; use on SOP step 3 to fix `.csp` before `done`.
+MCP / eval agent tool: **`graph_build(doc)`** — same compile, compiler-style OK/FAILED output; use on SOP step 3 to fix `.csp` before `done`. Like the CLI, this tool is only advertised on a `--features constraint` build; a default build's `tools/list` does not include it.
 
 ---
 
@@ -178,6 +196,8 @@ MCP / eval agent tool: **`graph_build(doc)`** — same compile, compiler-style O
 | `src/tables/wiring.rs` | Resolve entity/edge types from `Ontology::endpoint_types` |
 | `src/tables/csp.rs` | Parse `.csp`, multi-file merge (row shard + column union) |
 | `src/tables/compile.rs` | FD algorithm, emit via wiring |
+| `src/tables/coverage.rs` | Table coverage accounting |
+| `src/tables/report.rs` | `CompileReport` shape (per-capability scan lines, per-column outcomes) |
 | `src/graph/ontology.rs` | `[tables]`, `compile_hints`, `on_unsupported` |
 | This doc | User-facing contract; update when capabilities ship |
 
