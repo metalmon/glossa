@@ -19,6 +19,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--prune-incomplete`, which has no guard. `--force` bypasses the guards entirely and is
   unaffected.
 
+- **`kbx eval` measured a tool the default-launched server does not serve.** `get_source_file` is
+  gated off by default in production (`--source-file` must be passed), but eval's nine
+  `ToolContext` construction sites hardcoded `no_source_file: false`, so every measured run saw a
+  tool a default deployment withholds. Eval now matches the production default
+  (`no_source_file: true`) and all nine sites are consolidated behind one shared constructor
+  (`reader_tool_context` in `eval/src/backend/openai.rs`) so a future `ToolContext` field can't
+  drift across call sites the same way again. **The TensorZero manifest
+  (`eval/tensorzero/config/tensorzero.toml`) is a known residual** — its generated
+  `answer_hotpot`/`answer_hotpot_noverify` tool lists still include `get_source_file` and need
+  `just tools` to regenerate.
+
 - **The graph/ontology and MCP documentation told agents to do impossible things.** Two audits
   checked ~170 assertions in `docs/graph-and-ontology.md`, `docs/ontology-presets.md`,
   `docs/graph-lifecycle.md`, `docs/graph-reasoning-directions.md`, `docs/concepts.md`, `docs/mcp.md`,

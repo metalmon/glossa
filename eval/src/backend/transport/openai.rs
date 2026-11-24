@@ -486,23 +486,19 @@ mod tests {
     use super::*;
 
     /// Test-only `ToolContext` builder: a Reader-profile deployment with `graph_on`/`verify_available`
-    /// toggled and every other gate open (`get_source_file` on, image fields kept), so the old
+    /// toggled, `get_source_file` withheld (matching the default-launched server, not advertising
+    /// more than it does) and image fields kept — delegates to the one shared constructor,
+    /// [`crate::backend::openai::reader_tool_context`], so the old
     /// `tools_schema(graph_on, verify_available)` call sites map cleanly onto the resolver.
     fn ctx(graph_on: bool, verify_available: bool) -> glossa::tools::registry::ToolContext {
-        use glossa::tools::registry::{FeatureSet, Tier, ToolContext};
-        ToolContext {
-            profile: Tier::Reader,
-            graph_on,
-            verify_available,
-            no_source_file: false,
-            no_image: false,
-            features: FeatureSet::default(),
-        }
+        crate::backend::openai::reader_tool_context(graph_on, verify_available, false)
     }
 
     /// Task 5: the OpenAI envelope wraps EXACTLY the resolver's core schema per tool, hides `verify`
-    /// when unavailable, and now advertises the full Reader surface (incl. `get_source_file`,
-    /// `get_ontology`) that `resolve_tools` returns.
+    /// when unavailable, and advertises the Reader surface `resolve_tools` returns for eval's
+    /// `no_source_file: true` policy — `get_ontology` present, `get_source_file` withheld (eval
+    /// matches the default-launched server, which does not serve it unless `--source-file` is
+    /// passed; see `reader_tool_context`'s doc comment).
     #[test]
     fn openai_tools_schema_wraps_resolved_core_schema() {
         use glossa::tools::registry::resolve_tools;
@@ -514,7 +510,10 @@ mod tests {
             .map(|t| t["function"]["name"].as_str().unwrap())
             .collect();
         assert!(!names.contains(&"verify"), "verify hidden when unavailable");
-        assert!(names.contains(&"get_source_file") && names.contains(&"get_ontology"));
+        assert!(
+            !names.contains(&"get_source_file") && names.contains(&"get_ontology"),
+            "get_source_file withheld (matches the default-launched server), get_ontology still advertised"
+        );
         // envelope shape + core schema passthrough
         let resolved = resolve_tools(&c);
         let search = arr

@@ -210,20 +210,16 @@ pub(crate) fn extract_tools_schema(graph_upsert_description: &str) -> Value {
     Value::Array(tools)
 }
 
-/// The full Reader-tier resolved tool set (all gates open) — the shared source `extract_tools_schema`
-/// and `build_tools_schema` filter by name for the build/reason retrieval tools. `no_image` is false
-/// so `read` keeps its page_image/include_images fields, byte-identical to the pre-`resolve_tools`
-/// build schema.
+/// The full Reader-tier resolved tool set, via [`crate::backend::openai::reader_tool_context`]
+/// (graph on, verify available, `get_source_file` withheld like the default-launched server) — the
+/// shared source `extract_tools_schema` and `build_tools_schema` filter by name for the
+/// build/reason retrieval tools (neither names `get_source_file`, so that gate is moot for both).
+/// `no_image` is false so `read` keeps its page_image/include_images fields, byte-identical to the
+/// pre-`resolve_tools` build schema.
 fn resolve_reader_tools() -> Vec<glossa::tools::registry::ResolvedTool> {
-    use glossa::tools::registry::{resolve_tools, FeatureSet, Tier, ToolContext};
-    resolve_tools(&ToolContext {
-        profile: Tier::Reader,
-        graph_on: true,
-        verify_available: true,
-        no_source_file: false,
-        no_image: false,
-        features: FeatureSet::default(),
-    })
+    glossa::tools::registry::resolve_tools(&crate::backend::openai::reader_tool_context(
+        true, true, false,
+    ))
 }
 
 /// Build-path tool schema: only `read` for document access plus `graph_upsert` for writing the

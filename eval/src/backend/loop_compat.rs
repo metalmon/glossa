@@ -785,17 +785,10 @@ mod schema_tests {
             .collect()
     }
 
-    /// Test-only `ToolContext` builder mirroring `transport::openai::tests::ctx`.
+    /// Test-only `ToolContext` builder mirroring `transport::openai::tests::ctx` — both delegate
+    /// to the one shared constructor, [`crate::backend::openai::reader_tool_context`].
     fn schema_ctx(graph_on: bool, verify_available: bool) -> glossa::tools::registry::ToolContext {
-        use glossa::tools::registry::{FeatureSet, Tier, ToolContext};
-        ToolContext {
-            profile: Tier::Reader,
-            graph_on,
-            verify_available,
-            no_source_file: false,
-            no_image: false,
-            features: FeatureSet::default(),
-        }
+        crate::backend::openai::reader_tool_context(graph_on, verify_available, false)
     }
 
     #[test]

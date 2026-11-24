@@ -1715,14 +1715,7 @@ mod tests {
         // Tool reference is rendered from the reader's ACTUAL schema (single source of truth),
         // graph-ON so the graph tools (glossary/reach/sql) the old hardcoded list drifted from
         // are present.
-        let tool_ctx = glossa::tools::registry::ToolContext {
-            profile: glossa::tools::registry::Tier::Reader,
-            graph_on: true,
-            verify_available: true,
-            no_source_file: false,
-            no_image: false,
-            features: glossa::tools::registry::FeatureSet::default(),
-        };
+        let tool_ctx = crate::backend::openai::reader_tool_context(true, true, false);
         let tools = crate::backend::transport::openai::tools_schema_from_ctx(&tool_ctx);
         let ctx = GraphReflectContext {
             parent_prompt: "seed graph prompt".to_string(),

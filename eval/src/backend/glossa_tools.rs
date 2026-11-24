@@ -1181,7 +1181,7 @@ mod tests {
     /// before it shipped, and catches the next one the same way.
     #[test]
     fn every_reader_tool_has_an_exec_arm() {
-        use glossa::tools::registry::{resolve_tools, FeatureSet, Tier, ToolContext};
+        use glossa::tools::registry::resolve_tools;
 
         let dir = tempfile::tempdir().unwrap();
         write_verify_enabled_ontology(dir.path()); // so `verify` is in the set
@@ -1192,14 +1192,7 @@ mod tests {
         let spec = glossa::tools::ChainSpec::default();
         let trace = TraceLog::disabled();
 
-        let ctx = ToolContext {
-            profile: Tier::Reader,
-            graph_on: true,
-            verify_available: true,
-            no_source_file: false,
-            no_image: false,
-            features: FeatureSet::default(),
-        };
+        let ctx = crate::backend::openai::reader_tool_context(true, true, false);
         for t in resolve_tools(&ctx) {
             let (body, _ids, _imgs) = exec(
                 t.name,

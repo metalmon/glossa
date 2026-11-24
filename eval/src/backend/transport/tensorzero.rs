@@ -363,14 +363,7 @@ mod tests {
     fn tools_schema_returns_a_nonempty_schema() {
         let ep = test_endpoint("http://x", Some("f"));
         let transport = TzTransport::new(&ep);
-        let ctx = glossa::tools::registry::ToolContext {
-            profile: glossa::tools::registry::Tier::Reader,
-            graph_on: true,
-            verify_available: true,
-            no_source_file: false,
-            no_image: false,
-            features: glossa::tools::registry::FeatureSet::default(),
-        };
+        let ctx = crate::backend::openai::reader_tool_context(true, true, false);
         let schema = transport.tools_schema(&ctx);
         assert!(schema.as_array().is_some_and(|a| !a.is_empty()));
     }

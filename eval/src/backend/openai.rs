@@ -489,29 +489,49 @@ pub(crate) fn is_transient_upstream(body: &str) -> bool {
     .any(|needle| b.contains(needle))
 }
 
+/// The one constructor for every `ToolContext` eval builds (answering runs, the build/GEPA
+/// tool-schema paths, and tests alike): fixes the fields that are eval-wide POLICY, not call-site
+/// variation, and takes the three that genuinely differ across call sites.
+///
+/// Fixed: `profile` is always `Tier::Reader` (eval only ever measures the reader-deployment
+/// surface); `no_source_file` is always `true` (eval must advertise exactly the surface a
+/// default-launched server advertises, not more — `get_source_file` is gated off by default,
+/// `src/main.rs:2340`: `no_source_file: !source_file` with `--source-file` off unless passed;
+/// eval previously hardcoded the opposite everywhere, which is the defect this constructor
+/// closes); `features` is always `FeatureSet::default()` (notebook/constraint stay off).
+///
+/// Varying: `graph_on`, `verify_available` and `no_image` — callers resolve these themselves
+/// (from corpus config, a CLI flag, or a test literal) and pass the result in.
+pub(crate) fn reader_tool_context(
+    graph_on: bool,
+    verify_available: bool,
+    no_image: bool,
+) -> glossa::tools::registry::ToolContext {
+    use glossa::tools::registry::{FeatureSet, Tier, ToolContext};
+    ToolContext {
+        profile: Tier::Reader,
+        graph_on,
+        verify_available,
+        no_source_file: true,
+        no_image,
+        features: FeatureSet::default(),
+    }
+}
+
 /// Build the `ToolContext` an eval answering run advertises tools from — the prod Reader
 /// deployment surface. `verify_available` is resolved from the corpus's `.glossa` gate config
-/// (`enabled && is_calibrated`), matching the live MCP server's fail-closed advertisement;
-/// `no_source_file` is always false (eval delivers provenance, never withholds the tool);
-/// `no_image` is `!vision`; notebook/constraint features are off in the answering eval. Shared by
-/// the reader (`backend::openai`) and GEPA graph reflection (`gepa_graph`) so both describe the
-/// SAME tool set the reader will actually be offered.
+/// (`enabled && is_calibrated`), matching the live MCP server's fail-closed advertisement.
+/// `no_image` is `!vision`. Shared by the reader (`backend::openai`) and GEPA graph reflection
+/// (`gepa_graph`) so both describe the SAME tool set the reader will actually be offered — both
+/// go through [`reader_tool_context`] for the fields that are policy, not theirs to vary.
 pub(crate) fn answer_tool_context(
     work: &std::path::Path,
     graph_on: bool,
     vision: bool,
 ) -> glossa::tools::registry::ToolContext {
-    use glossa::tools::registry::{FeatureSet, Tier, ToolContext};
     let glossa_dir = work.join(".glossa");
     let cfg = glossa::gate::VerifyConfig::resolve(&glossa_dir);
-    ToolContext {
-        profile: Tier::Reader,
-        graph_on,
-        verify_available: cfg.enabled && cfg.is_calibrated(),
-        no_source_file: false,
-        no_image: !vision,
-        features: FeatureSet::default(),
-    }
+    reader_tool_context(graph_on, cfg.enabled && cfg.is_calibrated(), !vision)
 }
 
 #[cfg(test)]
@@ -574,6 +594,16 @@ mod tests {
         let ctx_off = answer_tool_context(dir.path(), true, false);
         assert!(!ctx_on.no_image);
         assert!(ctx_off.no_image);
+    }
+
+    /// Eval must match the default-launched server's surface: `get_source_file` is gated off
+    /// unless `--source-file` is passed (`no_source_file: !source_file`, `src/main.rs:2340`).
+    /// Both the shared constructor and the answering-run wrapper built on it must carry that.
+    #[test]
+    fn reader_tool_context_withholds_get_source_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(reader_tool_context(true, true, false).no_source_file);
+        assert!(answer_tool_context(dir.path(), true, false).no_source_file);
     }
 
     #[test]
