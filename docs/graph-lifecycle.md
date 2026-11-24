@@ -134,7 +134,11 @@ The prune is **guarded** against a mass-wipe — the signature of an ontology mi
 genuine per-node rot. Each destructive bucket (`--prune-ungrounded`, `--prune-stale`,
 `--prune-dangling`) is refused when either the ontology recognizes **no live grounded terminal** in
 the graph, or the bucket is **over half the reasoning layer**; the refused bucket is skipped while
-the others proceed. Separately, a `.glossa/ontology.toml` that is **present but fails to parse**
+the others proceed. `--prune-ungrounded` carries one more, repairable-first guard: it is also
+refused outright while any of its nodes are **relinkable** — `--relink` would re-ground those for
+free, so deleting now would permanently discard what the free repair would have saved. (Nodes that
+are merely `ambiguous` or genuine `orphans` don't trigger this — `--relink` can never fix those, so
+the bucket stays prunable once relinkable is empty.) Separately, a `.glossa/ontology.toml` that is **present but fails to parse**
 refuses *all* destructive prune outright — the graph has silently fallen back to the default
 ontology, so its type/grounding classifications no longer describe this corpus. (A *missing*
 ontology file is not itself refused — running on the default ontology is a legitimate setup — but if
@@ -280,11 +284,13 @@ a plain `ungrounded: 5` listing (the 3 real orphans plus the 2 still-ambiguous n
 shift summary and the `real orphans:` split only appear while the report still has a relinkable
 group to summarize.
 
-**`--prune-ungrounded` refuses while relinkable nodes exist.** Those 512 nodes are relocated
-documents, not orphans, so pruning them would silently destroy recoverable reasoning — the command
-exits with an error pointing at `kb graph doctor --relink` instead of deleting. Run `--relink`
-first; `--force` overrides the refusal only if you genuinely intend to delete relocatable nodes
-without recovering them.
+**`--prune-ungrounded` (CLI) / `prune_ungrounded` (MCP) refuses while relinkable nodes exist.**
+Those 512 nodes are relocated documents, not orphans, so pruning them would silently destroy
+recoverable reasoning — the bucket is skipped with a note pointing at `kb graph doctor --relink`
+(or `graph_doctor` with `relink: true` on MCP) instead of deleting; any other `--prune-*`/`prune_*`
+bucket requested in the same call still runs. Run `--relink` first; `--force` overrides the refusal
+only on the CLI, only if you genuinely intend to delete relocatable nodes without recovering them —
+the MCP server never force-overrides.
 
 **`--relink` runs on its own, not alongside `--prune-*`.** A single invocation that combines
 `--relink` with any `--prune-*` flag is refused up front: the prune would run against the report
