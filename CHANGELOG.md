@@ -8,6 +8,37 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Every install script and install doc asked GitHub for an archive that does not exist.** Release
+  assets are named `glossa-{version}-{target}-{engine}`, but all three installers
+  (`deploy/windows/install-service.ps1`, `deploy/macos/install-service.sh`,
+  `deploy/ansible/roles/glossa/tasks/main.yml`) built the name without the `{engine}` part, so every
+  documented provisioning path ended in a 404 — nobody could install the product from a release.
+  `docs/install.md` and `docs/deploy/service.md` printed the same suffix-less names.
+
+  The engine is **not cosmetic**: it is the execution provider the GPU paths are built against, and
+  it decides what has to be installed on the target host already (`cuda13` a CUDA 13 + cuDNN 9
+  runtime, `directml` a DX12 GPU stack, `coreml` Apple's, `rocm` AMD's, `vulkan` a Vulkan driver,
+  `none` nothing at all). Hard-coding one would have turned a download failure into a *runtime*
+  failure that surfaces later and reads like a product bug. So each installer now takes an engine
+  parameter — `-Engine` (PowerShell), `--engine` (macOS), `glossa_engine` (Ansible) — defaulting to
+  **`none`**, the only value with no external runtime dependency and therefore the only safe default
+  for an unattended install. Each documents, where the choice is made, what the engine needs on the
+  machine.
+
+  Not every engine exists for every target (`directml` is Windows-only, `coreml` Apple-only, `rocm`
+  Linux-only, and `x86_64-apple-darwin` publishes **only** `none`), so the pair is validated
+  **before the download**: a wrong combination now fails naming the engines published for that
+  target instead of as a bare HTTP 404. `cuda13-nvidia-runtime` is deliberately not selectable — it
+  is a companion archive of NVIDIA libraries containing no `kb` binary.
+
+  Also: `deploy/ansible/group_vars/all.yml` still pinned `glossa_version: "0.2.7"`, and
+  `docs/install.md` hard-coded `0.5.2` while meaning "the current release".
+
+- **The flagship `kb mcp service install` example in `docs/deploy/service.md` could not be
+  copy-pasted.** Two of its lines ended in a `#` comment where a line continuation belonged, so the
+  shell ended the command early and then tried to run `--source-file` as a program. The flags are
+  now continued properly and the annotations moved below the command.
+
 - **An edge whose node the same `graph_upsert` batch dropped is no longer bound to a neighbour.**
   A batch carrying a node that was dropped (grounding, a bad `source_path`, an unparseable
   validity bound) still wrote that node's edges, and the orphaned endpoint label went through the

@@ -6,6 +6,17 @@
 .PARAMETER Version
   Release version without 'v' (e.g. 0.1.0).
 
+.PARAMETER Engine
+  Execution-provider variant of the release archive. The engine decides what must already be
+  installed on this machine, so the default is the one that needs nothing:
+    none      - CPU only. Needs nothing beyond Windows. Default.
+    directml  - DirectML: needs a DirectX 12 GPU and an up-to-date vendor driver.
+    cuda13    - needs an NVIDIA driver plus CUDA 13 and cuDNN 9 libraries on PATH. The
+                'cuda13-nvidia-runtime' release asset carries those libraries; it holds no kb.exe,
+                so it is not a value here - unpack it next to kb.exe afterwards.
+    vulkan    - needs a Vulkan 1.2+ driver (any vendor); bundles nothing else.
+  Engines published for other platforms (coreml, rocm) have no Windows archive.
+
 .PARAMETER CorpusPath
   Folder containing documents; .glossa will be created here.
 
@@ -31,6 +42,11 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $CorpusPath,
 
+    # Rejected at parameter binding, before any download: the message lists the engines that have a
+    # published archive for x86_64-pc-windows-msvc.
+    [ValidateSet("none", "directml", "cuda13", "vulkan")]
+    [string] $Engine = "none",
+
     [ValidateSet("reader", "editor", "full")]
     [string] $Profile = "reader",
 
@@ -46,7 +62,7 @@ param(
 $ErrorActionPreference = "Stop"
 $Repo = "metalmon/glossa"
 $Target = "x86_64-pc-windows-msvc"
-$Stem = "glossa-$Version-$Target"
+$Stem = "glossa-$Version-$Target-$Engine"
 $ZipName = "$Stem.zip"
 $Url = "https://github.com/$Repo/releases/download/v$Version/$ZipName"
 $ExtractDir = Join-Path $InstallDir $Stem

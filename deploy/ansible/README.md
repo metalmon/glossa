@@ -5,7 +5,7 @@ Installs `kb` from a release tarball, creates a corpus directory, runs an initia
 ## Requirements
 
 - Ansible 2.14+
-- Target: Linux x86_64 (`x86_64-unknown-linux-gnu` release asset)
+- Target: Linux x86_64 (`glossa-{version}-x86_64-unknown-linux-gnu-{engine}` release asset)
 - Root/sudo on the target host
 
 ## Quick start
@@ -13,7 +13,8 @@ Installs `kb` from a release tarball, creates a corpus directory, runs an initia
 ```bash
 cd deploy/ansible
 ansible-playbook -i inventory playbook.yml \
-  -e glossa_version=0.1.1 \
+  -e glossa_version=0.5.9 \
+  -e glossa_engine=none \
   -e glossa_corpus_path=/srv/glossa/corpus
 ```
 
@@ -23,7 +24,8 @@ Set in `group_vars/all.yml` or pass with `-e`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `glossa_version` | `0.1.1` | Release tag without `v` |
+| `glossa_version` | `0.5.9` | Release tag without `v` |
+| `glossa_engine` | `none` | Execution provider of the archive: `none` (CPU, needs nothing), `cuda13` (NVIDIA driver + CUDA 13/cuDNN 9 on the loader path), `rocm` (AMD ROCm runtime), `vulkan` (Vulkan 1.2+ driver). A target/engine pair with no published archive fails the play before the download. |
 | `glossa_corpus_path` | `/srv/glossa/corpus` | Document folder (must be readable by `glossa_user`) |
 | `glossa_profile` | `reader` | MCP profile: `reader`, `editor`, or `full` |
 | `glossa_bind` | `127.0.0.1:8080` | HTTP bind address |

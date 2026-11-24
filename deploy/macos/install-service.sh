@@ -4,6 +4,7 @@ set -euo pipefail
 
 VERSION=""
 CORPUS=""
+ENGINE="none"
 PROFILE="reader"
 BIND="127.0.0.1:8080"
 INSTALL_DIR="/usr/local/glossa"
@@ -17,6 +18,12 @@ Usage: $0 --version VERSION --corpus PATH [options]
 
   --version VERSION     Release tag without v (e.g. 0.1.0)
   --corpus PATH         Document folder (required)
+  --engine ENGINE       Execution-provider variant of the release archive (default: none).
+                        The engine decides what must already exist on this Mac, so the default is
+                        the one that needs nothing:
+                          none    CPU only, needs nothing beyond macOS
+                          coreml  Apple CoreML, Apple Silicon only (no Intel archive)
+                        cuda13, directml, rocm and vulkan have no macOS archive.
   --profile PROFILE     reader | editor | full (default: reader)
   --bind ADDR           HTTP bind (default: 127.0.0.1:8080)
   --install-dir DIR     Install root (default: /usr/local/glossa)
@@ -34,6 +41,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
     --corpus) CORPUS="$2"; shift 2 ;;
+    --engine) ENGINE="$2"; shift 2 ;;
     --profile) PROFILE="$2"; shift 2 ;;
     --bind) BIND="$2"; shift 2 ;;
     --install-dir) INSTALL_DIR="$2"; shift 2 ;;
@@ -51,14 +59,22 @@ CORPUS="${CORPUS/#\~/$HOME}"
 CORPUS="$(cd "$(dirname "$CORPUS")" && pwd)/$(basename "$CORPUS")"
 
 ARCH="$(uname -m)"
+# Not every engine is published for every target, so each target carries its own list.
 case "$ARCH" in
-  arm64) TARGET="aarch64-apple-darwin" ;;
-  x86_64) TARGET="x86_64-apple-darwin" ;;
+  arm64) TARGET="aarch64-apple-darwin"; ENGINES="none coreml" ;;
+  x86_64) TARGET="x86_64-apple-darwin"; ENGINES="none" ;;
   *) echo "Unsupported macOS arch: $ARCH" >&2; exit 1 ;;
 esac
 
+# Checked here, not by the download: a wrong pair should say which engines exist, not 404.
+case " ${ENGINES} " in
+  *" ${ENGINE} "*) ;;
+  *) echo "No release archive for engine '${ENGINE}' on ${TARGET}; published engines: ${ENGINES}" >&2
+     exit 1 ;;
+esac
+
 REPO="metalmon/glossa"
-STEM="glossa-${VERSION}-${TARGET}"
+STEM="glossa-${VERSION}-${TARGET}-${ENGINE}"
 TARBALL="${STEM}.tar.gz"
 URL="https://github.com/${REPO}/releases/download/v${VERSION}/${TARBALL}"
 BIN_DIR="${INSTALL_DIR}/bin"

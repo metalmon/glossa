@@ -27,12 +27,15 @@ a clear "run elevated" message.
 kb mcp service install --service-name glossa-editor <corpus> \
     --profile editor --bind 127.0.0.1:8081 \
     --allowed-host kb.example.com --allowed-host 127.0.0.1 \
-    --vision            # enable image output in `read`; add --dedup for the anti-loop guard
-    --source-file       # expose `get_source_file` (hands back the original file, not extracted text)
-    # --no-graph        # serve without the graph tools
-    # --trace           # log every tool call to <root>/.glossa/traces/*.jsonl
-    # --session-idle-secs 900   # drop an idle MCP session; 0 disables
-    # --insecure true   # only to allow a non-loopback bind with no authentication
+    --vision \
+    --source-file
+# --vision       enable image output in `read`; add --dedup for the anti-loop guard
+# --source-file  expose `get_source_file` (hands back the original file, not extracted text)
+# Also available, left off above:
+# --no-graph                serve without the graph tools
+# --trace                   log every tool call to <root>/.glossa/traces/*.jsonl
+# --session-idle-secs 900   drop an idle MCP session; 0 disables
+# --insecure true           only to allow a non-loopback bind with no authentication
 
 kb mcp service start   glossa-editor
 kb mcp service status  glossa-editor      # → Running
@@ -74,12 +77,22 @@ kbi service status glossa-scorer
 
 All scripts download a pinned version from GitHub Releases — **no `cargo build`**.
 
+Release archives are named `glossa-{version}-{target}-{engine}`, and the engine decides what the
+host must already have installed (`cuda13` a CUDA runtime, `directml` a DX12 driver, `coreml`
+Apple's stack, `rocm` ROCm, `vulkan` a Vulkan driver, `none` nothing). All three scripts therefore
+default to **`none`** and take an engine parameter; see
+[Pick your engine](../install.md#pick-your-engine) before changing it. An engine with no archive for
+that target is refused before the download, naming the engines that do exist.
+
+Set `{version}` to the release you are installing, without the leading `v`.
+
 ### Linux — Ansible
 
 ```bash
 cd deploy/ansible
 ansible-playbook -i inventory playbook.yml \
-  -e glossa_version=0.5.2 \
+  -e glossa_version={version} \
+  -e glossa_engine=none \
   -e glossa_corpus_path=/srv/glossa/corpus
 ```
 
@@ -89,7 +102,8 @@ ansible-playbook -i inventory playbook.yml \
 
 ```powershell
 .\deploy\windows\install-service.ps1 `
-  -Version 0.5.2 `
+  -Version {version} `
+  -Engine none `
   -CorpusPath "C:\glossa\corpus" `
   -Profile reader `
   -Bind "127.0.0.1:8080"
@@ -101,7 +115,8 @@ ansible-playbook -i inventory playbook.yml \
 
 ```bash
 ./deploy/macos/install-service.sh \
-  --version 0.5.2 \
+  --version {version} \
+  --engine none \
   --corpus "$HOME/Documents/my-kb" \
   --profile reader \
   --bind 127.0.0.1:8080

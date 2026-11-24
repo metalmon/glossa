@@ -13,7 +13,8 @@ Install `kb` from a [GitHub Release](https://github.com/metalmon/glossa/releases
 ```powershell
 cd deploy\windows
 .\install-service.ps1 `
-  -Version "1.0.0" `
+  -Version "0.5.9" `
+  -Engine none `
   -CorpusPath "C:\glossa\corpus" `
   -Profile reader `
   -Bind "127.0.0.1:8080"
@@ -26,6 +27,7 @@ Copy your documents into `CorpusPath` before or after install. Initial index run
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `-Version` | (required) | Release tag without `v` |
+| `-Engine` | `none` | Execution provider of the archive: `none` (CPU, needs nothing), `directml` (DX12 GPU + driver), `cuda13` (NVIDIA driver + CUDA 13/cuDNN 9 on PATH), `vulkan` (Vulkan 1.2+ driver). Anything else is refused before the download. |
 | `-CorpusPath` | (required) | Document folder |
 | `-Profile` | `reader` | `reader`, `editor`, or `full` |
 | `-Bind` | `127.0.0.1:8080` | HTTP bind |
@@ -57,7 +59,7 @@ Use `;` to chain commands in PowerShell (not `&&` — unsupported in Windows Pow
 Manual index after adding files:
 
 ```powershell
-& "C:\Program Files\glossa\glossa-1.0.0-x86_64-pc-windows-msvc\kb.exe" index C:\glossa\corpus
+& "C:\Program Files\glossa\glossa-0.5.9-x86_64-pc-windows-msvc-none\kb.exe" index C:\glossa\corpus
 ```
 
 ## Related

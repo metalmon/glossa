@@ -15,7 +15,8 @@ Runs as your login user — good for corpora under `~/Documents`:
 ```bash
 chmod +x deploy/macos/install-service.sh
 ./deploy/macos/install-service.sh \
-  --version 1.0.0 \
+  --version 0.5.9 \
+  --engine none \
   --corpus "$HOME/Documents/my-kb" \
   --profile reader \
   --bind 127.0.0.1:8080
@@ -27,7 +28,7 @@ Binary installs to `/usr/local/glossa/bin/kb`. Plist: `~/Library/LaunchAgents/co
 
 ```bash
 sudo ./deploy/macos/install-service.sh \
-  --version 1.0.0 \
+  --version 0.5.9 \
   --corpus /srv/glossa/corpus \
   --system
 ```
@@ -39,6 +40,7 @@ Plist: `/Library/LaunchDaemons/com.glossa.mcp.plist`.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--version` | (required) | Release without `v` |
+| `--engine` | `none` | Execution provider of the archive: `none` (CPU, needs nothing) or, on Apple Silicon only, `coreml` (Apple's own stack). An engine with no archive for this Mac's target is refused before the download. |
 | `--corpus` | (required) | Document folder |
 | `--profile` | `reader` | MCP profile |
 | `--bind` | `127.0.0.1:8080` | HTTP bind |

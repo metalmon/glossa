@@ -1,4 +1,4 @@
-glossa_version: "0.2.7"
+glossa_version: "0.5.9"
 glossa_repo: "metalmon/glossa"
 glossa_install_dir: "/opt/glossa"
 glossa_bin_dir: "{{ glossa_install_dir }}/bin"
@@ -9,3 +9,22 @@ glossa_user: "glossa"
 glossa_group: "glossa"
 glossa_target: "x86_64-unknown-linux-gnu"
 glossa_allowed_host: "localhost"
+
+# Execution-provider variant of the release archive. The engine decides what must already be
+# installed on the target host, so the default is the one that needs nothing:
+#   none    CPU only, needs nothing beyond glibc
+#   cuda13  needs an NVIDIA driver plus CUDA 13 + cuDNN 9 libraries on the loader path. The
+#           glossa-{version}-{target}-cuda13-nvidia-runtime asset carries those libraries; it
+#           holds no kb binary, so it is not a value here - unpack it beside kb afterwards.
+#   rocm    needs an AMD GPU with the ROCm runtime installed
+#   vulkan  needs a Vulkan 1.2+ driver (any vendor); bundles nothing else
+glossa_engine: "none"
+
+# Release archive (and the directory inside it): glossa-{version}-{target}-{engine}.
+glossa_stem: "glossa-{{ glossa_version }}-{{ glossa_target }}-{{ glossa_engine }}"
+
+# Which engines the release actually publishes per target - not every engine exists for every
+# target (directml is Windows-only, coreml Apple-only). Checked before the download so a wrong
+# pair fails by name instead of as a 404.
+glossa_engines_by_target:
+  x86_64-unknown-linux-gnu: ["none", "cuda13", "rocm", "vulkan"]

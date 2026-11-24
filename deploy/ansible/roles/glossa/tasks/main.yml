@@ -1,4 +1,17 @@
 ---
+# The archive name is glossa-{version}-{target}-{engine}; the engine part is what the host must
+# already be able to run. Validate the pair before the download so a wrong engine names the valid
+# ones instead of arriving as a 404 from get_url.
+- name: Assert the target and engine name a published release archive
+  ansible.builtin.assert:
+    that:
+      - glossa_engine in (glossa_engines_by_target[glossa_target] | default([]))
+    fail_msg: >-
+      No release archive is published for {{ glossa_target }}-{{ glossa_engine }}.
+      Engines published for {{ glossa_target }}:
+      {{ (glossa_engines_by_target[glossa_target] | default([])) | join(', ') | default('none - this target has no release archive', true) }}
+    quiet: true
+
 - name: Create glossa system user
   ansible.builtin.user:
     name: "{{ glossa_user }}"
@@ -28,20 +41,20 @@
 
 - name: Download glossa release archive
   ansible.builtin.get_url:
-    url: "https://github.com/{{ glossa_repo }}/releases/download/v{{ glossa_version }}/glossa-{{ glossa_version }}-{{ glossa_target }}.tar.gz"
-    dest: "/tmp/glossa-{{ glossa_version }}-{{ glossa_target }}.tar.gz"
+    url: "https://github.com/{{ glossa_repo }}/releases/download/v{{ glossa_version }}/{{ glossa_stem }}.tar.gz"
+    dest: "/tmp/{{ glossa_stem }}.tar.gz"
     mode: "0644"
 
 - name: Extract kb binary
   ansible.builtin.unarchive:
-    src: "/tmp/glossa-{{ glossa_version }}-{{ glossa_target }}.tar.gz"
+    src: "/tmp/{{ glossa_stem }}.tar.gz"
     dest: "/tmp"
     remote_src: true
-    creates: "/tmp/glossa-{{ glossa_version }}-{{ glossa_target }}/kb"
+    creates: "/tmp/{{ glossa_stem }}/kb"
 
 - name: Install kb binary
   ansible.builtin.copy:
-    src: "/tmp/glossa-{{ glossa_version }}-{{ glossa_target }}/kb"
+    src: "/tmp/{{ glossa_stem }}/kb"
     dest: "{{ glossa_bin_dir }}/kb"
     mode: "0755"
     remote_src: true
