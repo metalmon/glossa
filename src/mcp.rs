@@ -1487,7 +1487,6 @@ impl GraphUpdateArgs {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Map a text-only tool result onto a `CallToolResult`, carrying its broken/answered flag across.
 ///
 /// The same line `read_common` draws, for the three tools that have no images to ride along: a
@@ -1503,6 +1502,9 @@ fn text_result(out: crate::tools::ToolOut) -> CallToolResult {
     }
 }
 
+// `read_common` takes nine positional arguments. Keep this attribute ON it — inserting anything
+// between the two silently moves the allow to the new item and reds `-D warnings`.
+#[allow(clippy::too_many_arguments)]
 fn read_common(
     root: &std::path::Path,
     idx: &crate::index::store::DocIndex,
