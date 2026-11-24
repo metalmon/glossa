@@ -172,7 +172,9 @@ struct ManifestCache {
 /// bools. All default off (every capability on); each `no_*` withholds one. Set from CLI args.
 #[derive(Clone, Copy, Default)]
 pub struct ServerFlags {
-    /// Withhold the reasoning-graph tools (`--no-graph`): a plain file-search server.
+    /// Withhold the graph-authoring/navigation tools and `purge` (`--no-graph`). NOT a read-only
+    /// switch: `graph_stats` carries no graph gate and still answers, and notebook writes
+    /// (`note`/`del`) are gated separately and survive it too.
     pub no_graph: bool,
     /// Withhold image delivery from `read` (images are opt-in via `--vision`).
     pub no_image: bool,

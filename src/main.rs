@@ -369,7 +369,10 @@ enum Cmd {
         /// Log every tool call to <root>/.glossa/traces/*.jsonl (for the eval harness).
         #[arg(short = 't', long)]
         trace: bool,
-        /// Expose only search + read (graph/index/admin tools hidden) — eval control arm.
+        /// Hide the graph-authoring/navigation tools and `purge` — eval control arm. NOT a
+        /// read-only switch: `graph_stats` has no graph gate and survives it, and notebook writes
+        /// (`note`/`del`) are a separate gate and survive it too. For read-only, use
+        /// `--profile reader`.
         #[arg(short = 'G', long = "no-graph")]
         no_graph: bool,
         /// DEPRECATED: images are off by default now — use `--vision` to enable them. Kept as an
