@@ -24,22 +24,33 @@ jobs:
     name: fmt + clippy (fail-fast gate)
     runs-on: ubuntu-latest
     steps:
-      # TEMPORARY (asset enumeration): the cuda13 rows pinned ONNX Runtime versions whose releases
-      # carry no `gpu_cuda13` asset — 1.28.2 and 1.31.1 both 404'd. Guessing a version costs a full
-      # matrix run each time, and this machine's egress cannot reach the upstream API to check, so
-      # ask from here, where egress is clean. Placed in `lint` because `build` needs it: this fails,
-      # so no row builds. Delete this step with the same commit that pins the real digests.
-      - name: enumerate upstream cuda13 assets, then stop
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # TEMPORARY (asset probe): the cuda13 rows pinned ONNX Runtime versions whose releases carry
+      # no `gpu_cuda13` asset — 1.28.2 and 1.31.1 both 404'd. The releases API is no use here: an
+      # unauthenticated call is rate-limited to 60/h per runner IP, and GITHUB_TOKEN does not grant
+      # cross-repository reads, so both attempts returned HTTP >= 400. The DOWNLOAD urls, however,
+      # need no auth at all — the original failure proved it by returning a clean 404 — so probe
+      # those directly and hash whatever exists. Placed in `lint` because `build` needs it: this
+      # fails, so no row compiles. Delete with the commit that pins the real digests.
+      - name: probe upstream cuda13 assets and hash them, then stop
         run: |
-          set -euo pipefail
-          # Authenticated: unauthenticated api.github.com is 60 req/h per IP, shared across every
-          # runner on that address, so a bare curl here reliably gets a 403 (exit 22).
-          curl -fsSL -H "Accept: application/vnd.github+json"             -H "Authorization: Bearer $GH_TOKEN"             "https://api.github.com/repos/microsoft/onnxruntime/releases?per_page=20" -o rel.json
-          echo "ENUM tag | draft | pre | gpu_cuda13 assets"
-          jq -r '.[] | "ENUM \(.tag_name) | \(.draft) | \(.prerelease) | " + ([.assets[].name | select(contains("gpu_cuda13"))] | join(" "))' rel.json
-          echo "ENUM-ONLY: enumeration step, no build should follow"
+          set -uo pipefail
+          base=https://github.com/microsoft/onnxruntime/releases/download
+          found=""
+          for v in 1.28.0 1.28.1 1.28.2 1.29.0 1.29.1 1.30.0 1.30.1 1.31.0 1.31.1 1.32.0 1.32.1 1.33.0; do
+            w="$base/v$v/onnxruntime-win-x64-gpu_cuda13-$v.zip"
+            l="$base/v$v/onnxruntime-linux-x64-gpu_cuda13-$v.tgz"
+            cw=$(curl -sIL -o /dev/null -w '%{http_code}' "$w" || echo 000)
+            cl=$(curl -sIL -o /dev/null -w '%{http_code}' "$l" || echo 000)
+            echo "PROBE $v win=$cw linux=$cl"
+            if [ "$cw" = "200" ] && [ "$cl" = "200" ]; then found="$v"; fi
+          done
+          if [ -z "$found" ]; then echo "PROBE none of the candidates carry both assets"; exit 1; fi
+          echo "PROBE newest with both: $found"
+          curl -fsSL -o w.zip "$base/v$found/onnxruntime-win-x64-gpu_cuda13-$found.zip"
+          curl -fsSL -o l.tgz "$base/v$found/onnxruntime-linux-x64-gpu_cuda13-$found.tgz"
+          echo "PROBE sha256 win   $found = $(sha256sum w.zip | cut -d" " -f1)"
+          echo "PROBE sha256 linux $found = $(sha256sum l.tgz | cut -d" " -f1)"
+          echo "PROBE-ONLY: pin the values above and delete this step"
           exit 1
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
