@@ -1422,7 +1422,12 @@ mod tests {
         };
         write_case(&run_dir.join("cases"), &case).unwrap();
 
-        let err = load_cases(&run_dir, &corpus_glossa, false).unwrap_err();
+        // `unwrap_err` would demand `Debug` on the Ok type (`Vec<Case>`, hence `Case`) purely so a
+        // panic could print a value this test never wants. Match instead of deriving `Debug` on a
+        // production type to satisfy a test.
+        let Err(err) = load_cases(&run_dir, &corpus_glossa, false) else {
+            panic!("an unindexed corpus must be refused, not calibrated");
+        };
         assert!(
             err.to_string().contains("never been `kb index`ed"),
             "got: {err}"
