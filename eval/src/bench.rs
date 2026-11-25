@@ -687,12 +687,11 @@ fn read_vm_hwm_kb(pid: u32) -> Option<u64> {
 // Task 4: what the run left behind
 // ---------------------------------------------------------------------------------------------
 
-/// Figures read from the index, the DF sidecar and the manifest after a run.
+/// Figures read from the index and the manifest after a run.
 #[derive(Debug, Clone)]
 pub struct IndexFigures {
     pub chunks: Option<u64>,
     pub df_n_chunks: Option<u32>,
-    pub df_tokens: Option<usize>,
     /// `df(token) / n_chunks` for each requested token — the quantity `is_rare` compares against
     /// (`src/gate/df.rs:47-49`). Counts alone would not show the denominator moving.
     pub df_ratio_sample: Vec<(String, f32)>,
@@ -702,36 +701,37 @@ pub struct IndexFigures {
 
 /// Read post-run figures from `state_base`.
 ///
-/// `df_tokens` are **supplied, not discovered**: `DfTable`'s map is private, and a fixed token list
-/// is the more honest measurement anyway — "the most frequent tokens of this run" samples different
-/// tokens once the corpus changes, so a phase-to-phase comparison would compare different things.
-/// A missing sidecar reports `None`, never 0: zero would read as "no chunks", a different claim.
+/// `df_tokens` is a fixed, caller-supplied list sampled the same way every run — "the most
+/// frequent tokens of this run" would sample different tokens once the corpus changes, so a
+/// phase-to-phase comparison would compare different things. `df_n_chunks`/`df_ratio_sample` read
+/// the live, index-backed table (`gate::df_cache::cached_df` — the same source production's
+/// `verify` reads, no sidecar involved), gated on `DocIndex::exists` so a corpus that was never
+/// `kb index`ed reports `None`, never 0: zero would read as "no chunks", a different claim, and
+/// `cached_df`'s own "empty table" tolerance (meant for a live gate call that should still be able
+/// to abstain) would otherwise collapse that distinction here.
 pub fn index_figures(state_base: &Path, df_tokens: &[String]) -> Result<IndexFigures> {
     let chunks = glossa::index::store::DocIndex::open_or_create(state_base)
         .ok()
         .and_then(|idx| idx.index.reader().ok().map(|r| r.searcher().num_docs()));
 
-    let glossa_dir = state_base.join(".glossa");
-    let df_path = glossa::gate::df::DfTable::sidecar_path(&glossa_dir);
-    let df = glossa::gate::df::DfTable::load(&df_path).ok();
-
-    let (df_n_chunks, df_tokens_len, df_ratio_sample) = match &df {
-        Some(t) => {
-            let n = t.n_chunks;
-            let sample = df_tokens
-                .iter()
-                .map(|tok| {
-                    let ratio = if n == 0 {
-                        0.0
-                    } else {
-                        t.df(tok) as f32 / n as f32
-                    };
-                    (tok.clone(), ratio)
-                })
-                .collect();
-            (Some(n), Some(t.len()), sample)
-        }
-        None => (None, None, Vec::new()),
+    let (df_n_chunks, df_ratio_sample) = if glossa::index::store::DocIndex::exists(state_base) {
+        let glossa_dir = state_base.join(".glossa");
+        let t = glossa::gate::df_cache::cached_df(&glossa_dir)?;
+        let n = t.n_chunks;
+        let sample = df_tokens
+            .iter()
+            .map(|tok| {
+                let ratio = if n == 0 {
+                    0.0
+                } else {
+                    t.df(tok) as f32 / n as f32
+                };
+                (tok.clone(), ratio)
+            })
+            .collect();
+        (Some(n), sample)
+    } else {
+        (None, Vec::new())
     };
 
     let manifest = glossa::index::manifest::Manifest::load(state_base);
@@ -739,7 +739,6 @@ pub fn index_figures(state_base: &Path, df_tokens: &[String]) -> Result<IndexFig
     Ok(IndexFigures {
         chunks,
         df_n_chunks,
-        df_tokens: df_tokens_len,
         df_ratio_sample,
         schema_version: manifest.index_schema_version,
         files_in_manifest: manifest.files.len(),
@@ -1398,14 +1397,26 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_df_sidecar_reads_as_absent_not_zero() {
+    fn an_unindexed_corpus_reads_df_figures_as_absent_not_zero() {
         // 0 would read as "no chunks", which is a different claim from "not measured".
         let d = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(d.path().join(".glossa")).unwrap();
         let f = index_figures(d.path(), &["zylathon".to_string()]).unwrap();
         assert_eq!(f.df_n_chunks, None);
-        assert_eq!(f.df_tokens, None);
         assert!(f.df_ratio_sample.is_empty());
+    }
+
+    /// Once the corpus IS indexed, `df_n_chunks`/`df_ratio_sample` read the live, index-backed
+    /// table (`gate::df_cache::cached_df`) rather than erroring for lack of a `.glossa/df` sidecar.
+    #[test]
+    fn an_indexed_corpus_reads_real_df_figures() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.md"), "a zylathon appears here").unwrap();
+        glossa::index::store::index_dir(d.path(), false).unwrap();
+
+        let f = index_figures(d.path(), &["zylathon".to_string()]).unwrap();
+        assert_eq!(f.df_n_chunks, Some(1));
+        assert_eq!(f.df_ratio_sample, vec![("zylathon".to_string(), 1.0)]);
     }
 
     #[test]

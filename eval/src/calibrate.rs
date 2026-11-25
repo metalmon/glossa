@@ -91,6 +91,25 @@ pub struct Case {
     pub nli: Option<f32>,
 }
 
+/// The live, index-backed df table for `corpus_glossa` (`glossa::gate::df_cache::cached_df` — the
+/// same source production's `verify` reads; no `.glossa/df` sidecar involved). Unlike production,
+/// which treats "never `kb index`ed" as an empty vocabulary so a live gate call can still abstain
+/// the normal way, a calibration run REFUSES outright: fitting a threshold against an empty table
+/// scores every answer token as maximally rare, which is a meaningless number dressed up as a real
+/// operating point, not a corpus-level abstention worth reporting.
+fn cached_df_or_refuse(
+    corpus_glossa: &std::path::Path,
+) -> anyhow::Result<std::sync::Arc<glossa::gate::df::DfTable>> {
+    let root = corpus_glossa.parent().unwrap_or(corpus_glossa);
+    if !glossa::index::store::DocIndex::exists(root) {
+        anyhow::bail!(
+            "corpus at {} has never been `kb index`ed — nothing to calibrate against",
+            root.display()
+        );
+    }
+    glossa::gate::df_cache::cached_df(corpus_glossa)
+}
+
 /// Reuse `report.rs`'s `confusion_text` cell classification under abstention_policy
 /// `credit_abstention`. `classify` is only ever called on a case that already has a non-empty
 /// `final_answer` (the reader served SOMETHING) — so unlike `confusion_text`, an unanswerable
@@ -118,9 +137,7 @@ pub fn load_cases(
     corpus_glossa: &std::path::Path,
     credit_abstention: bool,
 ) -> anyhow::Result<Vec<Case>> {
-    let df =
-        glossa::gate::df::DfTable::load(&glossa::gate::df::DfTable::sidecar_path(corpus_glossa))
-            .with_context(|| format!("loading df sidecar under {}", corpus_glossa.display()))?;
+    let df = cached_df_or_refuse(corpus_glossa)?;
     let cfg = VerifyConfig::resolve(corpus_glossa);
     let rare_df_frac = cfg.rare_df_frac;
     // Plan 2: resolve the runtime NLI scorer from `[verify.nli]`. `None` when the `nli` feature is
@@ -267,9 +284,7 @@ pub fn load_cases_from_dataset(
 ) -> anyhow::Result<Vec<Case>> {
     use glossa::gate::{read_chunk_text, score};
 
-    let df =
-        glossa::gate::df::DfTable::load(&glossa::gate::df::DfTable::sidecar_path(corpus_glossa))
-            .with_context(|| format!("loading df sidecar under {}", corpus_glossa.display()))?;
+    let df = cached_df_or_refuse(corpus_glossa)?;
     let cfg = VerifyConfig::resolve(corpus_glossa);
     let rare = cfg.rare_df_frac;
     let scorer = glossa::gate::resolve_scorer(&cfg);
@@ -1252,7 +1267,7 @@ mod tests {
         assert_eq!(super::auroc(&[], &[0.1]), 0.5);
     }
 
-    /// Writes a minimal corpus (indexed, so `.glossa/df` exists) + one answerable-correct
+    /// Writes a minimal corpus (indexed, so the gate has a live df table to read) + one answerable-correct
     /// `CaseResult` under `runs/t1/cases/`. Returns `(run_dir, corpus_glossa, _tempdir_guard)` —
     /// the guard must stay bound in the caller so the tempdir isn't dropped mid-test.
     fn fixture_run() -> (std::path::PathBuf, std::path::PathBuf, tempfile::TempDir) {
@@ -1370,6 +1385,48 @@ mod tests {
         let cases = load_cases(&run_dir, &corpus_glossa, false).unwrap();
         assert_eq!(cases.len(), 2);
         assert!(cases.iter().any(|c| c.cell == Cell::ShouldAbstain));
+    }
+
+    /// The decision this change makes deliberately: production's live gate treats "never `kb
+    /// index`ed" as an empty vocabulary and abstains normally (`verify_json_abstains_without_any_
+    /// index_yet` in `src/gate.rs`), but `load_cases` REFUSES — a calibration fit against an empty
+    /// table would be a meaningless number, not a real operating point.
+    #[test]
+    fn load_cases_refuses_on_an_unindexed_corpus() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("corpus");
+        let corpus_glossa = root.join(".glossa");
+        std::fs::create_dir_all(&corpus_glossa).unwrap(); // the dir exists; `kb index` never ran
+
+        let run_dir = dir.path().join("runs").join("t1");
+        let case = CaseResult {
+            id: "q1".into(),
+            verdict: Verdict::Correct,
+            reason: "ok".into(),
+            f1: 1.0,
+            em: 1.0,
+            tools: vec!["read".into()],
+            answer: "x".into(),
+            transcript: "T".into(),
+            judge_raw: String::new(),
+            hop_type: String::new(),
+            needs_graph: String::new(),
+            errored: false,
+            answerable: true,
+            final_answer: "x".into(),
+            chunk_paths: vec![],
+            ranked_sources: vec![],
+            dialogue: vec![],
+            answered_without_retrieval: false,
+            no_tool_rescued: false,
+        };
+        write_case(&run_dir.join("cases"), &case).unwrap();
+
+        let err = load_cases(&run_dir, &corpus_glossa, false).unwrap_err();
+        assert!(
+            err.to_string().contains("never been `kb index`ed"),
+            "got: {err}"
+        );
     }
 
     #[test]
