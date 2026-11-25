@@ -1698,11 +1698,16 @@ fn main() -> anyhow::Result<()> {
             let mut rg_lines: Vec<String> = Vec::new();
             let mut display: Vec<glossa::cli_fmt::DisplayHit> = Vec::new();
             let mut records: Vec<glossa::cli_fmt::LastHit> = Vec::new();
+            // Set only on the indexed path below (`--scan` has no index, hence no corpus-frequency
+            // signal to report) and only PRINTED in pretty mode — `--format rg`/piped output stays
+            // byte-for-byte grep-compatible, which the summary block already respects the same way.
+            let mut match_profile: Option<String> = None;
 
             if !scan {
                 glossa::index::store::ensure_fresh_at(&rr.roots, &rr.state_base)?; // file-first: pick up new/changed docs
                 let idx =
                     glossa::index::store::DocIndex::open_or_create_at(&rr.roots, &rr.state_base)?;
+                match_profile = idx.match_profile(&pattern).render();
                 // Route through the shared rerank stage so `kb search` order matches the MCP `search`
                 // tool. With no `[rerank]` config this is plain BM25 (identity) — output unchanged.
                 let (hits, _info) = glossa::retrieve::rerank::retrieve(
@@ -1811,6 +1816,12 @@ fn main() -> anyhow::Result<()> {
                     "{}",
                     glossa::cli_fmt::render_search_pretty(&display, !scan, &pattern)
                 );
+                // Which query terms exist in the corpus and how rare each is — see
+                // `DocIndex::match_profile`. Pretty-mode only, same reasoning as the summary block
+                // below: `--format rg`/piped output must stay byte-for-byte grep-compatible.
+                if let Some(p) = &match_profile {
+                    println!("{p}");
+                }
                 // CLI output contract: the summary block is a pretty-mode-only affordance. `--format
                 // rg` (or `auto` piped to a non-tty) must stay byte-for-byte grep-compatible, so the
                 // summary is gated on the same `pretty` flag that selects the detail rendering above

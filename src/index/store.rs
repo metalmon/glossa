@@ -676,6 +676,185 @@ impl DocIndex {
             .collect();
         Ok(filtered)
     }
+
+    /// At most this many terms in a [`MatchProfile`] — a long natural-language question must not
+    /// turn into a wall of numbers. The cap is on the TOTAL shown, not per line: anything past it
+    /// is counted in [`MatchProfile::omitted`] instead of dropped silently.
+    const MATCH_PROFILE_MAX: usize = 10;
+
+    /// Per-query corpus-presence signal: for each distinct term the user typed, how many indexed
+    /// CHUNKS contain it. This is a property of the QUERY against the corpus, not of any one hit —
+    /// callers emit it once per `search` call, never per result.
+    ///
+    /// The motivating failure: a query naming both a common word and a specific code (e.g. a
+    /// standard number) can rank a document highest purely on the common word, while the specific
+    /// part appears nowhere in the corpus — and nothing in a plain hit list says so. This reports
+    /// which terms exist and how rare each is; it changes no ranking and filters nothing.
+    ///
+    /// Frequency comes from the live tantivy term dictionary (`searcher.doc_freq`), the same
+    /// instrument `graph::node_index::NodeIndex::doc_freq` uses, and for the same reason: the
+    /// `.glossa/df` sidecar (`gate::df::DfTable`) is rebuilt only on `kb index --force` or a schema
+    /// migration, and an incremental pass never decrements it, so on an incrementally-updated
+    /// corpus it can describe an older corpus — a term added since the last full pass would read
+    /// as frequency zero while actually being indexed, AND it inflates monotonically over uptime
+    /// with no self-correction short of a full rebuild. A displayed number must not be able to lie
+    /// like that, so this never touches the sidecar. `doc_freq` has a narrower version of the same
+    /// shape of error (see the comment at the call site below), but it only ever reads too HIGH,
+    /// never too low, which the sidecar's zero-while-present failure can do.
+    ///
+    /// Every word in `query` is run through the SAME split/lowercase/stem pipeline indexing uses
+    /// (mirrored from `multilang::TermAnalyzer::terms`, pinned equal to the real index tokenizer by
+    /// `term_analyzer_matches_index_pipeline`) before lookup, so a zero means "absent from the
+    /// corpus", not "asked in the wrong analyzed form". Deliberately NOT built on `leaf_tokens`
+    /// (the per-piece helper `search` uses): that helper hands each whitespace piece to the
+    /// tokenizer SEPARATELY specifically to stop one piece's script from leaking into another's
+    /// stemming. This function instead decides the stemmer ONCE for the WHOLE query — the same
+    /// granularity indexing itself uses (one chunk BODY, one decision; see
+    /// `multilang::MultiLangTokenizer::token_stream`) — so it reports the SAME ambiguity a mixed-
+    /// script query actually has against the corpus, rather than hiding it. Concretely: a query
+    /// carrying any Cyrillic character ANYWHERE stems every Latin word in it with the Russian
+    /// stemmer, which can turn a present Latin word into a form the corpus never indexed under. A
+    /// zero on a mixed-script query is therefore NOT proof of absence — see
+    /// `match_profile_mixed_script_is_not_conclusive` below. For digits this risk is moot (a
+    /// stemmer is identity on them), but no caller may treat a zero from THIS function as a
+    /// refusal signal on its own strength; that decision is deliberately not built here.
+    ///
+    /// A raw whitespace piece that splits into several sub-tokens (rare — e.g. a hyphenated code)
+    /// counts chunks containing ALL of them (AND), mirroring `NodeIndex::doc_freq`: an OR would let
+    /// one common sub-token swamp the count. Two raw pieces that analyze to the same term collapse
+    /// into one entry (the first one's raw spelling), so duplicates never print twice.
+    ///
+    /// Ordered rarest-first, capped at [`Self::MATCH_PROFILE_MAX`] terms; anything past the cap is
+    /// only counted, not shown (see [`MatchProfile::omitted`]).
+    pub fn match_profile(&self, query: &str) -> MatchProfile {
+        use rust_stemmers::{Algorithm, Stemmer};
+        use tantivy::collector::Count;
+        use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+        let searcher = self.reader.searcher();
+        // ONE decision for the whole query — see the doc comment above for why.
+        let stemmer = Stemmer::create(if crate::index::multilang::is_cyrillic(query) {
+            Algorithm::Russian
+        } else {
+            Algorithm::English
+        });
+        let mut seen: Vec<Vec<String>> = Vec::new();
+        let mut terms: Vec<TermMatch> = Vec::new();
+        for piece in query.split_whitespace() {
+            // Same word-boundary rule as `SimpleTokenizer`/`TermAnalyzer::terms`: split on
+            // anything that is not alphanumeric.
+            let key: Vec<String> = piece
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|t| !t.is_empty())
+                .map(|t| stemmer.stem(&t.to_lowercase()).into_owned())
+                .collect();
+            if key.is_empty() || seen.contains(&key) {
+                continue;
+            }
+            seen.push(key.clone());
+            let chunk_freq = if key.len() == 1 {
+                // `Searcher::doc_freq` sums each segment's term-dictionary count
+                // (`InvertedIndexReader::doc_freq` returns `term_info.doc_freq` as written when
+                // that segment was built) WITHOUT consulting the segment's delete bitset. A chunk
+                // deleted or re-indexed stays counted here until ITS SEGMENT gets merged — and a
+                // merge is triggered by segment ACCUMULATION (tantivy's default `LogMergePolicy`
+                // merges a level once it holds `min_num_segments` segments; its delete-ratio
+                // trigger needs a ratio > 1.0, which no segment can ever reach, so deletions alone
+                // never trigger one). On a corpus that keeps being reindexed this clears out every
+                // few passes; on one that has gone idle after an edit/delete, nothing cleans it —
+                // it can persist indefinitely. So this number is an UPPER BOUND, not an exact
+                // count, and only ever errs by being too high, never too low. That direction is
+                // the safe one for this feature: overcounting can turn a true zero into a small
+                // positive, but it can never manufacture a zero, so "zero" from this function
+                // stays trustworthy — the term was never indexed in any live segment. The
+                // multi-term AND branch below runs an actual query instead of a dictionary
+                // lookup, so it does not share this error.
+                let t = tantivy::Term::from_field_text(self.fields.body, &key[0]);
+                searcher.doc_freq(&t).unwrap_or(0) as usize
+            } else {
+                let clauses: Vec<(Occur, Box<dyn Query>)> = key
+                    .iter()
+                    .map(|t| {
+                        let q: Box<dyn Query> = Box::new(TermQuery::new(
+                            tantivy::Term::from_field_text(self.fields.body, t),
+                            IndexRecordOption::Basic,
+                        ));
+                        (Occur::Must, q)
+                    })
+                    .collect();
+                searcher
+                    .search(&BooleanQuery::new(clauses), &Count)
+                    .unwrap_or(0)
+            };
+            terms.push(TermMatch {
+                raw: piece.to_string(),
+                chunk_freq,
+            });
+        }
+        // Stable sort: rarest (and therefore most interesting — see MatchProfile's doc comment)
+        // reads first; terms tied on frequency keep the order they appeared in the query.
+        terms.sort_by_key(|t| t.chunk_freq);
+        let omitted = terms.len().saturating_sub(Self::MATCH_PROFILE_MAX);
+        terms.truncate(Self::MATCH_PROFILE_MAX);
+        MatchProfile { terms, omitted }
+    }
+}
+
+/// One query term as [`DocIndex::match_profile`] reports it: shown exactly as the user typed it
+/// (`raw`), with `chunk_freq` looked up on its analyzed form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TermMatch {
+    pub raw: String,
+    /// How many indexed CHUNKS contain this term — chunks, not documents, because a chunk is what
+    /// this index actually stores (never call this a document count; see the ~130-line correction
+    /// this repo already made for that exact mistake). An upper bound, not an exact count — see
+    /// the comment at `DocIndex::match_profile`'s `doc_freq` call site — that can only read HIGH
+    /// (never fabricate a zero), so a zero here stays trustworthy.
+    pub chunk_freq: usize,
+}
+
+/// A query's corpus-presence signal: which terms exist, and how rare each is. See
+/// [`DocIndex::match_profile`] for how it is built and what it deliberately does NOT do (it ranks
+/// nothing, filters nothing, and refuses nothing — a separate, not-yet-built decision would have to
+/// act on a zero, this type only reports one).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MatchProfile {
+    /// Rarest-first, capped at [`DocIndex::MATCH_PROFILE_MAX`].
+    pub terms: Vec<TermMatch>,
+    /// How many additional distinct analyzed terms exist beyond `terms` above the cap. Zero when
+    /// nothing was left out.
+    pub omitted: usize,
+}
+
+impl MatchProfile {
+    /// Plain-text rendering shared by every model-facing surface (the MCP/eval `search` tool text;
+    /// the CLI's pretty-mode line is built from the same data, see `cli_fmt`). `None` when the
+    /// query analyzed to no terms at all (nothing but punctuation/whitespace) — there is nothing to
+    /// report. A zero-frequency term is marked `not in corpus` so it cannot be mistaken for a
+    /// small-but-present count.
+    pub fn render(&self) -> Option<String> {
+        if self.terms.is_empty() {
+            return None;
+        }
+        let parts: Vec<String> = self
+            .terms
+            .iter()
+            .map(|t| {
+                if t.chunk_freq == 0 {
+                    format!("{}=0 (not in corpus)", t.raw)
+                } else {
+                    format!("{}={}", t.raw, t.chunk_freq)
+                }
+            })
+            .collect();
+        let mut s = format!(
+            "match profile (chunks containing each term, rarest first): {}",
+            parts.join(", ")
+        );
+        if self.omitted > 0 {
+            s.push_str(&format!(" (+{} more term(s) not shown)", self.omitted));
+        }
+        Some(s)
+    }
 }
 
 /// A chunk read by its canonical number, with the numbers of its in-document neighbors.
@@ -5661,6 +5840,140 @@ mod search_tests {
         assert!(idx.search("...", 10).unwrap().is_empty());
         assert!(idx.search("", 10).unwrap().is_empty());
         assert!(idx.search("alpha", 0).unwrap().is_empty());
+    }
+
+    /// The whole point: rarest first, and a term the corpus does not have is unmistakable.
+    /// "common" is in both chunks, "rare" in one, "absent" in neither — fed to `match_profile` in
+    /// the OPPOSITE order on purpose, so this also pins that the function re-sorts rather than
+    /// echoing query order.
+    #[test]
+    fn match_profile_orders_rarest_first_and_marks_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[chunk("a.md", "common rare"), chunk("b.md", "common only")])
+            .unwrap();
+
+        let p = idx.match_profile("common rare absent");
+        let freqs: Vec<(String, usize)> = p
+            .terms
+            .iter()
+            .map(|t| (t.raw.clone(), t.chunk_freq))
+            .collect();
+        assert_eq!(
+            freqs,
+            vec![
+                ("absent".to_string(), 0),
+                ("rare".to_string(), 1),
+                ("common".to_string(), 2),
+            ],
+            "rarest (and absent) first: {freqs:?}"
+        );
+        assert_eq!(p.omitted, 0);
+
+        let rendered = p.render().unwrap();
+        assert!(
+            rendered.contains("absent=0 (not in corpus)"),
+            "a zero term must be unmistakable: {rendered}"
+        );
+        assert!(rendered
+            .starts_with("match profile (chunks containing each term, rarest first): absent=0"));
+    }
+
+    /// Bound the TOTAL, not each line: past `DocIndex::MATCH_PROFILE_MAX` (10) terms, the rest are
+    /// counted but not printed, so a long natural-language question cannot turn into a wall of
+    /// numbers.
+    #[test]
+    fn match_profile_caps_at_ten_and_reports_the_rest_as_omitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[chunk("a.md", "unrelated content")])
+            .unwrap();
+
+        let query = (1..=11)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let p = idx.match_profile(&query);
+        assert_eq!(p.terms.len(), 10, "{:?}", p.terms);
+        assert_eq!(p.omitted, 1);
+        assert!(p.render().unwrap().ends_with("(+1 more term(s) not shown)"));
+    }
+
+    /// Two raw spellings that analyze to the SAME term (case/inflection) must not print twice —
+    /// the first occurrence's raw spelling wins.
+    #[test]
+    fn match_profile_dedups_raw_terms_that_analyze_identically() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[chunk("a.md", "a signed contract")])
+            .unwrap();
+
+        let p = idx.match_profile("Contract contract contracts");
+        assert_eq!(
+            p.terms.len(),
+            1,
+            "three spellings of one stem must collapse to one entry: {:?}",
+            p.terms
+        );
+        assert_eq!(p.terms[0].raw, "Contract", "first raw spelling wins");
+    }
+
+    /// The count is of CHUNKS, not documents: two chunks sharing one document path both contain
+    /// the term, so the count must be 2 — a document-level count would read 1.
+    #[test]
+    fn match_profile_counts_chunks_not_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[
+            chunk("same.md", "mentions zorble here"),
+            chunk("same.md", "zorble again later"),
+        ])
+        .unwrap();
+
+        let p = idx.match_profile("zorble");
+        assert_eq!(p.terms.len(), 1);
+        assert_eq!(
+            p.terms[0].chunk_freq, 2,
+            "one document, two chunks, both containing the term"
+        );
+    }
+
+    /// The documented caveat, pinned rather than fixed (see `DocIndex::match_profile`'s doc
+    /// comment): script detection decides ONE stemmer for the WHOLE query, the same granularity
+    /// indexing uses for a whole chunk body. "running" is indexed alone (no Cyrillic in that
+    /// chunk) and stems to English "run". A query repeating the exact same word ALONGSIDE a
+    /// synthetic Cyrillic word picks the Russian stemmer for the ENTIRE query — which has no rule
+    /// for an all-Latin word, so "running" comes out unstemmed and no longer matches what was
+    /// actually indexed. That is not a bug to fix here: it is why a zero from this function must
+    /// never be trusted as proof of absence on a mixed-script query.
+    #[test]
+    fn match_profile_mixed_script_is_not_conclusive() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[chunk("a.md", "the engine keeps running")])
+            .unwrap();
+
+        let plain = idx.match_profile("running");
+        assert_eq!(plain.terms.len(), 1);
+        assert_eq!(
+            plain.terms[0].chunk_freq, 1,
+            "a pure-English query finds the word under its English stem"
+        );
+
+        // An arbitrary Cyrillic word (not a real corpus value) appended via `\u{...}` escapes
+        // rather than a literal, so this source file stays out of the repo's Cyrillic leak-scan.
+        // Its only job is to trigger script detection (see `multilang::is_cyrillic`).
+        let mixed = idx.match_profile("running \u{0441}\u{0438}\u{043D}\u{0438}\u{0439}");
+        let running = mixed
+            .terms
+            .iter()
+            .find(|t| t.raw == "running")
+            .expect("the raw query term is still reported even when its count misleads");
+        assert_eq!(
+            running.chunk_freq, 0,
+            "mixed-script query: the SAME word now reads as absent — a zero here is NOT proof \
+             the term is missing from the corpus"
+        );
     }
 
     #[test]

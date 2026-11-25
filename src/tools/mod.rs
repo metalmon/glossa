@@ -201,6 +201,16 @@ pub fn search(
                     .collect::<Vec<_>>()
                     .join("\n")
             };
+            // BEHAVIOUR CHANGE: every caller of this function now gets one extra paragraph after
+            // the hit list (or after "(no results)") — the match profile, appended once per
+            // query, never per hit (see `DocIndex::match_profile`). That reaches the MCP `search`
+            // tool and the eval harness's `run_search` (both forward `body` to the model verbatim).
+            // `kb search`'s index-search arm does NOT go through this function — it renders its
+            // own text in `main.rs`/`cli_fmt.rs`, which adds the same signal separately there.
+            let body = match idx.match_profile(query).render() {
+                Some(profile) => format!("{body}\n\n{profile}"),
+                None => body,
+            };
             (tool_answer(body), hits)
         }
         // The index could not be opened, searched, or the query could not be turned into something
@@ -2631,7 +2641,14 @@ mod tests {
         let (out, hits) = search(&i, gd.path(), "nonexistentzzz", 10, None, None, &t, None);
         assert!(hits.is_empty());
         assert!(!out.error, "zero hits is an answer: {}", out.text);
-        assert_eq!(out.text, "(no results)");
+        // BEHAVIOUR CHANGE: the hit list (or this "(no results)" sentinel) is now followed by the
+        // match profile — see `DocIndex::match_profile` — so this is no longer exact-equal text.
+        assert!(out.text.starts_with("(no results)"), "{}", out.text);
+        assert!(
+            out.text.contains("nonexistentzzz=0 (not in corpus)"),
+            "zero-frequency term must be unmistakable: {}",
+            out.text
+        );
 
         let out = grep(d.path(), &i, "nomatchzzz", &GrepOpts::default(), &t);
         assert!(!out.error, "zero matches is an answer: {}", out.text);
@@ -4072,8 +4089,16 @@ closure = [["CAUSED_BY", "RESOLVED_BY", "RESOLVED_BY"]]
         let (body, hits) = search(&i, gd.path(), "timeout", 10, None, None, &t, None);
         assert_eq!(hits.len(), 1);
         assert!(body.text.starts_with("MODULE.pdf#1") && body.text.contains("timeout"));
+        // BEHAVIOUR CHANGE: a match profile paragraph now follows the hit list (or the
+        // "(no results)" sentinel below) on every search — see `DocIndex::match_profile`.
+        assert!(body.text.contains("match profile"), "{}", body.text);
         let (empty, _) = search(&i, gd.path(), "nonexistentzzz", 10, None, None, &t, None);
-        assert_eq!(empty.text, "(no results)");
+        assert!(empty.text.starts_with("(no results)"), "{}", empty.text);
+        assert!(
+            empty.text.contains("nonexistentzzz=0 (not in corpus)"),
+            "{}",
+            empty.text
+        );
     }
 
     // T8: a glossa_dir with no [rerank] config keeps search on the BM25 path — hits non-empty and

@@ -185,6 +185,57 @@ fn search_rg_format_has_no_summary_block() {
 }
 
 #[test]
+fn search_pretty_shows_the_match_profile_before_the_summary() {
+    // Which query terms exist in the corpus, rarest first — a term entirely absent is the point
+    // of the feature, so it must be unmistakable.
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.md"), b"# Intro\nthe cat sat\n").unwrap();
+
+    let assert = Command::cargo_bin("kb")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["search", "--format", "pretty", "cat nonexistentzzz"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("match profile") && stdout.contains("nonexistentzzz=0 (not in corpus)"),
+        "pretty search must report the match profile with an unmistakable zero:\n{stdout}"
+    );
+    // Still ends with the separator + summary block — the profile line sits BEFORE it, not after.
+    let tail = last_nonempty_lines(&stdout, 2);
+    assert_eq!(
+        tail.len(),
+        2,
+        "expected separator + summary line, got:\n{stdout}"
+    );
+    assert!(
+        tail[0].chars().all(|c| c == '\u{2500}') && tail[1].contains("results:"),
+        "the summary block must stay last: {tail:?}"
+    );
+}
+
+#[test]
+fn search_rg_format_has_no_match_profile() {
+    // Same grep-compatibility contract as the summary block: `--format rg` must stay
+    // byte-for-byte parseable, so the match profile (a pretty-mode affordance) must not appear.
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.md"), b"# Intro\nthe cat sat\n").unwrap();
+
+    let assert = Command::cargo_bin("kb")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["search", "--format", "rg", "cat nonexistentzzz"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        !stdout.contains("match profile"),
+        "rg-format stdout must stay grep-compatible (no match profile):\n{stdout}"
+    );
+}
+
+#[test]
 fn grep_stdout_stays_pipe_compatible_no_summary() {
     // `grep` has no `--format` flag; its pretty-vs-pipe gate is `stdout_is_tty()`, which is always
     // false under assert_cmd's captured pipe — exactly the case that must stay grep-compatible
