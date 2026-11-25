@@ -24,6 +24,19 @@ jobs:
     name: fmt + clippy (fail-fast gate)
     runs-on: ubuntu-latest
     steps:
+      # TEMPORARY (asset enumeration): the cuda13 rows pinned ONNX Runtime versions whose releases
+      # carry no `gpu_cuda13` asset — 1.28.2 and 1.31.1 both 404'd. Guessing a version costs a full
+      # matrix run each time, and this machine's egress cannot reach the upstream API to check, so
+      # ask from here, where egress is clean. Placed in `lint` because `build` needs it: this fails,
+      # so no row builds. Delete this step with the same commit that pins the real digests.
+      - name: enumerate upstream cuda13 assets, then stop
+        run: |
+          set -euo pipefail
+          curl -fsSL -H "Accept: application/vnd.github+json"             "https://api.github.com/repos/microsoft/onnxruntime/releases?per_page=20" -o rel.json
+          echo "ENUM tag | draft | pre | gpu_cuda13 assets"
+          jq -r '.[] | "ENUM \(.tag_name) | \(.draft) | \(.prerelease) | " + ([.assets[].name | select(contains("gpu_cuda13"))] | join(" "))' rel.json
+          echo "ENUM-ONLY: enumeration step, no build should follow"
+          exit 1
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
