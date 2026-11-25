@@ -702,27 +702,45 @@ impl DocIndex {
     /// shape of error (see the comment at the call site below), but it only ever reads too HIGH,
     /// never too low, which the sidecar's zero-while-present failure can do.
     ///
-    /// Every word in `query` is run through the SAME split/lowercase/stem pipeline indexing uses
-    /// (mirrored from `multilang::TermAnalyzer::terms`, pinned equal to the real index tokenizer by
-    /// `term_analyzer_matches_index_pipeline`) before lookup, so a zero means "absent from the
-    /// corpus", not "asked in the wrong analyzed form". Deliberately NOT built on `leaf_tokens`
-    /// (the per-piece helper `search` uses): that helper hands each whitespace piece to the
-    /// tokenizer SEPARATELY specifically to stop one piece's script from leaking into another's
-    /// stemming. This function instead decides the stemmer ONCE for the WHOLE query — the same
-    /// granularity indexing itself uses (one chunk BODY, one decision; see
-    /// `multilang::MultiLangTokenizer::token_stream`) — so it reports the SAME ambiguity a mixed-
-    /// script query actually has against the corpus, rather than hiding it. Concretely: a query
-    /// carrying any Cyrillic character ANYWHERE stems every Latin word in it with the Russian
-    /// stemmer, which can turn a present Latin word into a form the corpus never indexed under. A
-    /// zero on a mixed-script query is therefore NOT proof of absence — see
-    /// `match_profile_mixed_script_is_not_conclusive` below. For digits this risk is moot (a
-    /// stemmer is identity on them), but no caller may treat a zero from THIS function as a
-    /// refusal signal on its own strength; that decision is deliberately not built here.
+    /// Every word in `query` is split the SAME way indexing splits it (mirrored from
+    /// `multilang::TermAnalyzer::terms`, pinned equal to the real index tokenizer by
+    /// `term_analyzer_matches_index_pipeline`: split on non-alphanumeric, lowercase, stem).
+    /// Deliberately NOT built on `leaf_tokens` (the per-piece helper `search` uses) — see below.
+    ///
+    /// **Both stemmed forms, not one.** `MultiLangTokenizer::token_stream` decides Russian-or-
+    /// English ONCE PER CHUNK BODY (`multilang::is_cyrillic` on the whole text handed to it), so
+    /// the exact same Latin word is indexed STEMMED in an all-Latin chunk and UNSTEMMED in a chunk
+    /// that happens to also contain Cyrillic text elsewhere. Both analyzed forms are therefore
+    /// genuinely present in the term dictionary, keyed by which chunk they came from — committing
+    /// to one (as `leaf_tokens`'s per-piece script detection does, deliberately, for RANKING) would
+    /// silently miss the other. So for every piece this stems it BOTH ways and, when the two forms
+    /// differ, looks up each and reports the larger: never the sum (a stemming collision between
+    /// the two readings would double-count, and an overcount here is tolerable while an UNDERCOUNT
+    /// is not — see the next paragraph), and never a flag saying which form matched (nothing
+    /// downstream acts on that, and the two counts are not independent samples to distinguish).
+    ///
+    /// This makes the DIRECTION of this function's error asymmetric, and that is the point: a ZERO
+    /// means absent under EITHER reading, so it stays fully trustworthy. A POSITIVE is an upper
+    /// bound on what any SINGLE query path will actually retrieve: `search`'s `leaf_tokens` still
+    /// commits to one form per piece (correctly, for ranking — see its own doc comment), so it can
+    /// retrieve strictly less than what a non-zero profile count here reports. That gap is not a
+    /// bug in this function; it is a real property of the two-forms index design, exposed rather
+    /// than papered over — see `match_profile_finds_either_stemmed_form_across_chunk_scripts`
+    /// below, which also pins the companion fact that `search` can come back empty for a term this
+    /// function reports as present. For digits the two forms always agree (a stemmer is identity
+    /// on them), so this risk only ever touches alphabetic words.
+    ///
+    /// `doc_freq` on the single-term fast path has its own, UNRELATED reason to read high instead
+    /// of exact — see the comment at that call site — but it points the same safe direction: this
+    /// function can overcount, never undercount, so its zero is the one thing a caller may lean on;
+    /// nothing here authorizes treating a zero as a refusal signal, which stays a separate,
+    /// deliberately unbuilt decision.
     ///
     /// A raw whitespace piece that splits into several sub-tokens (rare — e.g. a hyphenated code)
-    /// counts chunks containing ALL of them (AND), mirroring `NodeIndex::doc_freq`: an OR would let
-    /// one common sub-token swamp the count. Two raw pieces that analyze to the same term collapse
-    /// into one entry (the first one's raw spelling), so duplicates never print twice.
+    /// counts chunks containing ALL of them (AND) under each stemmed reading, mirroring
+    /// `NodeIndex::doc_freq`: an OR would let one common sub-token swamp the count. Two raw pieces
+    /// collapse into one entry only when BOTH their analyzed forms match an already-seen piece (the
+    /// first one's raw spelling wins), so duplicates never print twice.
     ///
     /// Ordered rarest-first, capped at [`Self::MATCH_PROFILE_MAX`] terms; anything past the cap is
     /// only counted, not shown (see [`MatchProfile::omitted`]).
@@ -731,27 +749,12 @@ impl DocIndex {
         use tantivy::collector::Count;
         use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
         let searcher = self.reader.searcher();
-        // ONE decision for the whole query — see the doc comment above for why.
-        let stemmer = Stemmer::create(if crate::index::multilang::is_cyrillic(query) {
-            Algorithm::Russian
-        } else {
-            Algorithm::English
-        });
-        let mut seen: Vec<Vec<String>> = Vec::new();
-        let mut terms: Vec<TermMatch> = Vec::new();
-        for piece in query.split_whitespace() {
-            // Same word-boundary rule as `SimpleTokenizer`/`TermAnalyzer::terms`: split on
-            // anything that is not alphanumeric.
-            let key: Vec<String> = piece
-                .split(|c: char| !c.is_alphanumeric())
-                .filter(|t| !t.is_empty())
-                .map(|t| stemmer.stem(&t.to_lowercase()).into_owned())
-                .collect();
-            if key.is_empty() || seen.contains(&key) {
-                continue;
-            }
-            seen.push(key.clone());
-            let chunk_freq = if key.len() == 1 {
+        let ru = Stemmer::create(Algorithm::Russian);
+        let en = Stemmer::create(Algorithm::English);
+        // One term-dictionary lookup for a single-sub-token key, or one AND query across several —
+        // shared by both stemmed readings below.
+        let freq_for = |key: &[String]| -> usize {
+            if key.len() == 1 {
                 // `Searcher::doc_freq` sums each segment's term-dictionary count
                 // (`InvertedIndexReader::doc_freq` returns `term_info.doc_freq` as written when
                 // that segment was built) WITHOUT consulting the segment's delete bitset. A chunk
@@ -762,12 +765,10 @@ impl DocIndex {
                 // never trigger one). On a corpus that keeps being reindexed this clears out every
                 // few passes; on one that has gone idle after an edit/delete, nothing cleans it —
                 // it can persist indefinitely. So this number is an UPPER BOUND, not an exact
-                // count, and only ever errs by being too high, never too low. That direction is
-                // the safe one for this feature: overcounting can turn a true zero into a small
-                // positive, but it can never manufacture a zero, so "zero" from this function
-                // stays trustworthy — the term was never indexed in any live segment. The
-                // multi-term AND branch below runs an actual query instead of a dictionary
-                // lookup, so it does not share this error.
+                // count, and only ever errs by being too high, never too low — unrelated to, but
+                // the same safe direction as, the two-stemmed-forms choice above. The multi-term
+                // AND branch below runs an actual query instead of a dictionary lookup, so it does
+                // not share this particular error.
                 let t = tantivy::Term::from_field_text(self.fields.body, &key[0]);
                 searcher.doc_freq(&t).unwrap_or(0) as usize
             } else {
@@ -784,6 +785,32 @@ impl DocIndex {
                 searcher
                     .search(&BooleanQuery::new(clauses), &Count)
                     .unwrap_or(0)
+            }
+        };
+        let mut seen: Vec<(Vec<String>, Vec<String>)> = Vec::new();
+        let mut terms: Vec<TermMatch> = Vec::new();
+        for piece in query.split_whitespace() {
+            // Same word-boundary rule as `SimpleTokenizer`/`TermAnalyzer::terms`: split on
+            // anything that is not alphanumeric.
+            let subtoks: Vec<String> = piece
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|t| !t.is_empty())
+                .map(str::to_lowercase)
+                .collect();
+            if subtoks.is_empty() {
+                continue;
+            }
+            let key_ru: Vec<String> = subtoks.iter().map(|t| ru.stem(t).into_owned()).collect();
+            let key_en: Vec<String> = subtoks.iter().map(|t| en.stem(t).into_owned()).collect();
+            let identity = (key_ru.clone(), key_en.clone());
+            if seen.contains(&identity) {
+                continue;
+            }
+            seen.push(identity);
+            let chunk_freq = if key_ru == key_en {
+                freq_for(&key_en)
+            } else {
+                freq_for(&key_ru).max(freq_for(&key_en))
             };
             terms.push(TermMatch {
                 raw: piece.to_string(),
@@ -806,9 +833,12 @@ pub struct TermMatch {
     pub raw: String,
     /// How many indexed CHUNKS contain this term — chunks, not documents, because a chunk is what
     /// this index actually stores (never call this a document count; see the ~130-line correction
-    /// this repo already made for that exact mistake). An upper bound, not an exact count — see
-    /// the comment at `DocIndex::match_profile`'s `doc_freq` call site — that can only read HIGH
-    /// (never fabricate a zero), so a zero here stays trustworthy.
+    /// this repo already made for that exact mistake). An upper bound, not an exact count, for TWO
+    /// independent reasons documented on `DocIndex::match_profile`: `doc_freq` can read stale-high
+    /// across a segment merge, and this function reports the LARGER of two stemmed readings of the
+    /// term. Both reasons only ever push the number UP, never down — so a zero here stays fully
+    /// trustworthy (absent under every reading this function tries), while a positive is a ceiling
+    /// on what any single `search` call will actually retrieve, not a promise that it will.
     pub chunk_freq: usize,
 }
 
@@ -5899,8 +5929,12 @@ mod search_tests {
         assert!(p.render().unwrap().ends_with("(+1 more term(s) not shown)"));
     }
 
-    /// Two raw spellings that analyze to the SAME term (case/inflection) must not print twice —
-    /// the first occurrence's raw spelling wins.
+    /// Three case-spellings of the SAME word must not print twice — the first occurrence's raw
+    /// spelling wins. (Two spellings that merely share an English stem, e.g. "contract" and
+    /// "contracts", are NOT guaranteed to dedup any more: see `match_profile`'s doc comment on
+    /// why identity is now the PAIR of both stemmed readings — collapsing them on the English
+    /// reading alone would silently drop the Russian-reading lookup for whichever spelling lost
+    /// the dedup, which is exactly the kind of lost positive this function exists to avoid.)
     #[test]
     fn match_profile_dedups_raw_terms_that_analyze_identically() {
         let dir = tempfile::tempdir().unwrap();
@@ -5908,11 +5942,11 @@ mod search_tests {
         idx.write_chunks(&[chunk("a.md", "a signed contract")])
             .unwrap();
 
-        let p = idx.match_profile("Contract contract contracts");
+        let p = idx.match_profile("Contract contract CONTRACT");
         assert_eq!(
             p.terms.len(),
             1,
-            "three spellings of one stem must collapse to one entry: {:?}",
+            "three case-spellings of one word must collapse to one entry: {:?}",
             p.terms
         );
         assert_eq!(p.terms[0].raw, "Contract", "first raw spelling wins");
@@ -5938,41 +5972,46 @@ mod search_tests {
         );
     }
 
-    /// The documented caveat, pinned rather than fixed (see `DocIndex::match_profile`'s doc
-    /// comment): script detection decides ONE stemmer for the WHOLE query, the same granularity
-    /// indexing uses for a whole chunk body. "running" is indexed alone (no Cyrillic in that
-    /// chunk) and stems to English "run". A query repeating the exact same word ALONGSIDE a
-    /// synthetic Cyrillic word picks the Russian stemmer for the ENTIRE query — which has no rule
-    /// for an all-Latin word, so "running" comes out unstemmed and no longer matches what was
-    /// actually indexed. That is not a bug to fix here: it is why a zero from this function must
-    /// never be trusted as proof of absence on a mixed-script query.
+    /// The deeper fact behind the caveat (see `DocIndex::match_profile`'s doc comment): the index
+    /// can store the SAME word under two different analyzed forms depending on each CHUNK's own
+    /// script, because `MultiLangTokenizer` decides the stemmer once per chunk BODY. This chunk's
+    /// text mixes "running" with a synthetic Cyrillic word, so at INDEX time the whole chunk is
+    /// stemmed with the Russian stemmer — which has no rule for an all-Latin word, so "running" is
+    /// stored UNSTEMMED. A plain-English query ("running" alone, no Cyrillic in the query itself)
+    /// still finds it, because `match_profile` tries the Russian-stemmed reading too and takes the
+    /// larger count.
+    ///
+    /// Note the asymmetry this proves, matching the doc comment: `idx.search` finds NOTHING for
+    /// this exact query — its `leaf_tokens` path decides script PER PIECE, and "running" alone has
+    /// no Cyrillic, so it commits to the English stem "run", which this corpus never stored. A
+    /// non-zero `match_profile` count can therefore exceed what any single `search` call actually
+    /// retrieves (a real retrieval gap, tracked as its own defect, not something fixed here) — but
+    /// a ZERO stays fully trustworthy, since it would mean absent under BOTH readings.
     #[test]
-    fn match_profile_mixed_script_is_not_conclusive() {
+    fn match_profile_finds_either_stemmed_form_across_chunk_scripts() {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
-        idx.write_chunks(&[chunk("a.md", "the engine keeps running")])
-            .unwrap();
+        // "\u{0431}\u{043B}\u{0443}" is an arbitrary synthetic Cyrillic word (escaped, not a
+        // literal, so this source file stays out of the repo's Cyrillic leak-scan) — its only job
+        // is to make the WHOLE CHUNK trigger Russian stemming at index time.
+        idx.write_chunks(&[chunk(
+            "mixed.md",
+            "the engine keeps running \u{0431}\u{043B}\u{0443}",
+        )])
+        .unwrap();
 
-        let plain = idx.match_profile("running");
-        assert_eq!(plain.terms.len(), 1);
+        let p = idx.match_profile("running");
+        assert_eq!(p.terms.len(), 1);
         assert_eq!(
-            plain.terms[0].chunk_freq, 1,
-            "a pure-English query finds the word under its English stem"
+            p.terms[0].chunk_freq, 1,
+            "stored unstemmed because its chunk also contains Cyrillic text; match_profile must \
+             find it under either analyzed form"
         );
 
-        // An arbitrary Cyrillic word (not a real corpus value) appended via `\u{...}` escapes
-        // rather than a literal, so this source file stays out of the repo's Cyrillic leak-scan.
-        // Its only job is to trigger script detection (see `multilang::is_cyrillic`).
-        let mixed = idx.match_profile("running \u{0441}\u{0438}\u{043D}\u{0438}\u{0439}");
-        let running = mixed
-            .terms
-            .iter()
-            .find(|t| t.raw == "running")
-            .expect("the raw query term is still reported even when its count misleads");
-        assert_eq!(
-            running.chunk_freq, 0,
-            "mixed-script query: the SAME word now reads as absent — a zero here is NOT proof \
-             the term is missing from the corpus"
+        assert!(
+            idx.search("running", 10).unwrap().is_empty(),
+            "the asymmetry: search commits to one stemmed form per piece and misses it here, \
+             while a non-zero match_profile count is only a ceiling on that, not a promise"
         );
     }
 
