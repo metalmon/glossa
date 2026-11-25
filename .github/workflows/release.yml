@@ -24,33 +24,32 @@ jobs:
     name: fmt + clippy (fail-fast gate)
     runs-on: ubuntu-latest
     steps:
-      # TEMPORARY (asset probe): the cuda13 rows pinned ONNX Runtime versions whose releases carry
-      # no `gpu_cuda13` asset — 1.28.2 and 1.31.1 both 404'd. The releases API is no use here: an
-      # unauthenticated call is rate-limited to 60/h per runner IP, and GITHUB_TOKEN does not grant
-      # cross-repository reads, so both attempts returned HTTP >= 400. The DOWNLOAD urls, however,
-      # need no auth at all — the original failure proved it by returning a clean 404 — so probe
-      # those directly and hash whatever exists. Placed in `lint` because `build` needs it: this
-      # fails, so no row compiles. Delete with the commit that pins the real digests.
-      - name: probe upstream cuda13 assets and hash them, then stop
+      # TEMPORARY (asset discovery): the pinned 1.28.2 404s, and so does EVERY version from 1.28.0
+      # to 1.33.0 for both `onnxruntime-win-x64-gpu_cuda13-<v>.zip` and the linux `.tgz`. Twelve
+      # versions missing the same two names means the NAME is wrong, not the version, so guessing is
+      # over — enumerate. Three access paths, because the two obvious ones already failed from a
+      # runner: the anonymous API is 60 requests/hour on a shared IP, and GITHUB_TOKEN returned
+      # HTTP >= 400 for a cross-repository read. Each attempt prints its status code so the next
+      # person knows which path works. Delete this step with the commit that pins the digests.
+      - name: discover upstream cuda asset names, then stop
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
-          base=https://github.com/microsoft/onnxruntime/releases/download
-          found=""
-          for v in 1.28.0 1.28.1 1.28.2 1.29.0 1.29.1 1.30.0 1.30.1 1.31.0 1.31.1 1.32.0 1.32.1 1.33.0; do
-            w="$base/v$v/onnxruntime-win-x64-gpu_cuda13-$v.zip"
-            l="$base/v$v/onnxruntime-linux-x64-gpu_cuda13-$v.tgz"
-            cw=$(curl -sIL -o /dev/null -w '%{http_code}' "$w" || echo 000)
-            cl=$(curl -sIL -o /dev/null -w '%{http_code}' "$l" || echo 000)
-            echo "PROBE $v win=$cw linux=$cl"
-            if [ "$cw" = "200" ] && [ "$cl" = "200" ]; then found="$v"; fi
+          api="https://api.github.com/repos/microsoft/onnxruntime/releases?per_page=12"
+          a=$(curl -s -o anon.json -w '%{http_code}' -H "Accept: application/vnd.github+json" "$api" || echo 000)
+          echo "DISC anonymous api status: $a"
+          t=$(curl -s -o tok.json -w '%{http_code}' -H "Accept: application/vnd.github+json" -H "Authorization: Bearer $GH_TOKEN" "$api" || echo 000)
+          echo "DISC token api status: $t"
+          if gh api "repos/microsoft/onnxruntime/releases?per_page=12" > gh.json 2> gh.err; then echo "DISC gh api: ok"; else echo "DISC gh api failed:"; sed -n '1,3p' gh.err; fi
+          src=""
+          for f in gh.json tok.json anon.json; do
+            if [ -s "$f" ] && jq -e 'type == "array" and length > 0' "$f" > /dev/null 2>&1; then src="$f"; break; fi
           done
-          if [ -z "$found" ]; then echo "PROBE none of the candidates carry both assets"; exit 1; fi
-          echo "PROBE newest with both: $found"
-          curl -fsSL -o w.zip "$base/v$found/onnxruntime-win-x64-gpu_cuda13-$found.zip"
-          curl -fsSL -o l.tgz "$base/v$found/onnxruntime-linux-x64-gpu_cuda13-$found.tgz"
-          echo "PROBE sha256 win   $found = $(sha256sum w.zip | cut -d" " -f1)"
-          echo "PROBE sha256 linux $found = $(sha256sum l.tgz | cut -d" " -f1)"
-          echo "PROBE-ONLY: pin the values above and delete this step"
+          if [ -z "$src" ]; then echo "DISC every access path failed - the API is unreachable from a runner"; exit 1; fi
+          echo "DISC using $src"
+          jq -r '.[] | "DISC " + .tag_name + " :: " + (([.assets[].name | select(test("cuda|gpu"))] | join(" ")) // "(no cuda/gpu asset)")' "$src"
+          echo "DISC-ONLY: read the real names above, then pin version AND digests in one commit"
           exit 1
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
