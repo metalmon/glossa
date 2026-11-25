@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
 
 use tantivy::schema::Field;
 use tantivy::{Searcher, Term};
@@ -17,19 +16,17 @@ use tantivy::{Searcher, Term};
 /// `Index` is the live path: `df`/`is_rare` answer from tantivy's own term dictionary via
 /// `Searcher::doc_freq`, which is always consistent with whatever the index currently holds —
 /// incrementally maintained, correctly, by tantivy itself, so it never goes stale the way the
-/// once-built sidecar aggregate did. `cache` memoizes per-token lookups (needs `RwLock` since
-/// `df` takes `&self`): the gate's hot loop looks up the same handful of rare tokens repeatedly
-/// scoring claims against chunks, and a term-dictionary lookup per repeat is wasted work. This
-/// cache is never reused across a `Searcher` generation change — `gate::df_cache::cached_df` is
-/// the one place that decides whether to keep reusing a `DfTable` (and its cache) or build a
-/// fresh one (and therefore a fresh, empty cache) because the index moved on.
+/// once-built sidecar aggregate did.
+///
+/// No per-token memo here (an earlier version of this change had one, keyed by token string):
+/// `score`'s answer tokenization and `nli`'s per-claim `mean_filt` are each at most a few hundred
+/// `doc_freq` lookups per `verify` call — microseconds against a memory-mapped term dictionary,
+/// not a cost worth caching. A cache would also be unbounded: the answer text is model-generated,
+/// so a long-lived server would grow a `HashMap<String, u32>` by every distinct token any answer
+/// ever used, with no eviction — a real memory-growth shape for no measured benefit.
 enum Source {
     Map(HashMap<String, u32>),
-    Index {
-        searcher: Searcher,
-        field: Field,
-        cache: RwLock<HashMap<String, u32>>,
-    },
+    Index { searcher: Searcher, field: Field },
 }
 
 /// token → number of corpus chunks containing it, plus the chunk count. See [`Source`] for the
@@ -67,11 +64,7 @@ impl DfTable {
         let n_chunks: u32 = searcher.segment_readers().iter().map(|r| r.max_doc()).sum();
         DfTable {
             n_chunks,
-            source: Source::Index {
-                searcher,
-                field,
-                cache: RwLock::new(HashMap::new()),
-            },
+            source: Source::Index { searcher, field },
         }
     }
 
@@ -92,14 +85,7 @@ impl DfTable {
     pub fn df(&self, token: &str) -> u32 {
         match &self.source {
             Source::Map(map) => map.get(token).copied().unwrap_or(0),
-            Source::Index {
-                searcher,
-                field,
-                cache,
-            } => {
-                if let Some(&d) = cache.read().unwrap().get(token) {
-                    return d;
-                }
+            Source::Index { searcher, field } => {
                 // `doc_freq` reads the term dictionary as written at segment-build time and never
                 // consults the delete bitset, so a chunk deleted (or replaced) since its segment
                 // was built stays counted here until THAT SEGMENT gets merged — and a merge fires
@@ -110,9 +96,7 @@ impl DfTable {
                 // documents for its own `doc_freq` call. Do not read this as "self-healing": no
                 // merge is ever triggered by a deletion by itself.
                 let t = Term::from_field_text(*field, token);
-                let d = searcher.doc_freq(&t).unwrap_or(0) as u32;
-                cache.write().unwrap().insert(token.to_string(), d);
-                d
+                searcher.doc_freq(&t).unwrap_or(0) as u32
             }
         }
     }

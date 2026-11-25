@@ -358,6 +358,18 @@ impl DocIndex {
         self.reader.searcher()
     }
 
+    /// Reopen the freshest committed segments and swap them in — the same primitive
+    /// `write_chunks`/`delete_path` already call on `self.reader` after a LOCAL write, exposed
+    /// here for a caller (`gate::df_cache::cached_df`) holding a long-lived `DocIndex` that needs
+    /// to see commits it did NOT make itself (another process, or an earlier call on this one).
+    /// tantivy's default `ReloadPolicy::OnCommitWithDelay` would eventually pick those up on its
+    /// own via a filesystem watch, but "eventually, with a delay" is not what "live" means here —
+    /// call this to force the point rather than hope the watch already fired.
+    pub fn reload(&self) -> anyhow::Result<()> {
+        self.reader.reload()?;
+        Ok(())
+    }
+
     /// The primary corpus root — the first configured root, or `state_base` if somehow there are
     /// none (defensive; every real `DocIndex` has at least one root). Used by callers that still
     /// walk/anchor a single tree; multi-root-aware iteration is Task 5.
