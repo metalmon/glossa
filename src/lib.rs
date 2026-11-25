@@ -5,6 +5,10 @@ pub mod config_util;
 pub mod conn_cap;
 pub mod convert;
 pub mod default_ignore;
+// Test infrastructure, not product API: it must be `pub` because integration tests link this
+// library as an external crate (so they cannot see `#[cfg(test)]` items) and `kbx` lives in a
+// different crate entirely — three call sites that can only share code through public surface.
+#[doc(hidden)]
 pub mod doc_lint;
 pub mod extract;
 pub mod fs_detect;
