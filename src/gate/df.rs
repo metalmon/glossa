@@ -86,15 +86,20 @@ impl DfTable {
         match &self.source {
             Source::Map(map) => map.get(token).copied().unwrap_or(0),
             Source::Index { searcher, field } => {
-                // `doc_freq` reads the term dictionary as written at segment-build time and never
-                // consults the delete bitset, so a chunk deleted (or replaced) since its segment
-                // was built stays counted here until THAT SEGMENT gets merged — and a merge fires
-                // on segment ACCUMULATION under tantivy's default `LogMergePolicy`
-                // (`min_num_segments`), never on deletion alone (its delete-ratio trigger needs
-                // ratio > 1.0, which is unreachable since the ratio is bounded by 1). So this is an
-                // UPPER BOUND, never too low — the same safe direction `DocIndex::match_profile`
-                // documents for its own `doc_freq` call. Do not read this as "self-healing": no
-                // merge is ever triggered by a deletion by itself.
+                // Measured, not assumed (an earlier version of this comment claimed the opposite
+                // and was wrong — see `deleting_a_segments_only_live_chunk_drops_its_terms_to_zero`
+                // for what actually happens). `InvertedIndexReader::doc_freq` does read the term
+                // dictionary as written at segment-build time, ignoring the delete bitset — true
+                // in isolation — but that is NOT the whole story: a segment whose live-doc count
+                // reaches exactly 0 is dropped from the committed segment list on ITS OWN next
+                // commit (`SegmentManager::remove_empty_segments`, called from `save_metas` on
+                // EVERY commit, not only a merge). So a term's count is not pinned until a merge —
+                // it can drop the moment every segment holding it empties out. What stays stale
+                // until an actual merge rewrites it is narrower: a document deleted from a segment
+                // that still has OTHER live documents, where the segment itself isn't pruned and
+                // its dictionary entry is never adjusted. Either way, a returned 0 is trustworthy
+                // for the presence question — nothing here can manufacture a zero for a term that
+                // is genuinely live in the index; only a positive count can still be stale-high.
                 let t = Term::from_field_text(*field, token);
                 searcher.doc_freq(&t).unwrap_or(0) as u32
             }
@@ -233,16 +238,30 @@ mod tests {
         );
     }
 
-    /// `doc_freq` reads the term dictionary as it was written at segment-build time and never
-    /// consults the delete bitset, so a deleted chunk's terms keep being counted until their
-    /// SEGMENT is merged away — and tantivy's default `LogMergePolicy` only ever merges on segment
-    /// ACCUMULATION (`min_num_segments`), never in response to a deletion by itself (its
-    /// delete-ratio trigger needs ratio > 1.0, which a bounded-by-1 ratio can never reach). So the
-    /// count is an upper bound that can only ever be too HIGH, never too low — deliberately NOT
-    /// "self-healing" or "eventually converges": nothing here triggers the merge that would bring
-    /// it down, which is why this test asserts the count STAYS at 1 rather than drops to 0.
+    /// What deleting a chunk actually does — measured, after an earlier version of this test
+    /// asserted the opposite (expected 1, got 0) on a claimed mechanism ("stays until a merge")
+    /// that turned out to be wrong. Two things ARE true in isolation: `doc_freq` itself never
+    /// consults the delete bitset (`InvertedIndexReader::doc_freq` reads only the term dictionary
+    /// as written at segment-build time), and tantivy's merge policy never merges on a deletion
+    /// alone (its delete-ratio trigger needs ratio > 1.0, which a ratio bounded by 1 can never
+    /// reach). But neither of those is what governs this test: a SEPARATE, unconditional step
+    /// runs on every commit, not only a merge — `SegmentUpdater::save_metas` calls
+    /// `SegmentManager::committed_segment_metas`, which calls `remove_empty_segments` FIRST,
+    /// dropping any committed segment whose `num_docs()` is now exactly 0 before meta.json is
+    /// even written. This chunk is the ONLY document in its (freshly created) segment, so
+    /// deleting it drops that segment's live-doc count to 0, and the delete's OWN commit prunes
+    /// the segment on the spot — no merge, no delay. `doc_freq` then sums over zero segments for
+    /// this term, because the segment holding its (otherwise untouched) postings is no longer
+    /// part of the searchable set at all.
+    ///
+    /// This is deterministic for the case pinned here — a document that is the LAST live
+    /// document in its segment — but NOT a general "every delete zeroes its terms immediately"
+    /// claim: a chunk deleted out of a segment that still has OTHER live documents leaves that
+    /// segment's `num_docs()` > 0, so it is not pruned, and its term dictionary (never touched by
+    /// the delete bitset) keeps reporting whatever it did at build time. That residual-staleness
+    /// case is layout-dependent and is NOT pinned here.
     #[test]
-    fn deleted_chunk_term_keeps_its_count_until_a_merge() {
+    fn deleting_a_segments_only_live_chunk_drops_its_terms_to_zero() {
         let dir = tempfile::tempdir().unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         idx.write_chunks(&[crate::model::Chunk::labelled(
@@ -261,8 +280,10 @@ mod tests {
         let after = DfTable::from_searcher(idx.searcher(), idx.fields.gate_terms);
         assert_eq!(
             after.df("onlyheredeletedterm"),
-            1,
-            "deletion alone never triggers the merge that would bring this back down to 0"
+            0,
+            "the chunk was the only live document in its segment; deleting it drops that \
+             segment's num_docs() to 0, which save_metas prunes from meta.json on this same \
+             commit — no merge needed"
         );
     }
 }
