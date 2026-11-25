@@ -126,8 +126,8 @@ Grounding is **transitive** — on a spine only the grounding node (e.g. `Resolu
 
 ### Terminal-as-sink (a backward-reasoning requirement)
 
-Backward reasoning writes edges *toward* the grounded terminal. `kbx reason` and `kbx distil
---densify` both synthesize `query-side --Chaining--> terminal` edges — a symptom, task, or cause on
+Backward reasoning writes edges *toward* the grounded terminal. `kbx reason` and `kbx distil`
+both synthesize `query-side --Chaining--> terminal` edges — a symptom, task, or cause on
 the `from` side, the grounded answer on the `to` side. So for either pass to produce anything, a
 grounded terminal type (one marked `requires_grounding = true`) must be an eligible **sink** of some
 `Chaining`-role relation: it has to appear on the `to` side of a Chaining relation. (A Chaining
@@ -154,7 +154,7 @@ Chaining relation. See [troubleshooting.md](troubleshooting.md) if `kbx reason` 
 **Six shipped presets are in the fail-loud bucket today.** `access-governance`, `audit`,
 `data-privacy`, `decision-log`, `okr` and `vendor` ground the *subject* of their spine, so their
 grounded type is never a Chaining sink. On a corpus indexed with one of them, `kbx reason` and
-`kbx distil --densify` stop with the terminal-as-sink error — the ontology is the cause, not the
+`kbx distil` stop with the terminal-as-sink error — the ontology is the cause, not the
 invocation. Everything else those presets support (structural indexing, retrieval, agent-authored
 `graph_upsert`, `glossary`, `sql`) works normally; only *backward* reasoning is unavailable. The
 violator set is pinned by a test, so it changes only deliberately.

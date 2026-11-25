@@ -73,7 +73,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     now names today's `kbx build` + `kbx reason`.
   - **Six shipped presets cannot be reasoned.** `access-governance`, `audit`, `data-privacy`,
     `decision-log`, `okr` and `vendor` ground the subject of their spine, so `kbx reason` and
-    `kbx distil --densify` refuse to run on them. The lifecycle walkthrough presented `kbx reason` as
+    `kbx distil` refuse to run on them. The lifecycle walkthrough presented `kbx reason` as
     universal, and nothing told a user following it that the preset, not their command, was the
     cause. Now stated in both docs and in a header comment in each of those six preset files.
   - **Notes in search, stated in full.** `docs/agent-workspace-contract.md` said living under

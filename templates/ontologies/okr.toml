@@ -1,5 +1,5 @@
 # NOTE: this preset grounds the SUBJECT of its spine, so its grounded type is never the `to`
-# side of a Chaining relation. `kbx reason` and `kbx distil --densify` therefore refuse to run
+# side of a Chaining relation. `kbx reason` and `kbx distil` therefore refuse to run
 # on it (terminal-as-sink) — author the reasoning layer with `graph_upsert`/`kb graph import`,
 # or move a grounded type onto the `to` side of a Chaining relation in your own copy.
 # Everything else (indexing, search, glossary, sql, doctor) works normally.

@@ -121,7 +121,7 @@ guessing one.
 
 `access-governance`, `audit`, `data-privacy`, `decision-log`, `okr` and `vendor` ground the
 *subject* of their spine rather than its terminal, so their grounded type never appears on the `to`
-side of a Chaining relation. `kbx reason` and `kbx distil --densify` refuse to run on them, loudly,
+side of a Chaining relation. `kbx reason` and `kbx distil` refuse to run on them, loudly,
 rather than emitting an empty layer. Everything else works: structural indexing, search, `read`,
 agent-authored `graph_upsert`, `glossary`, `sql`, the doctor. Only the batch *backward*-reasoning
 build is unavailable — author the graph directly, or move a grounded type onto the `to` side of a

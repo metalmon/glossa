@@ -74,7 +74,7 @@ kb graph doctor                   # should be clean on a freshly built graph
 
 **Six presets cannot run `kbx reason` at all.** `access-governance`, `audit`, `data-privacy`,
 `decision-log`, `okr` and `vendor` ground the subject of their spine rather than its terminal, so
-backward reasoning has no sink to aim at and both `kbx reason` and `kbx distil --densify` stop with
+backward reasoning has no sink to aim at and both `kbx reason` and `kbx distil` stop with
 a terminal-as-sink error. That is a property of the preset, not of your invocation — if you hit it,
 either author the graph directly (next section) or adapt the ontology so a grounded type sits on
 the `to` side of a Chaining relation. See

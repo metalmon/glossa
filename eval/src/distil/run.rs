@@ -553,7 +553,7 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
     let missing_sinks = ontology.grounded_types_missing_chaining_sink();
     if !ontology.supports_backward_reasoning() {
         anyhow::bail!(
-            "kbx distil --densify: this ontology has no grounded terminal that any Chaining \
+            "kbx distil: this ontology has no grounded terminal that any Chaining \
              relation targets (terminal-as-sink), so densify would synthesize no reasoning edges. \
              Grounded types with no Chaining `to`: [{}]. Fix the ontology so a Chaining relation \
              lists a grounded type on its `to` side.",
@@ -561,7 +561,7 @@ fn run_densify_at(paths: KbxPaths, args: &DistilArgs) -> Result<()> {
         );
     } else if !missing_sinks.is_empty() {
         glossa::cli_fmt::note(&format!(
-            "kbx distil --densify: {} grounded type(s) have no Chaining relation targeting them \
+            "kbx distil: {} grounded type(s) have no Chaining relation targeting them \
              and will get no reasoning edges: [{}]. Only terminal-as-sink types are densified.",
             missing_sinks.len(),
             missing_sinks.join(", ")

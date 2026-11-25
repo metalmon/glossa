@@ -119,7 +119,7 @@ collapsed-output example, and the rename limitation:
 [graph-lifecycle.md § You relabeled the corpus, or moved a document between
 folders](graph-lifecycle.md#you-relabeled-the-corpus-or-moved-a-document-between-folders).
 
-## `kbx reason` (or `kbx distil --densify`) produces 0 nodes / 0 edges
+## `kbx reason` (or `kbx distil`) produces 0 nodes / 0 edges
 
 Backward reasoning writes edges *toward* a grounded terminal — `query-side --Chaining--> terminal` —
 so a grounded terminal type (one marked `requires_grounding = true`) has to be an eligible **sink**
@@ -128,7 +128,7 @@ grounded type sits only on the `from` side of every relation, edge validation re
 pass tries to write and it synthesizes nothing.
 
 Both passes now check this before running instead of silently emitting an empty layer: `kbx reason`
-and `kbx distil --densify` **fail loud** when no grounded terminal is a Chaining sink (the error
+and `kbx distil` **fail loud** when no grounded terminal is a Chaining sink (the error
 names the offending types) and **warn** when only some grounded types qualify. Fix the ontology so a
 Chaining relation lists a grounded type on its `to` side (a relation with an empty or `*` `to`
 accepts any sink). See
