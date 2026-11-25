@@ -45,7 +45,13 @@ use tantivy::{doc, Index, IndexReader, TantivyDocument, TantivyError};
 //    (rtf/odt/odp/ods/docx) instead of being appended last, so every chunk address after a chart
 //    moved. `path#N` is the canonical chunk address (`ord = i + 1`), so a stale index resolves
 //    those addresses to the wrong chunks.
-pub const INDEX_SCHEMA_VERSION: u32 = 8;
+// 9: adds the `gate_terms` field (indexed via the gate's own `gate_term` tokenizer — see
+//    `gate::token::gate_term_analyzer`), which `DfTable` now reads for its frequencies instead of
+//    the `.glossa/df` sidecar (a once-built aggregate that could only grow, never reflect an
+//    incremental edit or removal). An index written before 9 has no such field at all, so
+//    `fields_from_schema`'s `schema.get_field("gate_terms")` would fail outright rather than just
+//    serving stale bytes — this bump routes that into the existing reindex path instead.
+pub const INDEX_SCHEMA_VERSION: u32 = 9;
 
 /// True when `manifest` records a previously-populated index written at an older schema than
 /// `INDEX_SCHEMA_VERSION`. Every read path (search, `location_for_ord`, grep) opens whatever
@@ -69,6 +75,11 @@ pub struct Fields {
     pub location: Field,
     pub file_type: Field,
     pub ord: Field,
+    /// Same chunk text as `body`, analyzed by the gate's OWN tokenizer (`gate::token::tokenize`,
+    /// registered as `"gate_term"`) instead of `multilang` — see that field's doc comment at
+    /// `build_schema` for why the two must stay separate. Indexed only, never stored: the gate
+    /// wants term frequencies, never the text back.
+    pub gate_terms: Field,
 }
 
 pub struct DocIndex {
@@ -109,6 +120,18 @@ fn build_schema() -> Schema {
     sb.add_text_field("location", STORED);
     sb.add_text_field("file_type", STRING | STORED);
     sb.add_u64_field("ord", INDEXED | STORED);
+    // `DfTable`'s vocabulary field (schema 9). The gate's `tokenize` is deliberately NOT
+    // `multilang`: it keeps dotted codes / extensions / protocol strings whole and never stems, so
+    // `pp.19.00.00.00` is one token here and six under `multilang`, and "running" stays "running"
+    // instead of becoming "run". Looking up a gate token against `body` would therefore read 0 for
+    // almost every multi-part code and every inflected word — exactly the failure this field
+    // exists to avoid. Indexed only (no `set_stored`): the gate only ever needs `doc_freq`.
+    let gate_term_opts = TextOptions::default().set_indexing_options(
+        TextFieldIndexing::default()
+            .set_tokenizer("gate_term")
+            .set_index_option(IndexRecordOption::Basic),
+    );
+    sb.add_text_field("gate_terms", gate_term_opts);
     sb.build()
 }
 
@@ -120,6 +143,7 @@ fn fields_from_schema(schema: &Schema) -> anyhow::Result<Fields> {
         location: schema.get_field("location")?,
         file_type: schema.get_field("file_type")?,
         ord: schema.get_field("ord")?,
+        gate_terms: schema.get_field("gate_terms")?,
     })
 }
 
@@ -154,6 +178,9 @@ fn register_tokenizers(index: &Index) {
     index
         .tokenizers()
         .register("multilang", multilang_analyzer(default_detector()));
+    index
+        .tokenizers()
+        .register("gate_term", crate::gate::token::gate_term_analyzer());
     let trigram =
         TextAnalyzer::builder(NgramTokenizer::new(3, 3, false).expect("trigram tokenizer"))
             .filter(LowerCaser)
@@ -323,6 +350,14 @@ impl DocIndex {
         )
     }
 
+    /// The current `Searcher` snapshot (cheap: an `Arc` clone over already-open segment readers,
+    /// same primitive `match_profile` uses internally). `DfTable::from_searcher` is the one
+    /// consumer outside this module — it needs a `Searcher` to answer `doc_freq`, but must not
+    /// reach into `self.reader` directly (private field).
+    pub fn searcher(&self) -> tantivy::Searcher {
+        self.reader.searcher()
+    }
+
     /// The primary corpus root — the first configured root, or `state_base` if somehow there are
     /// none (defensive; every real `DocIndex` has at least one root). Used by callers that still
     /// walk/anchor a single tree; multi-root-aware iteration is Task 5.
@@ -462,6 +497,7 @@ impl DocIndex {
                     self.fields.location => store_location(&c.location),
                     self.fields.file_type => c.file_type.clone(),
                     self.fields.ord => ord,
+                    self.fields.gate_terms => c.text.clone(),
                 ))?;
             }
             writer.commit()?;
@@ -2208,6 +2244,7 @@ pub fn index_file_into(
             idx.fields.location => store_location(&c.location),
             idx.fields.file_type => c.file_type.clone(),
             idx.fields.ord => ord,
+            idx.fields.gate_terms => c.text.clone(),
         ));
         let _ = crate::graph::build::build_section(graph, &c, ord, sig);
         let cur_id = crate::graph::build::section_id(doc_key, &ord.to_string());
@@ -2666,6 +2703,7 @@ pub fn index_dir_at_locked(
                 idx.fields.location => store_location(&Location::Label("note".into())),
                 idx.fields.file_type => "note",
                 idx.fields.ord => 1u64,
+                idx.fields.gate_terms => body.clone(),
             ));
             stats.added += 1;
         }
@@ -3393,6 +3431,7 @@ pub fn reindex_dirs_at_locked(
                 idx.fields.location => store_location(&Location::Label("note".into())),
                 idx.fields.file_type => "note",
                 idx.fields.ord => 1u64,
+                idx.fields.gate_terms => body.clone(),
             ));
             stats.added += 1;
         }
@@ -6008,6 +6047,8 @@ mod search_tests {
              find it under either analyzed form"
         );
 
+        // If this assertion starts failing, the two-forms defect it pins has been fixed —
+        // update this test to match the new (correct) behaviour, do not weaken it back to green.
         assert!(
             idx.search("running", 10).unwrap().is_empty(),
             "the asymmetry: search commits to one stemmed form per piece and misses it here, \

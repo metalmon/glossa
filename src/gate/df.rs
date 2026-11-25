@@ -1,10 +1,42 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 
-/// token → number of corpus chunks containing it, plus the chunk count. Persisted at `.glossa/df`.
+use tantivy::schema::Field;
+use tantivy::{Searcher, Term};
+
+/// Where a `DfTable` gets its numbers from.
+///
+/// `Map` is the legacy in-memory aggregate: built by `add_chunk` during a full/`--force` index
+/// pass (the `.glossa/df` sidecar writer — `index::store`), and by every test in this module and
+/// in `score.rs`/`nli.rs` that wants a table with no real index behind it at all (`DfTable::new`).
+/// `save`/`load` still read and write it; the sidecar itself is deliberately kept
+/// written-but-unread by production code (cheap rollback for one release) rather than removed in
+/// this change.
+///
+/// `Index` is the live path: `df`/`is_rare` answer from tantivy's own term dictionary via
+/// `Searcher::doc_freq`, which is always consistent with whatever the index currently holds —
+/// incrementally maintained, correctly, by tantivy itself, so it never goes stale the way the
+/// once-built sidecar aggregate did. `cache` memoizes per-token lookups (needs `RwLock` since
+/// `df` takes `&self`): the gate's hot loop looks up the same handful of rare tokens repeatedly
+/// scoring claims against chunks, and a term-dictionary lookup per repeat is wasted work. This
+/// cache is never reused across a `Searcher` generation change — `gate::df_cache::cached_df` is
+/// the one place that decides whether to keep reusing a `DfTable` (and its cache) or build a
+/// fresh one (and therefore a fresh, empty cache) because the index moved on.
+enum Source {
+    Map(HashMap<String, u32>),
+    Index {
+        searcher: Searcher,
+        field: Field,
+        cache: RwLock<HashMap<String, u32>>,
+    },
+}
+
+/// token → number of corpus chunks containing it, plus the chunk count. See [`Source`] for the
+/// two ways this answers a lookup.
 pub struct DfTable {
     pub n_chunks: u32,
-    map: HashMap<String, u32>,
+    source: Source,
 }
 
 impl Default for DfTable {
@@ -14,34 +46,92 @@ impl Default for DfTable {
 }
 
 impl DfTable {
+    /// An empty, in-memory table. Used by the sidecar writer (via `add_chunk`) and by every test
+    /// that exercises gate scoring without a real tantivy index behind it.
     pub fn new() -> Self {
         DfTable {
             n_chunks: 0,
-            map: HashMap::new(),
+            source: Source::Map(HashMap::new()),
         }
     }
 
+    /// The live, index-backed table: `df`/`is_rare` read `searcher`'s term dictionary for `field`
+    /// (the gate's own `gate_terms` field — see `index::store::build_schema`).
+    ///
+    /// `n_chunks` is the sum of `max_doc()` over every segment, deliberately NOT
+    /// `Searcher::num_docs()`: `num_docs` counts only ALIVE documents, while `doc_freq` reads the
+    /// term dictionary as written at segment-build time and never consults the delete bitset —
+    /// pairing the two would inflate `df / n_chunks` from both ends as a corpus accumulates edits.
+    /// `max_doc` puts both numbers on the same (upper-bound) basis.
+    pub fn from_searcher(searcher: Searcher, field: Field) -> Self {
+        let n_chunks: u32 = searcher.segment_readers().iter().map(|r| r.max_doc()).sum();
+        DfTable {
+            n_chunks,
+            source: Source::Index {
+                searcher,
+                field,
+                cache: RwLock::new(HashMap::new()),
+            },
+        }
+    }
+
+    /// Only meaningful on the `Map` source (the sidecar writer's full/`--force` pass). A no-op on
+    /// `Index` — nothing calls this on a live table, since tantivy maintains its own postings.
     pub fn add_chunk(&mut self, tokens: &[String]) {
-        self.n_chunks += 1;
-        let mut seen = std::collections::HashSet::new();
-        for tok in tokens {
-            if seen.insert(tok.as_str()) {
-                *self.map.entry(tok.clone()).or_insert(0) += 1;
+        if let Source::Map(map) = &mut self.source {
+            self.n_chunks += 1;
+            let mut seen = std::collections::HashSet::new();
+            for tok in tokens {
+                if seen.insert(tok.as_str()) {
+                    *map.entry(tok.clone()).or_insert(0) += 1;
+                }
             }
         }
     }
 
     pub fn df(&self, token: &str) -> u32 {
-        self.map.get(token).copied().unwrap_or(0)
+        match &self.source {
+            Source::Map(map) => map.get(token).copied().unwrap_or(0),
+            Source::Index {
+                searcher,
+                field,
+                cache,
+            } => {
+                if let Some(&d) = cache.read().unwrap().get(token) {
+                    return d;
+                }
+                // `doc_freq` reads the term dictionary as written at segment-build time and never
+                // consults the delete bitset, so a chunk deleted (or replaced) since its segment
+                // was built stays counted here until THAT SEGMENT gets merged — and a merge fires
+                // on segment ACCUMULATION under tantivy's default `LogMergePolicy`
+                // (`min_num_segments`), never on deletion alone (its delete-ratio trigger needs
+                // ratio > 1.0, which is unreachable since the ratio is bounded by 1). So this is an
+                // UPPER BOUND, never too low — the same safe direction `DocIndex::match_profile`
+                // documents for its own `doc_freq` call. Do not read this as "self-healing": no
+                // merge is ever triggered by a deletion by itself.
+                let t = Term::from_field_text(*field, token);
+                let d = searcher.doc_freq(&t).unwrap_or(0) as u32;
+                cache.write().unwrap().insert(token.to_string(), d);
+                d
+            }
+        }
     }
 
-    /// Number of distinct tokens tracked (vocabulary size) — for progress/status messages.
+    /// Vocabulary size — only meaningful on `Map` (the sidecar writer's progress message reads
+    /// it). `Index` has no cheap equivalent (it would mean walking the whole term dictionary) and
+    /// nothing needs it there, so it reads 0/empty.
     pub fn len(&self) -> usize {
-        self.map.len()
+        match &self.source {
+            Source::Map(map) => map.len(),
+            Source::Index { .. } => 0,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        match &self.source {
+            Source::Map(map) => map.is_empty(),
+            Source::Index { .. } => true,
+        }
     }
 
     pub fn is_rare(&self, token: &str, rare_df_frac: f32) -> bool {
@@ -53,10 +143,18 @@ impl DfTable {
         glossa_dir.join("df")
     }
 
+    /// Only ever called on a `Map`-sourced table (the sidecar writer). An `Index`-sourced table
+    /// has nothing of its own to persist — erroring here is simpler and safer than silently
+    /// writing an empty/misleading sidecar.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let Source::Map(map) = &self.source else {
+            return Err(std::io::Error::other(
+                "DfTable::save: an index-backed table has nothing to persist",
+            ));
+        };
         // line format: "<n_chunks>\n" then "<df>\t<token>\n" per entry
         let mut s = format!("{}\n", self.n_chunks);
-        for (tok, d) in &self.map {
+        for (tok, d) in map {
             s.push_str(&format!("{d}\t{tok}\n"));
         }
         if let Some(dir) = path.parent() {
@@ -80,7 +178,10 @@ impl DfTable {
                 }
             }
         }
-        Ok(DfTable { n_chunks, map })
+        Ok(DfTable {
+            n_chunks,
+            source: Source::Map(map),
+        })
     }
 }
 
@@ -88,6 +189,7 @@ impl DfTable {
 mod tests {
     use super::DfTable;
     use crate::gate::token::tokenize;
+    use crate::index::store::DocIndex;
 
     #[test]
     fn rarity_and_roundtrip() {
@@ -111,5 +213,72 @@ mod tests {
         let back = DfTable::load(&p).unwrap();
         assert_eq!(back.n_chunks, 3);
         assert_eq!(back.df("modbus"), 2);
+    }
+
+    /// THE defect this change fixes, pinned directly: under the old once-built sidecar, a term
+    /// that only ever appears in a document added AFTER the last full/`--force` pass read as
+    /// df == 0 (frequency zero) while genuinely present in the corpus, because an aggregate sum
+    /// has no per-document decrement and incremental passes therefore left it untouched. Reading
+    /// from tantivy's own (incrementally correct) index instead means an incrementally-added
+    /// document's terms are visible immediately, with no `--force` required.
+    #[test]
+    fn incrementally_added_term_is_visible_with_no_force() {
+        let dir = tempfile::tempdir().unwrap();
+        // First pass: brand-new corpus, so this is schema-migrate-equivalent (no manifest yet) —
+        // irrelevant to what's under test, which is the SECOND, genuinely incremental pass below.
+        std::fs::write(dir.path().join("a.md"), "the first document only").unwrap();
+        crate::index::store::index_dir(dir.path(), false).unwrap();
+
+        // Second pass: force = false, and the manifest is already at the current schema, so this
+        // is a real incremental pass — `delta.changed` is just the new file, and the old sidecar
+        // code path (`df = None`) would never have touched `.glossa/df` here.
+        std::fs::write(
+            dir.path().join("b.md"),
+            "a brandnewincrementalterm appears only here",
+        )
+        .unwrap();
+        crate::index::store::index_dir(dir.path(), false).unwrap();
+
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        let df = DfTable::from_searcher(idx.searcher(), idx.fields.gate_terms);
+        assert_eq!(
+            df.df("brandnewincrementalterm"),
+            1,
+            "a term added by an incremental (non-force) pass must be visible immediately, not \
+             read back as the old sidecar's frozen df==0"
+        );
+    }
+
+    /// `doc_freq` reads the term dictionary as it was written at segment-build time and never
+    /// consults the delete bitset, so a deleted chunk's terms keep being counted until their
+    /// SEGMENT is merged away — and tantivy's default `LogMergePolicy` only ever merges on segment
+    /// ACCUMULATION (`min_num_segments`), never in response to a deletion by itself (its
+    /// delete-ratio trigger needs ratio > 1.0, which a bounded-by-1 ratio can never reach). So the
+    /// count is an upper bound that can only ever be too HIGH, never too low — deliberately NOT
+    /// "self-healing" or "eventually converges": nothing here triggers the merge that would bring
+    /// it down, which is why this test asserts the count STAYS at 1 rather than drops to 0.
+    #[test]
+    fn deleted_chunk_term_keeps_its_count_until_a_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx = DocIndex::open_or_create(dir.path()).unwrap();
+        idx.write_chunks(&[crate::model::Chunk::labelled(
+            std::path::PathBuf::from("doomed.md"),
+            "md".into(),
+            String::new(),
+            "a onlyheredeletedterm appears".into(),
+        )])
+        .unwrap();
+
+        let before = DfTable::from_searcher(idx.searcher(), idx.fields.gate_terms);
+        assert_eq!(before.df("onlyheredeletedterm"), 1);
+
+        idx.delete_path("doomed.md").unwrap();
+
+        let after = DfTable::from_searcher(idx.searcher(), idx.fields.gate_terms);
+        assert_eq!(
+            after.df("onlyheredeletedterm"),
+            1,
+            "deletion alone never triggers the merge that would bring this back down to 0"
+        );
     }
 }

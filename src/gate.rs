@@ -476,15 +476,20 @@ mod verify_json_tests {
         .unwrap();
     }
 
-    /// `verify_json` needs a DF sidecar to score at all; without one it errors rather than
-    /// panicking (mirrors the MCP handler's `df sidecar: {e}` failure mode).
+    /// Behaviour change from the sidecar era: `verify_json` used to need a `.glossa/df` sidecar to
+    /// score at all and errored outright without one. `DfTable` now answers from the tantivy index
+    /// instead (`gate::df_cache::cached_df`), and a corpus that has never been `kb index`ed simply
+    /// has no index to read — `cached_df` treats that as an empty table rather than an error (and
+    /// does so without creating one; see `df_cache::cached_df`'s doc comment). So this no longer
+    /// errors: every token in the answer is rare (df==0 on an empty table) and ungrounded, which
+    /// the uncalibrated-fail-closed path turns into an `abstain`, not a `Result::Err`.
     #[test]
-    fn verify_json_errors_without_df_sidecar() {
+    fn verify_json_abstains_without_any_index_yet() {
         let dir = tempfile::tempdir().unwrap();
         write_calibrated_ontology(dir.path());
         let glossa_dir = dir.path().join(".glossa");
-        let out = verify_json(&glossa_dir, "some answer", &[]);
-        assert!(out.is_err(), "no df sidecar written yet");
+        let out = verify_json(&glossa_dir, "some answer", &[]).unwrap();
+        assert_eq!(out["decision"], "abstain");
     }
 
     /// With a DF sidecar present and no chunk_paths, an answer with no rare tokens (per an empty
