@@ -30,9 +30,13 @@ jobs:
       # ask from here, where egress is clean. Placed in `lint` because `build` needs it: this fails,
       # so no row builds. Delete this step with the same commit that pins the real digests.
       - name: enumerate upstream cuda13 assets, then stop
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          curl -fsSL -H "Accept: application/vnd.github+json"             "https://api.github.com/repos/microsoft/onnxruntime/releases?per_page=20" -o rel.json
+          # Authenticated: unauthenticated api.github.com is 60 req/h per IP, shared across every
+          # runner on that address, so a bare curl here reliably gets a 403 (exit 22).
+          curl -fsSL -H "Accept: application/vnd.github+json"             -H "Authorization: Bearer $GH_TOKEN"             "https://api.github.com/repos/microsoft/onnxruntime/releases?per_page=20" -o rel.json
           echo "ENUM tag | draft | pre | gpu_cuda13 assets"
           jq -r '.[] | "ENUM \(.tag_name) | \(.draft) | \(.prerelease) | " + ([.assets[].name | select(contains("gpu_cuda13"))] | join(" "))' rel.json
           echo "ENUM-ONLY: enumeration step, no build should follow"
