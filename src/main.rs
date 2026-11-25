@@ -3260,17 +3260,24 @@ mod cli_root_wiring_tests {
 mod kb_docs_cli_drift_tests {
     use super::*;
     use clap::CommandFactory;
-    use glossa::doc_lint::{extract_claims, find_markdown_files, TokenKind};
+    use glossa::doc_lint::{extract_claims, find_markdown_files, find_violations};
     use std::collections::HashSet;
     use std::path::Path;
 
     /// Recursively collect every long-flag name (including hidden ones and aliases — hidden
     /// doesn't mean nonexistent) and every subcommand name (including aliases), at every depth,
     /// from a clap `Command` tree. This is the truth `kb`'s doc claims are checked against.
-    fn collect_command_tree(cmd: &clap::Command) -> (HashSet<String>, HashSet<String>) {
+    ///
+    /// `cmd.build()` first: an UNBUILT `Command` (what `Cli::command()` returns) doesn't carry
+    /// clap's own auto-generated `--help`/`--version` in `get_arguments()` yet — those are added
+    /// during the build step clap normally runs as part of parsing, which a plain `command()` call
+    /// skips. `build()` is the public, recursive hook documented for exactly this: "introspecting
+    /// on all included Commands" without actually parsing anything.
+    fn collect_command_tree(mut cmd: clap::Command) -> (HashSet<String>, HashSet<String>) {
+        cmd.build();
         let mut flags = HashSet::new();
         let mut subs = HashSet::new();
-        collect_into(cmd, &mut flags, &mut subs);
+        collect_into(&cmd, &mut flags, &mut subs);
         (flags, subs)
     }
 
@@ -3300,9 +3307,25 @@ mod kb_docs_cli_drift_tests {
     const EXEMPT_FLAGS: &[&str] = &[];
     const EXEMPT_SUBCOMMANDS: &[&str] = &[];
 
+    /// Regression guard for the `cmd.build()` call in `collect_command_tree`: without it, clap's
+    /// own auto-generated `--help`/`--version` silently vanish from the collected set, and every
+    /// doc that (correctly) shows `kb --version` or `kb <subcommand> --help` starts failing.
+    #[test]
+    fn collect_command_tree_includes_clap_auto_generated_help_and_version() {
+        let (flags, _subs) = collect_command_tree(Cli::command());
+        assert!(
+            flags.contains("help"),
+            "clap's auto --help must be in the collected set: {flags:?}"
+        );
+        assert!(
+            flags.contains("version"),
+            "clap's auto --version must be in the collected set: {flags:?}"
+        );
+    }
+
     #[test]
     fn docs_do_not_claim_a_kb_flag_or_subcommand_that_does_not_exist() {
-        let (flags, subs) = collect_command_tree(&Cli::command());
+        let (flags, subs) = collect_command_tree(Cli::command());
         assert!(
             flags.len() >= 15,
             "suspiciously few flags extracted from Cli::command(): {}",
@@ -3340,26 +3363,17 @@ mod kb_docs_cli_drift_tests {
         for file in &files {
             let text = std::fs::read_to_string(file)
                 .unwrap_or_else(|e| panic!("reading {}: {e}", file.display()));
-            for claim in extract_claims(&text, "kb") {
-                total_claims += 1;
-                let (known, exempt): (&HashSet<String>, &[&str]) = match claim.kind {
-                    TokenKind::Flag => (&flags, EXEMPT_FLAGS),
-                    TokenKind::Subcommand => (&subs, EXEMPT_SUBCOMMANDS),
-                };
-                if known.contains(&claim.text) || exempt.contains(&claim.text.as_str()) {
-                    continue;
-                }
-                let what = match claim.kind {
-                    TokenKind::Flag => "flag",
-                    TokenKind::Subcommand => "subcommand",
-                };
-                violations.push(format!(
-                    "{}:{}: `kb` has no {what} `{}` — fix the doc, or add the {what} to Cli",
-                    file.display(),
-                    claim.line,
-                    claim.text
-                ));
-            }
+            let claims = extract_claims(&text, "kb");
+            total_claims += claims.len();
+            violations.extend(find_violations(
+                "kb",
+                &file.display().to_string(),
+                &claims,
+                &flags,
+                &subs,
+                EXEMPT_FLAGS,
+                EXEMPT_SUBCOMMANDS,
+            ));
         }
         assert!(
             total_claims >= 20,

@@ -11,6 +11,7 @@
 //! the project's testing norms: a failure here should point at which half broke — file
 //! discovery, line extraction, or token matching — not just "the drift test failed".
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Walk `roots` (directories or single files) collecting every `*.md` file the `ignore` crate's
@@ -144,16 +145,28 @@ fn scan_command_line(line: &str, command_word: &str, line_no: usize, out: &mut V
 }
 
 /// `--flag=value` / `--flag:value` -> `flag`; trims trailing punctuation a sentence may have run
-/// into the span (e.g. a closing paren). `None` if nothing alphanumeric is left.
+/// into the span (e.g. a closing paren). `None` if nothing alphanumeric is left, or if what's left
+/// is a placeholder standing in for a FAMILY of flags rather than naming one real flag — a doc
+/// legitimately writes `--prune-*` (trailing elided suffix) or `--prune-<bucket>` (an embedded
+/// `<...>` slot) to mean "any of these", and neither is a claim that `--prune-` or `--prune-<bucket`
+/// itself exists.
 fn flag_name(flag: &str) -> Option<String> {
     let name = flag.split(['=', ':']).next().unwrap_or(flag);
     let name = name.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
-    (!name.is_empty()).then(|| name.to_string())
+    if name.is_empty() || name.ends_with('-') || name.contains(['<', '>']) {
+        return None;
+    }
+    Some(name.to_string())
 }
 
 /// A plain lowercase CLI-identifier shape (`graph-doctor`, `service`, `status`) — excludes
-/// placeholders (`<path>`), quoted values (`"pattern"`), and paths, which never match this.
+/// placeholders (`<path>`), quoted values (`"pattern"`), paths, and an elided-suffix family
+/// placeholder (`graph-*` after flag-style punctuation is stripped leaves a trailing `-`), none of
+/// which are a claim that a subcommand by that exact name exists.
 fn is_bare_identifier(tok: &str) -> bool {
+    if tok.ends_with('-') {
+        return false;
+    }
     let mut chars = tok.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
@@ -201,6 +214,42 @@ fn table_row_first_backtick_identifier(row: &str) -> Option<String> {
         return None;
     }
     is_bare_identifier(cell).then(|| cell.to_string())
+}
+
+/// Check `claims` against the real `known_flags`/`known_subcommands` sets (plus a small per-call
+/// exemption list for tokens the context rule can't tell apart from a real claim), returning one
+/// human-readable, `file_label:line`-prefixed violation per claim that matches neither. This is
+/// the one place that turns "a claim" into "a verdict" — kept separate from extraction so it has
+/// its own test (below) that doesn't need a real `clap::Command`: a fixture string with one bogus
+/// flag and one real one is enough to prove the whole mechanism still has teeth.
+pub fn find_violations(
+    command_word: &str,
+    file_label: &str,
+    claims: &[ClaimedToken],
+    known_flags: &HashSet<String>,
+    known_subcommands: &HashSet<String>,
+    exempt_flags: &[&str],
+    exempt_subcommands: &[&str],
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for claim in claims {
+        let (known, exempt): (&HashSet<String>, &[&str]) = match claim.kind {
+            TokenKind::Flag => (known_flags, exempt_flags),
+            TokenKind::Subcommand => (known_subcommands, exempt_subcommands),
+        };
+        if known.contains(&claim.text) || exempt.contains(&claim.text.as_str()) {
+            continue;
+        }
+        let what = match claim.kind {
+            TokenKind::Flag => "flag",
+            TokenKind::Subcommand => "subcommand",
+        };
+        violations.push(format!(
+            "{file_label}:{}: `{command_word}` has no {what} `{}` — fix the doc, or add the {what} to Cli",
+            claim.line, claim.text
+        ));
+    }
+    violations
 }
 
 #[cfg(test)]
@@ -380,5 +429,78 @@ Inline: `kb read --help`.
         let missing = dir.path().join("does-not-exist");
         let found = find_markdown_files(&[dir.path(), missing.as_path()]);
         assert!(found.is_empty());
+    }
+
+    /// `--prune-*` is a doc's shorthand for "any flag in this family", not a claim that a flag
+    /// literally named `prune-` exists (found for real: docs/graph-lifecycle.md and
+    /// docs/troubleshooting.md both write `kb graph doctor --prune-*`).
+    #[test]
+    fn scan_command_line_does_not_claim_an_elided_suffix_placeholder_flag() {
+        let mut out = Vec::new();
+        scan_command_line("kb graph doctor --prune-*", "kb", 1, &mut out);
+        let flags: Vec<_> = out.iter().filter(|c| c.kind == TokenKind::Flag).collect();
+        assert!(
+            flags.is_empty(),
+            "--prune-* must not be claimed as a flag: {out:?}"
+        );
+    }
+
+    /// `--prune-<bucket>` is a doc's placeholder for "whichever bucket flag", not a claim that a
+    /// flag literally named `prune-<bucket` exists (found for real: docs/mcp.md's
+    /// `kb graph doctor <path> --prune-<bucket> --force`).
+    #[test]
+    fn scan_command_line_does_not_claim_a_bracketed_placeholder_flag() {
+        let mut out = Vec::new();
+        scan_command_line(
+            "kb graph doctor --prune-<bucket> --force",
+            "kb",
+            1,
+            &mut out,
+        );
+        let flags: Vec<_> = out
+            .iter()
+            .filter(|c| c.kind == TokenKind::Flag)
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(
+            flags,
+            vec!["force"],
+            "only the real flag should be claimed: {flags:?}"
+        );
+    }
+
+    /// Negative control: proves the check mechanism can actually fail, not just pass by
+    /// construction. Without this, a silently-broken extractor (matching nothing) would still
+    /// report zero violations forever, and only the floor assertions in the binaries' own tests
+    /// would ever catch that — this test pins the matching half on its own, no `clap::Command`
+    /// needed.
+    #[test]
+    fn find_violations_flags_an_unknown_flag_but_not_a_real_one() {
+        // Wrapped in backticks like a real doc span — `extract_claims` only looks inside fenced
+        // blocks and inline code spans, so a bare unmarked string would never reach the scanner.
+        let claims = extract_claims(
+            "`kb search --definitely-not-a-real-flag --ignore-case`",
+            "kb",
+        );
+        let known_flags: HashSet<String> = ["ignore-case".to_string()].into_iter().collect();
+        let known_subs: HashSet<String> = ["search".to_string()].into_iter().collect();
+        let violations = find_violations(
+            "kb",
+            "fixture.md",
+            &claims,
+            &known_flags,
+            &known_subs,
+            &[],
+            &[],
+        );
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(
+            violations[0].contains("definitely-not-a-real-flag"),
+            "{violations:?}"
+        );
+        assert!(
+            !violations.iter().any(|v| v.contains("ignore-case")),
+            "a real flag must not be reported as a violation: {violations:?}"
+        );
     }
 }
