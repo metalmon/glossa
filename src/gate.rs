@@ -492,7 +492,7 @@ mod verify_json_tests {
         assert_eq!(out["decision"], "abstain");
     }
 
-    /// With a DF sidecar present and no chunk_paths, an answer with no rare tokens (per an empty
+    /// On a never-indexed corpus with no chunk_paths, an answer with no rare tokens (per an empty
     /// DF table every token counts as rare — df==0) still yields a well-formed diagnostic JSON
     /// with the expected keys, uncalibrated-fail-closed decision aside.
     #[test]
@@ -500,9 +500,6 @@ mod verify_json_tests {
         let dir = tempfile::tempdir().unwrap();
         write_calibrated_ontology(dir.path());
         let glossa_dir = dir.path().join(".glossa");
-        df::DfTable::new()
-            .save(&df::DfTable::sidecar_path(&glossa_dir))
-            .unwrap();
         let out = verify_json(&glossa_dir, "", &[]).unwrap();
         for key in [
             "decision",

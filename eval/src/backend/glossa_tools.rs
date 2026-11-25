@@ -866,16 +866,10 @@ mod tests {
     }
 
     /// Gate off (no `[verify]` enabled / no thresholds) → the arm returns the uncalibrated
-    /// signal even when a DF sidecar is present, mirroring the live server's withholding.
+    /// signal, mirroring the live server's withholding.
     #[test]
     fn verify_arm_uncalibrated_when_gate_off() {
         let dir = tempfile::tempdir().unwrap();
-        let glossa = dir.path().join(".glossa");
-        std::fs::create_dir_all(&glossa).unwrap();
-        // minimal df sidecar so verify_outcome wouldn't error if it were reached
-        glossa::gate::df::DfTable::new()
-            .save(&glossa::gate::df::DfTable::sidecar_path(&glossa))
-            .unwrap();
         let idx = DocIndex::open_or_create(dir.path()).unwrap();
         let trace = TraceLog::disabled();
         let out = exec(

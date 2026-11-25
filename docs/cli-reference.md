@@ -84,7 +84,7 @@ kb index [path] [flags]
 
 | Flag | Meaning |
 |------|---------|
-| `--force` | Full rebuild from scratch. This and a schema migration are the only passes that (re)build the answer-grounding DF sidecar (`.glossa/df`) — run after large corpus changes to keep rarity counts accurate. |
+| `--force` | Full rebuild from scratch (re-extracts and re-indexes every document). Not needed to keep the answer-grounding gate's rarity counts current — those read live off the index on every pass, incremental included. |
 | `--file <REL>` | Reindex just that one document (picks up an in-place edit) |
 | `--ontology <NAME>` | Materialize a baked ontology preset before indexing (see `kb ontology list`) |
 

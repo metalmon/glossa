@@ -47,8 +47,9 @@ use tantivy::{doc, Index, IndexReader, TantivyDocument, TantivyError};
 //    those addresses to the wrong chunks.
 // 9: adds the `gate_terms` field (indexed via the gate's own `gate_term` tokenizer — see
 //    `gate::token::gate_term_analyzer`), which `DfTable` now reads for its frequencies instead of
-//    the `.glossa/df` sidecar (a once-built aggregate that could only grow, never reflect an
-//    incremental edit or removal). An index written before 9 has no such field at all, so
+//    the old `.glossa/df` sidecar (a once-built aggregate that could only grow, never reflect an
+//    incremental edit or removal; the sidecar writer has since been removed entirely). An index
+//    written before 9 has no such field at all, so
 //    `fields_from_schema`'s `schema.get_field("gate_terms")` would fail outright rather than just
 //    serving stale bytes — this bump routes that into the existing reindex path instead.
 pub const INDEX_SCHEMA_VERSION: u32 = 9;
@@ -740,15 +741,16 @@ impl DocIndex {
     /// which terms exist and how rare each is; it changes no ranking and filters nothing.
     ///
     /// Frequency comes from the live tantivy term dictionary (`searcher.doc_freq`), the same
-    /// instrument `graph::node_index::NodeIndex::doc_freq` uses, and for the same reason: the
-    /// `.glossa/df` sidecar (`gate::df::DfTable`) is rebuilt only on `kb index --force` or a schema
-    /// migration, and an incremental pass never decrements it, so on an incrementally-updated
-    /// corpus it can describe an older corpus — a term added since the last full pass would read
-    /// as frequency zero while actually being indexed, AND it inflates monotonically over uptime
-    /// with no self-correction short of a full rebuild. A displayed number must not be able to lie
-    /// like that, so this never touches the sidecar. `doc_freq` has a narrower version of the same
-    /// shape of error (see the comment at the call site below), but it only ever reads too HIGH,
-    /// never too low, which the sidecar's zero-while-present failure can do.
+    /// instrument `graph::node_index::NodeIndex::doc_freq` uses, and for the same reason: the old
+    /// `.glossa/df` sidecar (`gate::df::DfTable`, removed — see its module doc) was rebuilt only on
+    /// `kb index --force` or a schema migration, and an incremental pass never decremented it, so
+    /// on an incrementally-updated corpus it could describe an older corpus — a term added since
+    /// the last full pass would read as frequency zero while actually being indexed, AND it
+    /// inflated monotonically over uptime with no self-correction short of a full rebuild. A
+    /// displayed number must not be able to lie like that, which is why this (and `DfTable` itself)
+    /// reads the live index instead. `doc_freq` has a narrower version of the same shape of error
+    /// (see the comment at the call site below), but it only ever reads too HIGH, never too low,
+    /// which the old sidecar's zero-while-present failure could do.
     ///
     /// Every word in `query` is split the SAME way indexing splits it (mirrored from
     /// `multilang::TermAnalyzer::terms`, pinned equal to the real index tokenizer by
@@ -2195,13 +2197,6 @@ pub fn index_file_into(
     doc_key: &str,
     abs_path: &Path,
     links: &mut Vec<(String, String)>,
-    // `Some` ONLY on a full-coverage rebuild — `--force` or a schema migration — which accumulates
-    // the grounding DF table over EVERY document. Incremental/single-file/scoped passes pass `None`:
-    // a DfTable has no per-source decrement, so merging just the changed docs into the existing
-    // sidecar would double-count modified files and never subtract removed ones, inflating
-    // df/n_chunks over a long-lived server's uptime. The sidecar is therefore refreshed only by
-    // those two passes.
-    mut df: Option<&mut crate::gate::df::DfTable>,
 ) -> anyhow::Result<Option<FileSig>> {
     // A stat error propagates (rather than being swallowed to `Ok(None)`): the caller's
     // `with_read_retry` + `is_transient` classify it (Tasks 5/6), and a genuine delete surfaces as
@@ -2242,12 +2237,6 @@ pub fn index_file_into(
         // from resolve_section_ref/neighbors always matches. A heading-less chunk
         // simply has an empty location — display-only, and RankedHit::display_line
         // omits the label segment when it's empty.
-        // DF accumulation (full-rebuild only — see the `df` param doc) reuses the same chunk body
-        // text being written to the tantivy `body` field below — one tokenize pass per chunk, no
-        // separate corpus walk (rides the existing per-chunk indexing loop's progress).
-        if let Some(df) = df.as_deref_mut() {
-            df.add_chunk(&crate::gate::token::tokenize(&c.text));
-        }
         // The graph's per-file `seen` key is still the RENDERED location: `nearest_ancestor`
         // derives a parent by splitting it on `LOCATION_SEP`, which phase 2 replaces with the
         // segments themselves. The index stores the structure instead; the two are separate now,
@@ -2514,24 +2503,6 @@ pub fn index_dir_at_locked(
     if force || schema_migrate {
         graph.delete_auto()?;
     }
-    let df_path = crate::gate::df::DfTable::sidecar_path(&state_base.join(".glossa"));
-    // The grounding DF sidecar is (re)built on a full-coverage pass, which re-extracts EVERY
-    // document (delta.changed = all files, since the manifest was reset above) so the table
-    // accumulates over the whole corpus. That is `--force` AND a schema migration: the migration
-    // branch above clears `manifest.files`/`notes` and drops the index directory, so its coverage is
-    // identical to force's — and it is the pass that exists precisely because stored bodies changed.
-    // Without it a migration rewrote every chunk body while leaving df/n_chunks describing the OLD
-    // corpus, which is the stale-prior bug a bump is supposed to prevent.
-    // Incremental passes leave `df = None` and never touch the sidecar: DfTable has no per-source
-    // decrement, so merging only the changed docs would double-count edits and never subtract
-    // removals, inflating df/n_chunks over uptime. A stale sidecar is corrected by
-    // `kb index --force` (see the note in that command's help).
-    let mut df = if force || schema_migrate {
-        Some(crate::gate::df::DfTable::new())
-    } else {
-        None
-    };
-
     // The delta drives everything below in a single tree walk (over ALL roots): the hot-path gate
     // skips all work when nothing changed, the walk-free indexing loop re-extracts just
     // `delta.changed`, and the notes pass reuses the same `notes_changed`/`notes_removed`. Under
@@ -2600,15 +2571,7 @@ pub fn index_dir_at_locked(
         };
         eprintln!("  + {doc_key_str}");
         let res = with_read_retry(retries, backoff, || {
-            index_file_into(
-                &idx,
-                &graph,
-                &writer,
-                doc_key_str,
-                abs,
-                &mut links,
-                df.as_mut(),
-            )
+            index_file_into(&idx, &graph, &writer, doc_key_str, abs, &mut links)
         });
         match res {
             Ok(_) => {
@@ -2755,19 +2718,6 @@ pub fn index_dir_at_locked(
         &mut unsettled,
     );
     write_dirsig(state_base, &settled_dirsig(&cur, &stored, &unsettled));
-    // Sidecar serialization is a distinct, potentially slow phase on a large vocabulary — flag it
-    // explicitly rather than let it pass silently inside the (already-finished) index loop above.
-    // Only a full-coverage pass produced a DF table (`Some`) — `--force` or a schema migration;
-    // incremental passes leave the existing sidecar untouched (see the `df` binding above).
-    if let Some(df) = &df {
-        eprintln!(
-            "writing DF sidecar: {} tokens over {} chunks...",
-            df.len(),
-            df.n_chunks
-        );
-        df.save(&df_path)?;
-        eprintln!("DF sidecar written ({} tokens)", df.len());
-    }
     stats.empty_mount_holds = delta.empty_mount_roots.len();
     Ok(stats)
 }
@@ -2803,9 +2753,7 @@ pub fn index_one_file_locked_at(
     let abs = idx.doc_file(rel);
     let mut writer = with_writer_retry(|| idx.index.writer(50_000_000))?;
     let mut links: Vec<(String, String)> = Vec::new();
-    // Single-file reindex is an incremental path: it does NOT touch the grounding DF sidecar (no
-    // per-source decrement — see index_file_into's `df` param). Only `kb index --force` rebuilds it.
-    let sig = match index_file_into(&idx, &graph, &writer, rel, &abs, &mut links, None)? {
+    let sig = match index_file_into(&idx, &graph, &writer, rel, &abs, &mut links)? {
         Some(s) => s,
         None => return Ok(None),
     };
@@ -3370,9 +3318,7 @@ pub fn reindex_dirs_at_locked(
         // Skip (don't abort the freshen on) a single corrupt/unreadable file — mirrors the
         // resilience of the `kb index` walk.
         let res = with_read_retry(max_retries, backoff, || {
-            // Freshen never touches the DF sidecar (df: None) — only a full-coverage pass
-            // (`kb index --force`, or a schema migration) rebuilds it.
-            index_file_into(&idx, &graph, &writer, doc_key_str, abs, &mut links, None)
+            index_file_into(&idx, &graph, &writer, doc_key_str, abs, &mut links)
         });
         match res {
             Ok(_) => {
@@ -4973,7 +4919,7 @@ mod incremental_tests {
         let abs = idx.doc_file("a.md");
         read_fault::arm_read(&abs, 1, std::io::ErrorKind::TimedOut, None);
         let mut links: Vec<(String, String)> = Vec::new();
-        let result = index_file_into(&idx, &graph, &writer, "a.md", &abs, &mut links, None);
+        let result = index_file_into(&idx, &graph, &writer, "a.md", &abs, &mut links);
         assert!(
             result.is_err(),
             "a read failure must surface as Err, not a silent None"
@@ -5031,7 +4977,7 @@ mod incremental_tests {
         let mut writer = with_writer_retry(|| idx.index.writer(50_000_000)).unwrap();
         let mut links: Vec<(String, String)> = Vec::new();
         let abs = idx.doc_file("docs/x.md");
-        index_file_into(&idx, &graph, &writer, "docs/x.md", &abs, &mut links, None).unwrap();
+        index_file_into(&idx, &graph, &writer, "docs/x.md", &abs, &mut links).unwrap();
         with_writer_retry(|| writer.commit()).unwrap();
 
         let idx2 = DocIndex::open_or_create_at(&roots, state.path()).unwrap();
@@ -6942,12 +6888,14 @@ mod tests {
         assert!(idx.index.schema().get_field("body_trigrams").is_ok());
         let hits = idx.search("hello", 5).unwrap();
         assert!(!hits.is_empty());
-        // A migration re-extracts every document, so the grounding DF sidecar it leaves behind must
-        // describe the NEW bodies. It used to be built only under `--force`, which left the gate's
-        // rarity priors describing the pre-migration corpus forever.
-        assert!(
-            crate::gate::df::DfTable::sidecar_path(&dir.path().join(".glossa")).exists(),
-            "a schema migration must rebuild the DF sidecar, not just the index"
+        // A migration re-extracts every document into the (also-recreated) `gate_terms` field, so
+        // the live, index-backed df table must already see the new body's terms — no sidecar
+        // rebuild step to get wrong.
+        let df = crate::gate::df_cache::cached_df(&dir.path().join(".glossa")).unwrap();
+        assert_eq!(
+            df.df("hello"),
+            1,
+            "a schema migration must leave the gate's live df table describing the NEW bodies"
         );
     }
 

@@ -181,11 +181,14 @@ mod tests {
 
     #[test]
     fn no_rare_token_claims_yields_none() {
-        // All claim tokens are common (high df on every chunk) ⇒ zero survivors ⇒ None.
-        let mut df = crate::gate::df::DfTable::new();
-        for _ in 0..100 {
-            df.add_chunk(&["the".to_string(), "and".to_string(), "for".to_string()]);
-        }
+        // All claim tokens are common (high df on every chunk) ⇒ zero survivors ⇒ None. Real,
+        // throwaway one-chunk corpus so "the"/"and"/"for" have a real (non-rare) df instead of a
+        // hand-rolled map — the tempdir guard must outlive `df`, which holds a Searcher over it.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "the and for").unwrap();
+        crate::index::store::index_dir(dir.path(), false).unwrap();
+        let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
+        let df = crate::gate::df::DfTable::from_searcher(idx.searcher(), idx.fields.gate_terms);
         let cfg = test_cfg();
         let scorer = SeqMock::new(vec![vec![0.9]]);
         assert_eq!(

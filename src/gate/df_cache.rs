@@ -4,8 +4,9 @@
 //! state_base), so the map holds a single entry; it is keyed defensively.
 //!
 //! This used to cache the PARSED `.glossa/df` SIDECAR, invalidated by that file's (mtime, len).
-//! The sidecar is a once-built aggregate that can only grow (see `gate::df::DfTable`'s doc
-//! comment), so it is no longer read here; `df`/`is_rare` now answer from the index itself.
+//! The sidecar was a once-built aggregate that could only grow, so it has since been removed
+//! outright (writer and reader both — see `gate::df::DfTable`'s doc comment); `df`/`is_rare`
+//! answer from the index itself instead.
 //!
 //! It also, briefly, cached the resulting `DfTable` itself, keyed by `Searcher::generation_id()`.
 //! That was wrong and has been removed: `generation_id` is not derived from index state — it

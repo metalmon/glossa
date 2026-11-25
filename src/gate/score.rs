@@ -166,18 +166,28 @@ pub fn decide_modes(
 #[cfg(test)]
 mod tests {
     use super::{score, Bucket, GateScore};
-    use crate::gate::{df::DfTable, token::tokenize};
-    fn df_of(pages: &[&str]) -> DfTable {
-        let mut t = DfTable::new();
-        for p in pages {
-            t.add_chunk(&tokenize(p));
+    use crate::gate::df::DfTable;
+
+    /// Builds a real, throwaway corpus (one file per page) and indexes it for real, so `df`
+    /// reads the gate's live `gate_terms` field — the same source production uses, not a
+    /// hand-rolled aggregate. Returns the `TempDir` guard alongside the table: `DfTable`'s
+    /// `Index` source holds a `Searcher` over files under that directory, so the guard must stay
+    /// bound in the caller for as long as `df` is used (dropping it mid-test is undefined on at
+    /// least one platform's file semantics).
+    fn df_of(pages: &[&str]) -> (tempfile::TempDir, DfTable) {
+        let dir = tempfile::tempdir().unwrap();
+        for (i, p) in pages.iter().enumerate() {
+            std::fs::write(dir.path().join(format!("p{i}.md")), p).unwrap();
         }
-        t
+        crate::index::store::index_dir(dir.path(), false).unwrap();
+        let idx = crate::index::store::DocIndex::open_or_create(dir.path()).unwrap();
+        let df = DfTable::from_searcher(idx.searcher(), idx.fields.gate_terms);
+        (dir, df)
     }
     #[test]
     fn grounded_specifics_score_high_invented_low() {
         // corpus: the code appears on 1 of 4 pages ⇒ rare
-        let df = df_of(&[
+        let (_guard, df) = df_of(&[
             "pp.19.00.00.00 license",
             "general text",
             "more text",
@@ -204,7 +214,7 @@ mod tests {
     }
     #[test]
     fn no_rare_tokens_scores_one() {
-        let df = df_of(&["just a plain answer without codes", "another text"]);
+        let (_guard, df) = df_of(&["just a plain answer without codes", "another text"]);
         let s = score(
             "just a plain answer without codes",
             &["any chunk".to_string()],
@@ -223,11 +233,7 @@ mod tests {
     #[test]
     fn decide_guards_and_thresholds() {
         use super::{decide, score, Decision};
-        use crate::gate::{
-            config::{VerifyConfig, VerifyMode},
-            df::DfTable,
-            token::tokenize,
-        };
+        use crate::gate::config::{VerifyConfig, VerifyMode};
         let cfg = VerifyConfig {
             enabled: true,
             rare_df_frac: 0.5,
@@ -252,15 +258,13 @@ mod tests {
             timeout_ms: 5000,
             api_key: None,
         };
-        let mut df = DfTable::new();
-        df.add_chunk(&tokenize("pp.19.00.00.00 text"));
+        let (_guard, df) = df_of(&["pp.19.00.00.00 text"]);
         let answer = "needs a pp.19.00.00.00 license plus ten more english words to pass the guard threshold";
         // cited chunk echoes the answer's own words, so every rare token is grounded
         let s = score(answer, &[answer.to_string()], &df, 0.5);
         // long-enough, single chunk, grounding 1.0 > 0.8 ⇒ serve
         assert_eq!(decide(s, &cfg, 20).decision, Decision::Serve);
-        let mut df2 = DfTable::new();
-        df2.add_chunk(&tokenize("nothing here"));
+        let (_guard2, df2) = df_of(&["nothing here"]);
         let s2 = score("invented code zzz.999", &["nothing here".into()], &df2, 0.5);
         assert_eq!(decide(s2, &cfg, 20).decision, Decision::Abstain); // ungrounded ⇒ below 0.8
         let s3 = score("short", &["x".into()], &df2, 0.5);

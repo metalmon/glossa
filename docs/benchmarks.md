@@ -95,9 +95,11 @@ makes the numbers readable; their names are not.
   corpora now end with a tiny file under `zz-tail-sentinel/` that sorts after every other path, so
   the ladder's largest file gets a real duration.
 - **Tail is everything after the last file started**: that file's own work plus the finalize —
-  cross-document link resolution, the tantivy commit, the manifest, the DF sidecar. `(df N)` in the
-  cell is the DF sidecar write, which `kb index` brackets with its own stderr lines. Read the tail
-  against **Chunks**, never against the last file's size.
+  cross-document link resolution, the tantivy commit, the manifest. Older rows below also show a
+  `(df N)` component: the DF sidecar write, which `kb index` used to bracket with its own stderr
+  lines. That sidecar (and the bracket) is gone — the gate reads rarity live off the index now — so
+  a row taken after that change has no `df` phase to report; `(commit N, links N)` is all there is.
+  Read the tail against **Chunks**, never against the last file's size.
 - **read p50/p95 are CLI invocations**, so each carries process startup. They are a floor for the
   serving path, not a measurement of in-process MCP reads.
 - **No network mount has been measured.** Every row here is local disk, and the extraction design's

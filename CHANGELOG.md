@@ -138,6 +138,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The `.glossa/df` sidecar is no longer written; `kb index --force`/a schema migration no
+  longer prints its `writing DF sidecar: … tokens over … chunks...` / `DF sidecar written (…
+  tokens)` lines.** The answer-grounding gate already reads its rarity counts live off the index
+  (the `gate_terms` field, shipped earlier this cycle) rather than that once-built, incrementally-
+  stale aggregate; eval's three remaining direct readers (`kbx eval calibrate`, `kbx bench extract`)
+  now go through the same live path too, so a calibration and production score the same thing.
+  Existing `.glossa/df` files on disk are harmless leftovers and may be deleted — nothing reads
+  them anymore.
+
 - **A fuzzy (morphological) endpoint resolution is now reported.** An upsert that could not match
   an endpoint label exactly, and rebound it to the closest morphological neighbour, lists each
   rebinding under `Resolved by MORPHOLOGY, not an exact label — VERIFY each is the node you meant`
