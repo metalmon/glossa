@@ -710,11 +710,17 @@ pub struct IndexFigures {
 /// `cached_df`'s own "empty table" tolerance (meant for a live gate call that should still be able
 /// to abstain) would otherwise collapse that distinction here.
 pub fn index_figures(state_base: &Path, df_tokens: &[String]) -> Result<IndexFigures> {
-    let chunks = glossa::index::store::DocIndex::open_or_create(state_base)
-        .ok()
+    // Read-only, and the ordering matters: `open_or_create` CREATES the index when none exists, so
+    // calling it before the existence check both defeated that check (every figure then read as a
+    // real zero from a freshly-made empty index) and wrote into the directory it was only meant to
+    // measure. Decide once, up front, and never create.
+    let indexed = glossa::index::store::DocIndex::exists(state_base);
+    let chunks = indexed
+        .then(|| glossa::index::store::DocIndex::open_or_create(state_base).ok())
+        .flatten()
         .and_then(|idx| idx.index.reader().ok().map(|r| r.searcher().num_docs()));
 
-    let (df_n_chunks, df_ratio_sample) = if glossa::index::store::DocIndex::exists(state_base) {
+    let (df_n_chunks, df_ratio_sample) = if indexed {
         let glossa_dir = state_base.join(".glossa");
         let t = glossa::gate::df_cache::cached_df(&glossa_dir)?;
         let n = t.n_chunks;
