@@ -85,6 +85,7 @@ fn xlsx_chart_part_names(bytes: &[u8]) -> Vec<String> {
         return Vec::new();
     };
     zip.file_names()
+        .filter_map(Result::ok)
         .filter(|n| n.starts_with("xl/charts/chart") && n.ends_with(".xml"))
         .map(|s| s.to_string())
         .collect()
@@ -779,6 +780,7 @@ mod tests {
         .unwrap();
         let names: Vec<String> = zr
             .file_names()
+            .filter_map(Result::ok)
             .filter(|n| !n.ends_with('/'))
             .map(|s| s.to_string())
             .collect();
@@ -926,6 +928,7 @@ mod tests {
         let mut zr = zip::ZipArchive::new(Cursor::new(package.to_vec())).unwrap();
         let names: Vec<String> = zr
             .file_names()
+            .filter_map(Result::ok)
             .filter(|n| !n.ends_with('/'))
             .map(|s| s.to_string())
             .collect();
@@ -1556,6 +1559,7 @@ mod tests {
         .unwrap();
         let names: Vec<String> = zr
             .file_names()
+            .filter_map(Result::ok)
             .filter(|n| !n.ends_with('/'))
             .map(|s| s.to_string())
             .collect();

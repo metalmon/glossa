@@ -231,6 +231,7 @@ pub(crate) fn extract_charts_with_coverage(
     // early-out: only pay for charts if any exist
     let parts: Vec<String> = zip
         .file_names()
+        .filter_map(Result::ok)
         .filter(|n| {
             let n = n.to_ascii_lowercase();
             n.contains("/charts/chart")

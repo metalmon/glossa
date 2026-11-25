@@ -319,6 +319,7 @@ fn extract_zip_media(path: &Path, max: usize) -> anyhow::Result<Vec<DocImage>> {
     };
     let media_names: Vec<String> = archive
         .file_names()
+        .filter_map(Result::ok)
         .filter(|n| {
             n.starts_with("word/media/")
                 || n.starts_with("xl/media/")

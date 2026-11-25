@@ -39,7 +39,7 @@ ureq = { version = "2", default-features = false, features = ["tls"], optional =
 rust-stemmers = "1.2"
 rusqlite = { version = "0.40", features = ["bundled", "hooks", "functions"] }
 toml = "1.1"
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 rmcp = { version = "3.1", features = ["server", "transport-io", "transport-streamable-http-server", "macros"] }
 schemars = "1.0"
 base64 = "0.22"

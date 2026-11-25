@@ -743,6 +743,7 @@ pub fn extract_odf_charts(
     // early-out: only pay for charts if any Object*/content.xml entries exist
     let names: Vec<String> = zip
         .file_names()
+        .filter_map(Result::ok)
         .filter(|n| n.starts_with("Object") && n.ends_with("/content.xml"))
         .map(|s| s.to_string())
         .collect();
