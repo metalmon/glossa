@@ -805,14 +805,18 @@ impl DocIndex {
             if key.len() == 1 {
                 // `Searcher::doc_freq` sums each segment's term-dictionary count
                 // (`InvertedIndexReader::doc_freq` returns `term_info.doc_freq` as written when
-                // that segment was built) WITHOUT consulting the segment's delete bitset. A chunk
-                // deleted or re-indexed stays counted here until ITS SEGMENT gets merged — and a
-                // merge is triggered by segment ACCUMULATION (tantivy's default `LogMergePolicy`
-                // merges a level once it holds `min_num_segments` segments; its delete-ratio
-                // trigger needs a ratio > 1.0, which no segment can ever reach, so deletions alone
-                // never trigger one). On a corpus that keeps being reindexed this clears out every
-                // few passes; on one that has gone idle after an edit/delete, nothing cleans it —
-                // it can persist indefinitely. So this number is an UPPER BOUND, not an exact
+                // that segment was built) WITHOUT consulting the segment's delete bitset. What
+                // follows from that is narrower than it first looks, and was measured rather than
+                // inferred (`gate::df::tests::deleting_a_segments_only_live_chunk_drops_its_terms_to_zero`):
+                // a segment that loses its LAST live chunk is pruned on the next ordinary commit
+                // (`SegmentManager::committed_segment_metas` calls `remove_empty_segments`, and
+                // `SegmentUpdater::save_metas` calls that on every commit), so its terms drop out
+                // at once. The stale case is the PARTIAL one — a chunk deleted or re-indexed out of
+                // a segment that still holds other live chunks leaves that segment in place, and
+                // its dictionary count stands until the segment is merged. Merges come from segment
+                // ACCUMULATION (`LogMergePolicy` merges a level at `min_num_segments`); the
+                // delete-ratio trigger needs a ratio > 1.0, which is unreachable, so deletions
+                // alone never cause one. So this number is an UPPER BOUND, not an exact
                 // count, and only ever errs by being too high, never too low — unrelated to, but
                 // the same safe direction as, the two-stemmed-forms choice above. The multi-term
                 // AND branch below runs an actual query instead of a dictionary lookup, so it does
