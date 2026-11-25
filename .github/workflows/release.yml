@@ -141,15 +141,18 @@ jobs:
         if: matrix.engine == 'cuda13' && runner.os == 'Windows'
         shell: pwsh
         run: |
-          $ver = "1.28.2"
-          # Pinned SHA-256 of onnxruntime-win-x64-gpu_cuda13-1.28.2.zip (GitHub release asset
-          # digest). Verified after download so a tampered/substituted archive fails the build
-          # instead of shipping an unverified GPU dll (supply-chain integrity).
-          $sha = "4B7A2D01A3CC96B12D06C8266AF2C8F42C96365C4A0100D45FD874C71B4A2E19"
+          $ver = "1.31.1"
+          # TEMPORARY (digest bootstrap): print the downloaded archive's SHA-256 and FAIL on
+          # purpose. The old pin named 1.28.2, a version whose release carries no such asset, so
+          # the download 404'd and this engine could not be built at all. Re-pinning needs the new
+          # archive's digest, and the only trustworthy way to learn it is to hash the bytes CI
+          # itself fetches. Failing deliberately keeps an UNVERIFIED GPU dll from ever reaching a
+          # built binary while that digest is being established.
           $url = "https://github.com/microsoft/onnxruntime/releases/download/v$ver/onnxruntime-win-x64-gpu_cuda13-$ver.zip"
           Invoke-WebRequest -Uri $url -OutFile ort-gpu.zip
           $got = (Get-FileHash ort-gpu.zip -Algorithm SHA256).Hash
-          if ($got -ne $sha) { Write-Error "ORT GPU zip SHA256 mismatch: expected $sha, got $got"; exit 1 }
+          Write-Host "DIGEST-BOOTSTRAP win-x64-gpu_cuda13-$ver = $got"
+          Write-Error "digest bootstrap only - pin the value above and restore verification"; exit 1
           Write-Host "ORT GPU zip SHA256 verified"
           Expand-Archive -Path ort-gpu.zip -DestinationPath ort-gpu -Force
           $dst = "target/${{ matrix.target }}/release"
@@ -168,12 +171,13 @@ jobs:
         if: matrix.engine == 'cuda13' && runner.os == 'Linux'
         run: |
           set -euo pipefail
-          ver="1.28.2"
-          sha="118ca8dbc4e4bb9b3b7fea137d796a89d957c9aa70e1dc3a5199a302cdd5bb32"
+          ver="1.31.1"
+          # TEMPORARY (digest bootstrap) - see the Windows step above for why.
           url="https://github.com/microsoft/onnxruntime/releases/download/v${ver}/onnxruntime-linux-x64-gpu_cuda13-${ver}.tgz"
           curl -fsSL -o ort-gpu.tgz "$url"
-          echo "${sha}  ort-gpu.tgz" | sha256sum -c -
-          echo "ORT GPU tgz SHA256 verified"
+          echo "DIGEST-BOOTSTRAP linux-x64-gpu_cuda13-${ver} = $(sha256sum ort-gpu.tgz | cut -d" " -f1)"
+          echo "digest bootstrap only - pin the value above and restore verification" >&2
+          exit 1
           mkdir -p ort-gpu && tar -xzf ort-gpu.tgz -C ort-gpu --strip-components=1
           dst="target/${{ matrix.target }}/release"
           mkdir -p "$dst"
