@@ -3573,3 +3573,120 @@ mod tests {
         assert_eq!(ranked, vec!["x.md", "b.md", "a.md"]);
     }
 }
+
+/// Docs-vs-CLI drift guard for the `kbx` binary — same shape as `kb`'s (src/main.rs,
+/// `kb_docs_cli_drift_tests`), duplicated rather than shared because `kbx`'s `Cli`/`Cmd` live in
+/// this binary and `kb`'s binary can't see them (and vice versa); only the command-word-agnostic
+/// extraction/matching (`glossa::doc_lint`) is shared. See that module's docs for what's in and
+/// out of scope.
+#[cfg(test)]
+mod kbx_docs_cli_drift_tests {
+    use super::*;
+    use clap::CommandFactory;
+    use glossa::doc_lint::{extract_claims, find_markdown_files, TokenKind};
+
+    /// Recursively collect every long-flag name (including hidden ones and aliases) and every
+    /// subcommand name (including aliases), at every depth, from a clap `Command` tree.
+    fn collect_command_tree(cmd: &clap::Command) -> (HashSet<String>, HashSet<String>) {
+        let mut flags = HashSet::new();
+        let mut subs = HashSet::new();
+        collect_into(cmd, &mut flags, &mut subs);
+        (flags, subs)
+    }
+
+    fn collect_into(cmd: &clap::Command, flags: &mut HashSet<String>, subs: &mut HashSet<String>) {
+        for arg in cmd.get_arguments() {
+            if let Some(long) = arg.get_long() {
+                flags.insert(long.to_string());
+            }
+            for alias in arg.get_all_aliases().into_iter().flatten() {
+                flags.insert(alias.to_string());
+            }
+        }
+        for sub in cmd.get_subcommands() {
+            subs.insert(sub.get_name().to_string());
+            for alias in sub.get_all_aliases() {
+                subs.insert(alias.to_string());
+            }
+            collect_into(sub, flags, subs);
+        }
+    }
+
+    /// Tokens the context rule (command word is `kbx`) cannot tell apart from a real claim. Kept
+    /// here, next to the assertion, rather than in a central allowlist file — see the identical
+    /// rationale on `kb_docs_cli_drift_tests::EXEMPT_FLAGS` in `src/main.rs`.
+    const EXEMPT_FLAGS: &[&str] = &[];
+    const EXEMPT_SUBCOMMANDS: &[&str] = &[];
+
+    #[test]
+    fn docs_do_not_claim_a_kbx_flag_or_subcommand_that_does_not_exist() {
+        let (flags, subs) = collect_command_tree(&Cli::command());
+        assert!(
+            flags.len() >= 15,
+            "suspiciously few flags extracted from Cli::command(): {}",
+            flags.len()
+        );
+        assert!(
+            subs.len() >= 10,
+            "suspiciously few subcommands extracted from Cli::command(): {}",
+            subs.len()
+        );
+
+        // kb-eval's manifest dir is `<workspace>/eval`; the docs/deploy/README this checks live
+        // at the workspace root.
+        let ws_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("eval/ has a parent (the workspace root)");
+        let roots = [
+            ws_root.join("docs"),
+            ws_root.join("deploy"),
+            ws_root.join("README.md"),
+        ];
+        let root_refs: Vec<&Path> = roots.iter().map(|p| p.as_path()).collect();
+        let files = find_markdown_files(&root_refs);
+        assert!(
+            files.len() >= 25,
+            "suspiciously few markdown files scanned ({}) — is the walk even running?",
+            files.len()
+        );
+        assert!(
+            !files.iter().any(|f| f
+                .to_string_lossy()
+                .replace('\\', "/")
+                .contains("docs/superpowers/")),
+            "docs/superpowers/ (gitignored, untracked audit reports) must stay excluded: {files:?}"
+        );
+
+        let mut total_claims = 0usize;
+        let mut violations = Vec::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", file.display()));
+            for claim in extract_claims(&text, "kbx") {
+                total_claims += 1;
+                let (known, exempt): (&HashSet<String>, &[&str]) = match claim.kind {
+                    TokenKind::Flag => (&flags, EXEMPT_FLAGS),
+                    TokenKind::Subcommand => (&subs, EXEMPT_SUBCOMMANDS),
+                };
+                if known.contains(&claim.text) || exempt.contains(&claim.text.as_str()) {
+                    continue;
+                }
+                let what = match claim.kind {
+                    TokenKind::Flag => "flag",
+                    TokenKind::Subcommand => "subcommand",
+                };
+                violations.push(format!(
+                    "{}:{}: `kbx` has no {what} `{}` — fix the doc, or add the {what} to Cli",
+                    file.display(),
+                    claim.line,
+                    claim.text
+                ));
+            }
+        }
+        assert!(
+            total_claims >= 10,
+            "suspiciously few kbx command claims extracted ({total_claims}) — is extract_claims matching anything?"
+        );
+        assert!(violations.is_empty(), "\n{}", violations.join("\n"));
+    }
+}

@@ -3249,6 +3249,126 @@ mod cli_root_wiring_tests {
     }
 }
 
+/// Docs-vs-CLI drift guard for the `kb` binary: every `--flag` and depth-0 subcommand a doc
+/// claims in a `kb ...` command context must be a real flag/subcommand `Cli` would accept. Two
+/// documentation passes this week corrected ~130 wrong claims that CI never caught, because CI
+/// lints Rust only — a green run on a docs-only change proves nothing about the docs. This test
+/// is the mechanical half of the fix: it does not check prose, defaults, or release-asset names
+/// (see `glossa::doc_lint` module docs and the module-level rationale there for what's deliberately
+/// out of scope, in particular why subcommands are checked only one level deep).
+#[cfg(test)]
+mod kb_docs_cli_drift_tests {
+    use super::*;
+    use clap::CommandFactory;
+    use glossa::doc_lint::{extract_claims, find_markdown_files, TokenKind};
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    /// Recursively collect every long-flag name (including hidden ones and aliases — hidden
+    /// doesn't mean nonexistent) and every subcommand name (including aliases), at every depth,
+    /// from a clap `Command` tree. This is the truth `kb`'s doc claims are checked against.
+    fn collect_command_tree(cmd: &clap::Command) -> (HashSet<String>, HashSet<String>) {
+        let mut flags = HashSet::new();
+        let mut subs = HashSet::new();
+        collect_into(cmd, &mut flags, &mut subs);
+        (flags, subs)
+    }
+
+    fn collect_into(cmd: &clap::Command, flags: &mut HashSet<String>, subs: &mut HashSet<String>) {
+        for arg in cmd.get_arguments() {
+            if let Some(long) = arg.get_long() {
+                flags.insert(long.to_string());
+            }
+            for alias in arg.get_all_aliases().into_iter().flatten() {
+                flags.insert(alias.to_string());
+            }
+        }
+        for sub in cmd.get_subcommands() {
+            subs.insert(sub.get_name().to_string());
+            for alias in sub.get_all_aliases() {
+                subs.insert(alias.to_string());
+            }
+            collect_into(sub, flags, subs);
+        }
+    }
+
+    /// Tokens the context rule (command word is `kb`) cannot tell apart from a real claim.
+    /// Exemptions live here, next to the assertion they soften, instead of in a central
+    /// allowlist file — so each one stays visible and the list stays honest and small. If this
+    /// ever needs more than a handful of entries, the context rule itself is too loose; tighten
+    /// that instead of growing this list.
+    const EXEMPT_FLAGS: &[&str] = &[];
+    const EXEMPT_SUBCOMMANDS: &[&str] = &[];
+
+    #[test]
+    fn docs_do_not_claim_a_kb_flag_or_subcommand_that_does_not_exist() {
+        let (flags, subs) = collect_command_tree(&Cli::command());
+        assert!(
+            flags.len() >= 15,
+            "suspiciously few flags extracted from Cli::command(): {}",
+            flags.len()
+        );
+        assert!(
+            subs.len() >= 10,
+            "suspiciously few subcommands extracted from Cli::command(): {}",
+            subs.len()
+        );
+
+        let ws_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let roots = [
+            ws_root.join("docs"),
+            ws_root.join("deploy"),
+            ws_root.join("README.md"),
+        ];
+        let root_refs: Vec<&Path> = roots.iter().map(|p| p.as_path()).collect();
+        let files = find_markdown_files(&root_refs);
+        assert!(
+            files.len() >= 25,
+            "suspiciously few markdown files scanned ({}) — is the walk even running?",
+            files.len()
+        );
+        assert!(
+            !files.iter().any(|f| f
+                .to_string_lossy()
+                .replace('\\', "/")
+                .contains("docs/superpowers/")),
+            "docs/superpowers/ (gitignored, untracked audit reports) must stay excluded: {files:?}"
+        );
+
+        let mut total_claims = 0usize;
+        let mut violations = Vec::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", file.display()));
+            for claim in extract_claims(&text, "kb") {
+                total_claims += 1;
+                let (known, exempt): (&HashSet<String>, &[&str]) = match claim.kind {
+                    TokenKind::Flag => (&flags, EXEMPT_FLAGS),
+                    TokenKind::Subcommand => (&subs, EXEMPT_SUBCOMMANDS),
+                };
+                if known.contains(&claim.text) || exempt.contains(&claim.text.as_str()) {
+                    continue;
+                }
+                let what = match claim.kind {
+                    TokenKind::Flag => "flag",
+                    TokenKind::Subcommand => "subcommand",
+                };
+                violations.push(format!(
+                    "{}:{}: `kb` has no {what} `{}` — fix the doc, or add the {what} to Cli",
+                    file.display(),
+                    claim.line,
+                    claim.text
+                ));
+            }
+        }
+        assert!(
+            total_claims >= 20,
+            "suspiciously few kb command claims extracted ({total_claims}) — is extract_claims matching anything?"
+        );
+        assert!(violations.is_empty(), "\n{}", violations.join("\n"));
+    }
+}
+
 /// Layer-wiring checks for the `/mcp` hardening layers (§3c): a minimal router built with the same
 /// `tower_http` layers `serve_streamable_http` applies to its `mcp` sub-router, driven with
 /// `tower::ServiceExt::oneshot` (no socket, no full server harness). `/health`/`/ready`/`/metrics`

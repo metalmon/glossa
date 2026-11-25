@@ -5,6 +5,7 @@ pub mod config_util;
 pub mod conn_cap;
 pub mod convert;
 pub mod default_ignore;
+pub mod doc_lint;
 pub mod extract;
 pub mod fs_detect;
 pub mod gate;
